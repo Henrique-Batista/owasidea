@@ -29,25 +29,47 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Scaffold a new application directory with wasm-app.toml and folders.
+    #[command(about = "Scaffold a new application directory with wasm-app.toml and folders.")]
     Init {
+        /// Target directory.
+        #[arg(help = "Target directory.")]
         dir: PathBuf,
     },
+    /// Check required and optional toolchain dependencies.
+    #[command(about = "Check required and optional toolchain dependencies.")]
     Doctor,
+    /// Manage plugins (create new plugins).
+    #[command(about = "Manage plugins (create new plugins).")]
     Plugin {
         #[command(subcommand)]
         cmd: PluginCmd,
     },
+    /// Build all plugins, regenerate manifests and copy .wasm artifacts.
+    #[command(about = "Build all plugins, regenerate manifests and copy .wasm artifacts.")]
     Build,
+    /// Run the app in development mode (host + UI dev server).
+    #[command(about = "Run the app in development mode (host + UI dev server).")]
     Dev,
+    /// Run the bundled app without file watching.
+    #[command(about = "Run the bundled app without file watching.")]
     Run,
+    /// Inspect a plugin manifest (WIT imports/exports, permissions).
+    #[command(about = "Inspect a plugin manifest (WIT imports/exports, permissions).")]
     Inspect {
+        /// Plugin name.
+        #[arg(help = "Plugin name.")]
         plugin: String,
     },
+    /// Build the desktop bundle (Tauri).
+    #[command(about = "Build the desktop bundle (Tauri).")]
     Bundle,
 }
 
 #[derive(Subcommand)]
 enum PluginCmd {
+    /// Create a new plugin scaffold.
+    #[command(about = "Create a new plugin scaffold.")]
     New {
         name: String,
         #[arg(long, default_value = "rust")]
@@ -145,7 +167,12 @@ fn cmd_doctor(json: bool) -> anyhow::Result<()> {
     } else {
         for (name, ok, opt) in &results {
             let tag = if *opt { " (optional)" } else { "" };
-            println!("{:20} {}{}", name, if *ok { "ok" } else { "MISSING" }, tag);
+            let status = if *ok {
+                console::style("ok").green().to_string()
+            } else {
+                console::style("MISSING").red().to_string()
+            };
+            println!("{:20} {}{}", name, status, tag);
         }
     }
     if results.iter().any(|(_, ok, opt)| !ok && !*opt) {
