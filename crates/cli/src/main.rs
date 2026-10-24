@@ -14,11 +14,7 @@ struct Cli {
         env = "OWASIDEA_MANIFESTS"
     )]
     manifest_dir: PathBuf,
-    #[arg(
-        long,
-        global = true,
-        env = "HOST_ADDR"
-    )]
+    #[arg(long, global = true, env = "HOST_ADDR")]
     http_addr: Option<String>,
     #[arg(long, global = true)]
     json: bool,
@@ -89,8 +85,20 @@ async fn main() -> anyhow::Result<()> {
             PluginCmd::New { name, lang, r#type } => cmd_plugin_new(name, lang, r#type, cli.json),
         },
         Commands::Build => cmd_build(&cli.config, &cli.manifest_dir),
-        Commands::Dev => cmd_dev(&cli.manifest_dir, cli.http_addr.as_deref().unwrap_or("127.0.0.1:0")).await,
-        Commands::Run => cmd_run(&cli.manifest_dir, cli.http_addr.as_deref().unwrap_or("127.0.0.1:0")).await,
+        Commands::Dev => {
+            cmd_dev(
+                &cli.manifest_dir,
+                cli.http_addr.as_deref().unwrap_or("127.0.0.1:0"),
+            )
+            .await
+        }
+        Commands::Run => {
+            cmd_run(
+                &cli.manifest_dir,
+                cli.http_addr.as_deref().unwrap_or("127.0.0.1:0"),
+            )
+            .await
+        }
         Commands::Inspect { plugin } => cmd_inspect(&cli.manifest_dir, &plugin, cli.json),
         Commands::Bundle => cmd_bundle(),
     }
