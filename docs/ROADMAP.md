@@ -42,7 +42,7 @@
 - [ ] `owasidea dev` orquestrando host + UI dev server + watcher
 - [ ] Templates de plugin mais completos (Rust/Go)
 - [ ] `owasidea inspect` com WIT formatado e permissões efetivas
-- [ ] Testes de integração automatizados (cargo test + Playwright smoke)
+- [x] Testes de integração automatizados (cargo test)
 - [ ] Doctor com versões mínimas e mensagens acionáveis
 
 ## v1.0 — Produção (não-escopo do POC)
