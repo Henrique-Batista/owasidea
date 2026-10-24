@@ -112,7 +112,12 @@ fn cmd_doctor(json: bool) -> anyhow::Result<()> {
         ("node", "node --version"),
         ("pnpm", "pnpm --version"),
     ];
-    let mut results = Vec::new();
+    let optional = [
+        ("clang (C/C++)", "clang --version"),
+        ("dotnet (C#)", "dotnet --version"),
+        ("jco (JS/TS)", "jco --version"),
+    ];
+    let mut results: Vec<(&str, bool, bool)> = Vec::new();
     for (name, cmd) in checks {
         let parts: Vec<&str> = cmd.split_whitespace().collect();
         let ok = Command::new(parts[0])
@@ -120,20 +125,30 @@ fn cmd_doctor(json: bool) -> anyhow::Result<()> {
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false);
-        results.push((name, ok));
+        results.push((name, ok, false));
+    }
+    for (name, cmd) in optional {
+        let parts: Vec<&str> = cmd.split_whitespace().collect();
+        let ok = Command::new(parts[0])
+            .args(&parts[1..])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        results.push((name, ok, true));
     }
     if json {
         let v: Vec<_> = results
             .iter()
-            .map(|(n, ok)| serde_json::json!({"tool": n, "ok": ok}))
+            .map(|(n, ok, opt)| serde_json::json!({"tool": n, "ok": ok, "optional": opt}))
             .collect();
         println!("{}", serde_json::to_string_pretty(&v)?);
     } else {
-        for (name, ok) in &results {
-            println!("{:20} {}", name, if *ok { "ok" } else { "MISSING" });
+        for (name, ok, opt) in &results {
+            let tag = if *opt { " (optional)" } else { "" };
+            println!("{:20} {}{}", name, if *ok { "ok" } else { "MISSING" }, tag);
         }
     }
-    if results.iter().any(|(_, ok)| !ok) {
+    if results.iter().any(|(_, ok, opt)| !ok && !*opt) {
         std::process::exit(1);
     }
     Ok(())
@@ -141,18 +156,81 @@ fn cmd_doctor(json: bool) -> anyhow::Result<()> {
 
 fn cmd_plugin_new(name: &str, lang: &str, kind: &str) -> anyhow::Result<()> {
     let dir = std::path::Path::new("plugins").join(name);
-    std::fs::create_dir_all(&dir)?;
-    println!(
-        "created plugin scaffold at {} (lang={}, type={})",
-        dir.display(),
-        lang,
-        kind
+    std::fs::create_dir_all(dir.join("wit"))?;
+    std::fs::create_dir_all(dir.join("src"))?;
+    let wit = format!(
+        "package poc:{name}@0.1.0;\n\nworld {name} {{\n    export greet: func(name: string) -> string;\n}}\n"
     );
-    // Minimal template note
+    std::fs::write(dir.join("wit").join(format!("{name}.wit")), wit)?;
+    match lang {
+        "rust" => {
+            std::fs::write(
+                dir.join("Cargo.toml"),
+                format!(
+                    "[workspace]\n\n[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n\n[dependencies]\nwit-bindgen = \"0.41\"\n\n[package.metadata.component]\npackage = \"poc:{name}\"\n[package.metadata.component.target]\npath = \"wit\"\nworld = \"{name}\"\n"
+                ),
+            )?;
+            std::fs::write(
+                dir.join("src").join("lib.rs"),
+                format!(
+                    "wit_bindgen::generate!({{ world: \"{name}\", path: \"wit\", generate_all }});\n\nstruct Component;\nimpl Guest for Component {{\n    fn greet(name: String) -> String {{\n        format!(\"Hello, {{}}! (from Rust)\", name)\n    }}\n}}\nexport!(Component);\n"
+                ),
+            )?;
+        }
+        "go" => {
+            std::fs::write(dir.join("go.mod"), format!("module poc/{name}\n\ngo 1.27.1\n"))?;
+            std::fs::write(
+                dir.join("main.go"),
+                "package main\n\nimport \"fmt\"\n\nfunc main() {}\n\nfunc Greet(name string) string {\n    return fmt.Sprintf(\"Hello, %s! (from Go)\", name)\n}\n",
+            )?;
+        }
+        "typescript" | "javascript" => {
+            std::fs::write(
+                dir.join("package.json"),
+                format!(
+                    "{{\n  \"name\": \"{name}\",\n  \"private\": true,\n  \"type\": \"module\",\n  \"scripts\": {{\n    \"build\": \"jco componentize src/index.ts --wit wit --world {name} -o {name}.component.wasm\"\n  }}\n}}\n"
+                ),
+            )?;
+            std::fs::write(
+                dir.join("src").join("index.ts"),
+                "export function greet(name: string): string {\n  return `Hello, ${name}! (from TypeScript)`;\n}\n",
+            )?;
+        }
+        "csharp" => {
+            std::fs::write(
+                dir.join(format!("{name}.csproj")),
+                "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <PropertyGroup>\n    <OutputType>Exe</OutputType>\n    <TargetFramework>net8.0</TargetFramework>\n  </PropertyGroup>\n</Project>\n",
+            )?;
+            std::fs::write(
+                dir.join("Program.cs"),
+                "using System;\nclass Program {\n    static void Main() { Console.WriteLine(\"Hello from C#\"); }\n}\n",
+            )?;
+        }
+        "c" | "cpp" | "c++" => {
+            let ext = if lang == "c" { "c" } else { "cpp" };
+            let compiler = if lang == "c" { "clang" } else { "clang++" };
+            std::fs::write(
+                dir.join("Makefile"),
+                format!(
+                    "WASI_SDK ?= /opt/wasi-sdk\\nCC = $(WASI_SDK)/bin/{compiler}\\n\\nall:\\n\\t$(CC) --target=wasm32-wasip1 -o {name}.wasm src/main.{ext}\\n\\twasm-tools component new {name}.wasm -o {name}.component.wasm\\n"
+                ),
+            )?;
+            std::fs::write(
+                dir.join("src").join(format!("main.{ext}")),
+                if lang == "c" {
+                    "#include <stdio.h>\nint main(void) {\n    printf(\"Hello from C!\\n\");\n    return 0;\n}\n".to_string()
+                } else {
+                    "#include <iostream>\nint main() {\n    std::cout << \"Hello from C++!\" << std::endl;\n    return 0;\n}\n".to_string()
+                },
+            )?;
+        }
+        _ => {}
+    }
     std::fs::write(
         dir.join("README.md"),
         format!("# {name}\n\nLanguage: {lang}\nType: {kind}\n"),
     )?;
+    println!("created plugin scaffold at {} (lang={}, type={})", dir.display(), lang, kind);
     Ok(())
 }
 

@@ -9,6 +9,25 @@
 5. Copy `.wasm` to `plugins/<name>/<name>.component.wasm`.
 6. Generate manifest: `python3 scripts/gen-manifest.py --component ... --name ... --language rust --type library ...`.
 
+## C/C++ (wasi-sdk + wasm-tools)
+
+1. Install wasi-sdk and ensure `clang` is on PATH.
+2. Compile to `wasm32-wasip1`: `clang --target=wasm32-wasip1 -o app.wasm src/main.c`.
+3. Wrap as component: `wasm-tools component new app.wasm -o app.component.wasm`.
+4. Generate manifest with `--language` (use `rust` placeholder or add `c`/`cpp`).
+
+## C# (componentize-dotnet)
+
+1. Install .NET SDK + wasi workload.
+2. Build component with `dotnet build`.
+3. Generate manifest.
+
+## TypeScript/JavaScript (jco)
+
+1. Install `@bytecodealliance/jco`.
+2. `jco componentize src/index.ts --wit wit --world name -o name.component.wasm`.
+3. Generate manifest.
+
 ## Go (componentize-go)
 
 1. `go.mod` with `tool github.com/bytecodealliance/componentize-go`.
