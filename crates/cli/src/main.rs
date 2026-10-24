@@ -178,10 +178,29 @@ async fn cmd_dev(manifest_dir: &Path, http_addr: &str) -> anyhow::Result<()> {
     println!("UI URL:    http://localhost:5173");
     println!("Host URL:  http://{}", http_addr);
     println!("Manifests: {}", manifest_dir.display());
-    // Run host
+
+    // Start Vite dev server if a UI project is present.
+    let mut children: Vec<std::process::Child> = Vec::new();
+    if std::path::Path::new("ui/package.json").exists() {
+        let child = std::process::Command::new("npm")
+            .args(["run", "dev"])
+            .current_dir("ui")
+            .spawn();
+        match child {
+            Ok(c) => children.push(c),
+            Err(e) => eprintln!("failed to start UI dev server: {e}"),
+        }
+    }
+
     let manifests = manifest_dir.to_path_buf();
     let addr = http_addr.to_string();
-    owasidea_host::run(manifests, addr).await
+    let res = owasidea_host::run(manifests, addr).await;
+
+    for mut c in children {
+        let _ = c.kill();
+        let _ = c.wait();
+    }
+    res
 }
 
 async fn cmd_run(manifest_dir: &Path, http_addr: &str) -> anyhow::Result<()> {
