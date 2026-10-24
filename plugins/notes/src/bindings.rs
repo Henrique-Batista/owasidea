@@ -221,6 +221,151 @@ pub mod poc {
     }
 }
 #[rustfmt::skip]
+#[allow(dead_code, clippy::all)]
+pub mod exports {
+    pub mod poc {
+        pub mod notes {
+            #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
+            pub mod api {
+                #[used]
+                #[doc(hidden)]
+                static __FORCE_SECTION_REF: fn() = super::super::super::super::__link_custom_section_describing_imports;
+                use super::super::super::super::_rt;
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn _export_greet_cabi<T: Guest>(
+                    arg0: *mut u8,
+                    arg1: usize,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg1;
+                    let bytes0 = _rt::Vec::from_raw_parts(arg0.cast(), len0, len0);
+                    let result1 = T::greet(_rt::string_lift(bytes0));
+                    let ptr2 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    let vec3 = (result1.into_bytes()).into_boxed_slice();
+                    let ptr3 = vec3.as_ptr().cast::<u8>();
+                    let len3 = vec3.len();
+                    ::core::mem::forget(vec3);
+                    *ptr2.add(::core::mem::size_of::<*const u8>()).cast::<usize>() = len3;
+                    *ptr2.add(0).cast::<*mut u8>() = ptr3.cast_mut();
+                    ptr2
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_greet<T: Guest>(arg0: *mut u8) {
+                    let l0 = *arg0.add(0).cast::<*mut u8>();
+                    let l1 = *arg0
+                        .add(::core::mem::size_of::<*const u8>())
+                        .cast::<usize>();
+                    _rt::cabi_dealloc(l0, l1, 1);
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn _export_complete_cabi<T: Guest>(
+                    arg0: *mut u8,
+                    arg1: usize,
+                ) -> *mut u8 {
+                    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                    let len0 = arg1;
+                    let bytes0 = _rt::Vec::from_raw_parts(arg0.cast(), len0, len0);
+                    let result1 = T::complete(_rt::string_lift(bytes0));
+                    let ptr2 = (&raw mut _RET_AREA.0).cast::<u8>();
+                    match result1 {
+                        Ok(e) => {
+                            *ptr2.add(0).cast::<u8>() = (0i32) as u8;
+                            let vec3 = (e.into_bytes()).into_boxed_slice();
+                            let ptr3 = vec3.as_ptr().cast::<u8>();
+                            let len3 = vec3.len();
+                            ::core::mem::forget(vec3);
+                            *ptr2
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len3;
+                            *ptr2
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr3.cast_mut();
+                        }
+                        Err(e) => {
+                            *ptr2.add(0).cast::<u8>() = (1i32) as u8;
+                            let vec4 = (e.into_bytes()).into_boxed_slice();
+                            let ptr4 = vec4.as_ptr().cast::<u8>();
+                            let len4 = vec4.len();
+                            ::core::mem::forget(vec4);
+                            *ptr2
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len4;
+                            *ptr2
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr4.cast_mut();
+                        }
+                    };
+                    ptr2
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_complete<T: Guest>(arg0: *mut u8) {
+                    let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                    match l0 {
+                        0 => {
+                            let l1 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l2 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l1, l2, 1);
+                        }
+                        _ => {
+                            let l3 = *arg0
+                                .add(::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>();
+                            let l4 = *arg0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>();
+                            _rt::cabi_dealloc(l3, l4, 1);
+                        }
+                    }
+                }
+                pub trait Guest {
+                    fn greet(name: _rt::String) -> _rt::String;
+                    fn complete(prompt: _rt::String) -> Result<_rt::String, _rt::String>;
+                }
+                #[doc(hidden)]
+                macro_rules! __export_poc_notes_api_0_1_0_cabi {
+                    ($ty:ident with_types_in $($path_to_types:tt)*) => {
+                        const _ : () = { #[unsafe (export_name =
+                        "poc:notes/api@0.1.0#greet")] unsafe extern "C" fn
+                        export_greet(arg0 : * mut u8, arg1 : usize,) -> * mut u8 { unsafe
+                        { $($path_to_types)*:: _export_greet_cabi::<$ty > (arg0, arg1) }
+                        } #[unsafe (export_name = "cabi_post_poc:notes/api@0.1.0#greet")]
+                        unsafe extern "C" fn _post_return_greet(arg0 : * mut u8,) {
+                        unsafe { $($path_to_types)*:: __post_return_greet::<$ty > (arg0)
+                        } } #[unsafe (export_name = "poc:notes/api@0.1.0#complete")]
+                        unsafe extern "C" fn export_complete(arg0 : * mut u8, arg1 :
+                        usize,) -> * mut u8 { unsafe { $($path_to_types)*::
+                        _export_complete_cabi::<$ty > (arg0, arg1) } } #[unsafe
+                        (export_name = "cabi_post_poc:notes/api@0.1.0#complete")] unsafe
+                        extern "C" fn _post_return_complete(arg0 : * mut u8,) { unsafe {
+                        $($path_to_types)*:: __post_return_complete::<$ty > (arg0) } } };
+                    };
+                }
+                #[doc(hidden)]
+                pub(crate) use __export_poc_notes_api_0_1_0_cabi;
+                #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
+                #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
+                struct _RetArea(
+                    [::core::mem::MaybeUninit<
+                        u8,
+                    >; 3 * ::core::mem::size_of::<*const u8>()],
+                );
+                static mut _RET_AREA: _RetArea = _RetArea(
+                    [::core::mem::MaybeUninit::uninit(); 3
+                        * ::core::mem::size_of::<*const u8>()],
+                );
+            }
+        }
+    }
+}
+#[rustfmt::skip]
 mod _rt {
     #![allow(dead_code, clippy::all)]
     pub use alloc_crate::string::String;
@@ -277,7 +422,9 @@ macro_rules! __export_notes_impl {
     };
     ($ty:ident with_types_in $($path_to_types_root:tt)*) => {
         $($path_to_types_root)*:: __export_world_notes_cabi!($ty with_types_in
-        $($path_to_types_root)*);
+        $($path_to_types_root)*); $($path_to_types_root)*::
+        exports::poc::notes::api::__export_poc_notes_api_0_1_0_cabi!($ty with_types_in
+        $($path_to_types_root)*:: exports::poc::notes::api);
     };
 }
 #[doc(inline)]
@@ -288,15 +435,17 @@ pub(crate) use __export_notes_impl as export;
 )]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 334] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xd2\x01\x01A\x02\x01\
-A\x09\x01B\x05\x01ks\x01@\x01\x03keys\0\0\x04\0\x03get\x01\x01\x01@\x02\x03keys\x05\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 414] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xa2\x02\x01A\x02\x01\
+A\x0b\x01B\x05\x01ks\x01@\x01\x03keys\0\0\x04\0\x03get\x01\x01\x01@\x02\x03keys\x05\
 values\x01\0\x04\0\x03set\x01\x02\x03\0\x16poc:host/host-kv@0.1.0\x05\0\x01B\x02\
 \x01@\x01\x03msgs\x01\0\x04\0\x03log\x01\0\x03\0\x17poc:host/host-log@0.1.0\x05\x01\
 \x01@\x01\x04names\0s\x04\0\x05greet\x01\x02\x01j\x01s\x01s\x01@\x01\x06prompts\0\
-\x03\x04\0\x08complete\x01\x04\x04\0\x15poc:notes/notes@0.1.0\x04\0\x0b\x0b\x01\0\
-\x05notes\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.\
-227.1\x10wit-bindgen-rust\x060.41.0";
+\x03\x04\0\x08complete\x01\x04\x01B\x05\x01@\x01\x04names\0s\x04\0\x05greet\x01\0\
+\x01j\x01s\x01s\x01@\x01\x06prompts\0\x01\x04\0\x08complete\x01\x02\x04\0\x13poc\
+:notes/api@0.1.0\x05\x05\x04\0\x15poc:notes/notes@0.1.0\x04\0\x0b\x0b\x01\0\x05n\
+otes\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.227.1\
+\x10wit-bindgen-rust\x060.41.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {

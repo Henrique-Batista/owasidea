@@ -6,7 +6,8 @@
 - `crates/cli` — `owasidea` binary (clap), reuses host.
 - `crates/desktop` — Tauri 2 shell (planned, embeds host).
 - `ui` — frontend (vanilla TS + Vite), talks to host HTTP API only.
-- `plugins/*` — example plugins (Rust/Go WASI components).
+- `plugins/*` — example plugins (Rust/Go WASI components), including `composed`
+  (build-time composition via `wasm-tools compose`).
 - `manifests/*.manifest.json` — generated, never hand-edit.
 - `scripts/gen-manifest.py` — derives manifest from `wasm-tools component wit --json`.
 

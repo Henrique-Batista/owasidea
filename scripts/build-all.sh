@@ -36,5 +36,17 @@ python3 scripts/gen-manifest.py \
   --http-outbound example.com --http-outbound 127.0.0.1 \
   --description "Go executable plugin (wasi:http inbound + outbound)"
 
+echo "==> Building composed example (notes-client + notes)"
+if [ -d plugins/notes-client ]; then
+  pushd plugins/notes-client >/dev/null
+  cargo component build --release
+  TARGET_DIR="$(cargo metadata --format-version 1 --no-deps | python3 -c 'import sys,json;print(json.load(sys.stdin)["target_directory"])')"
+  popd >/dev/null
+  cp "$TARGET_DIR/wasm32-wasip1/release/notes_client.wasm" \
+     plugins/notes-client/notes-client.component.wasm
+  ./scripts/compose.sh
+fi
+
 echo "==> Done"
-ls -lh plugins/notes/notes.component.wasm plugins/chat-go/chat-go.component.wasm
+ls -lh plugins/notes/notes.component.wasm plugins/chat-go/chat-go.component.wasm \
+      plugins/composed/composed.component.wasm 2>/dev/null || true

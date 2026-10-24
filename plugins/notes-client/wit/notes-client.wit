@@ -1,0 +1,7 @@
+package poc:notes-client@0.1.0;
+
+world notes-client {
+    import poc:notes/api@0.1.0;
+
+    export run: func(name: string) -> string;
+}

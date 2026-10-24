@@ -23,7 +23,7 @@
 ## v0.2 — Genericidade e composição
 
 - [x] Dispatcher genérico baseado em WIT (endpoint `/call`)
-- [ ] Composição build-time via `wasm-tools compose` (`imports.plugins`)
+- [x] Composição build-time via `wasm-tools compose` (exemplo `composed`)
 - [ ] Tipos de plugin: `service` formalizado (lifecycle start/stop/status genérico)
 - [ ] Hot-reload explícito para plugins stateful (restart) com status visível
 - [ ] Suporte a C# e JS/TS plugins
