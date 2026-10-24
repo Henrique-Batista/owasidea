@@ -5,6 +5,7 @@ Base URL: `http://127.0.0.1:8787` (configurable). CORS permissive. All JSON.
 ## Health
 
 - `GET /health` → `"ok"`
+- `GET /overview` → plugin counts and runtime kinds.
 
 ## Plugins
 

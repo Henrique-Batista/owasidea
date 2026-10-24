@@ -528,6 +528,44 @@ async fn health() -> &'static str {
     "ok"
 }
 
+#[derive(Serialize)]
+struct OverviewRes {
+    host: &'static str,
+    plugins: usize,
+    libraries: usize,
+    executables: usize,
+    services: usize,
+    runtimes: Vec<String>,
+}
+
+async fn overview(State(state): State<AppState>) -> Json<OverviewRes> {
+    let mut libraries = 0;
+    let mut executables = 0;
+    let mut services = 0;
+    let mut runtimes = std::collections::BTreeSet::new();
+    for p in state.plugins.values() {
+        match p.manifest.kind.as_str() {
+            "executable" => executables += 1,
+            "hybrid" => services += 1,
+            _ => libraries += 1,
+        }
+        runtimes.insert(
+            p.manifest
+                .runtime
+                .clone()
+                .unwrap_or_else(|| "wasi-component".to_string()),
+        );
+    }
+    Json(OverviewRes {
+        host: "ok",
+        plugins: state.plugins.len(),
+        libraries,
+        executables,
+        services,
+        runtimes: runtimes.into_iter().collect(),
+    })
+}
+
 async fn list_plugins(State(state): State<AppState>) -> Json<Vec<PluginInfo>> {
     let mut out = Vec::new();
     for (name, p) in state.plugins.iter() {
@@ -1622,6 +1660,7 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
 
     let app = Router::new()
         .route("/health", get(health))
+        .route("/overview", get(overview))
         .route("/plugins", get(list_plugins))
         .route("/plugin/{name}/manifest", get(plugin_manifest))
         .route("/plugin/{name}/logs", get(plugin_logs))
