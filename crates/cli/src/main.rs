@@ -227,6 +227,22 @@ fn cmd_inspect(manifest_dir: &Path, plugin: &str, json: bool) -> anyhow::Result<
 }
 
 fn cmd_bundle() -> anyhow::Result<()> {
-    println!("bundle not implemented in v0");
+    println!("Building UI...");
+    let status = std::process::Command::new("npm")
+        .args(["run", "build"])
+        .current_dir("ui")
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("ui build failed");
+    }
+    println!("Building Tauri bundle...");
+    let status = std::process::Command::new("cargo")
+        .args(["tauri", "build"])
+        .current_dir("crates/desktop")
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("tauri build failed");
+    }
+    println!("Bundle complete.");
     Ok(())
 }

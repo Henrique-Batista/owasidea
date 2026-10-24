@@ -30,10 +30,10 @@
 
 ## v0.3 — Desktop e UX
 
-- [ ] Shell Tauri 2 embutindo o host
-- [ ] UI carregando `ui/dist` e comunicação via API local
+- [x] Shell Tauri 2 embutindo o host (scaffold)
+- [x] UI carregando `ui/dist` e comunicação via API local (configurado)
 - [ ] Telas: overview, plugins, detalhe, serviços, dev mode
-- [ ] `owasidea bundle` produzindo app Tauri
+- [x] `owasidea bundle` produzindo app Tauri
 - [ ] Watch de arquivos + hot reload integrado
 
 ## v0.4 — Ferramentas e DX

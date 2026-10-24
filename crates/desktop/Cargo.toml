@@ -1,0 +1,19 @@
+[package]
+name = "owasidea-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Tauri shell for Owasidea"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+owasidea-host = { path = "../host" }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
