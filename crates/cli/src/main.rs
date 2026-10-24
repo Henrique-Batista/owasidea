@@ -178,7 +178,10 @@ fn cmd_plugin_new(name: &str, lang: &str, kind: &str) -> anyhow::Result<()> {
             )?;
         }
         "go" => {
-            std::fs::write(dir.join("go.mod"), format!("module poc/{name}\n\ngo 1.27.1\n"))?;
+            std::fs::write(
+                dir.join("go.mod"),
+                format!("module poc/{name}\n\ngo 1.27.1\n"),
+            )?;
             std::fs::write(
                 dir.join("main.go"),
                 "package main\n\nimport \"fmt\"\n\nfunc main() {}\n\nfunc Greet(name string) string {\n    return fmt.Sprintf(\"Hello, %s! (from Go)\", name)\n}\n",
@@ -230,7 +233,12 @@ fn cmd_plugin_new(name: &str, lang: &str, kind: &str) -> anyhow::Result<()> {
         dir.join("README.md"),
         format!("# {name}\n\nLanguage: {lang}\nType: {kind}\n"),
     )?;
-    println!("created plugin scaffold at {} (lang={}, type={})", dir.display(), lang, kind);
+    println!(
+        "created plugin scaffold at {} (lang={}, type={})",
+        dir.display(),
+        lang,
+        kind
+    );
     Ok(())
 }
 
