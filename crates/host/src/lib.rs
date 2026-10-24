@@ -1868,8 +1868,10 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
         ))
         .with_state(state);
 
-    tracing::info!("listening on http://{addr}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
+    let local_addr = listener.local_addr()?;
+    tracing::info!("listening on http://{}", local_addr);
+    println!("host listening on http://{}", local_addr);
     axum::serve(listener, app).await?;
     Ok(())
 }
