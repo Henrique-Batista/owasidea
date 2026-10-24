@@ -171,6 +171,51 @@ struct HostState {
     wasi: WasiCtx,
     table: ResourceTable,
     http: WasiHttpCtx,
+    http_hooks: AllowlistHooks,
+}
+
+#[derive(Clone)]
+struct AllowlistHooks {
+    allowed: Vec<String>,
+}
+
+impl wasmtime_wasi_http::WasiHttpHooks for AllowlistHooks {
+    fn send_request(
+        &mut self,
+        request: http::Request<wasmtime_wasi_http::WasiBody>,
+        options: Option<wasmtime_wasi_http::RequestOptions>,
+        fut: Box<
+            dyn std::future::Future<
+                    Output = wasmtime_wasi_http::Result<(), wasmtime_wasi_http::Error>,
+                > + Send,
+        >,
+    ) -> Box<
+        dyn std::future::Future<
+                Output = wasmtime_wasi_http::Result<(
+                    http::Response<wasmtime_wasi_http::WasiBody>,
+                    Box<
+                        dyn std::future::Future<
+                                Output = wasmtime_wasi_http::Result<(), wasmtime_wasi_http::Error>,
+                            > + Send,
+                    >,
+                )>,
+            > + Send,
+    > {
+        let host = request.uri().host().unwrap_or("").to_string();
+        let allowed = self.allowed.iter().any(|a| a == "*" || a == &host);
+        if !allowed {
+            _ = fut;
+            return Box::new(async move { Err(wasmtime_wasi_http::Error::HttpRequestDenied) });
+        }
+        Box::new(async move {
+            use http_body_util::BodyExt;
+            let (res, io) = wasmtime_wasi_http::default_send_request(request, options).await?;
+            Ok((
+                res.map(BodyExt::boxed_unsync),
+                Box::new(io) as Box<dyn std::future::Future<Output = _> + Send>,
+            ))
+        })
+    }
 }
 
 impl WasiView for HostState {
@@ -187,7 +232,7 @@ impl WasiHttpView for HostState {
         WasiHttpCtxView {
             ctx: &mut self.http,
             table: &mut self.table,
-            hooks: wasmtime_wasi_http::default_hooks(),
+            hooks: &mut self.http_hooks,
         }
     }
 }
@@ -330,6 +375,9 @@ async fn instantiate(
             wasi: builder.build(),
             table: ResourceTable::new(),
             http: WasiHttpCtx::new(),
+            http_hooks: AllowlistHooks {
+                allowed: plugin.manifest.permissions.http.outbound.clone(),
+            },
         },
     );
     // Wire manifest fuel limit (if declared).

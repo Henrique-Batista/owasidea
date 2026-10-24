@@ -1509,6 +1509,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "http",
+ "http-body-util",
  "reqwest",
  "rusqlite",
  "serde",
