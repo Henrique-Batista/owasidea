@@ -52,8 +52,8 @@
 - [ ] Registry remoto / marketplace
 - [ ] Isolamento WASI completo (não apenas host interfaces)
 - [ ] Multi-instância concorrente com locks por plugin
-- [ ] Observabilidade (métricas, tracing distribuído)
-- [ ] Documentação de segurança e threat model
+- [x] Observabilidade básica (métricas /metrics + tracing)
+- [x] Documentação de segurança e threat model (docs/SECURITY.md)
 
 ## Decisões em aberto
 

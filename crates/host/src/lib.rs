@@ -3,6 +3,7 @@ use axum::{
     body::Body,
     extract::{Path as AxumPath, State},
     http::{HeaderMap, Method, StatusCode, Uri},
+    middleware,
     response::{
         sse::{Event, KeepAlive, Sse},
         Response,
@@ -168,6 +169,8 @@ struct AppState {
     engine: Engine,
     plugins: Arc<HashMap<String, PluginRuntime>>,
     tailcat_session: Arc<Mutex<Option<TailcatSession>>>,
+    requests: Arc<std::sync::atomic::AtomicU64>,
+    errors: Arc<std::sync::atomic::AtomicU64>,
 }
 
 struct HostState {
@@ -564,6 +567,14 @@ struct OverviewRes {
     executables: usize,
     services: usize,
     runtimes: Vec<String>,
+}
+
+async fn metrics(State(state): State<AppState>) -> String {
+    format!(
+        "# TYPE owasidea_requests_total counter\nowasidea_requests_total {}\n# TYPE owasidea_errors_total counter\nowasidea_errors_total {}\n",
+        state.requests.load(std::sync::atomic::Ordering::Relaxed),
+        state.errors.load(std::sync::atomic::Ordering::Relaxed)
+    )
 }
 
 async fn overview(State(state): State<AppState>) -> Json<OverviewRes> {
@@ -1799,11 +1810,31 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
         engine,
         plugins: Arc::new(plugins),
         tailcat_session: Arc::new(Mutex::new(None)),
+        requests: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        errors: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
+
+    async fn count_requests(
+        State(state): State<AppState>,
+        req: axum::http::Request<Body>,
+        next: middleware::Next,
+    ) -> Response {
+        state
+            .requests
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let resp = next.run(req).await;
+        if resp.status().is_client_error() || resp.status().is_server_error() {
+            state
+                .errors
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        resp
+    }
 
     let app = Router::new()
         .route("/health", get(health))
         .route("/overview", get(overview))
+        .route("/metrics", get(metrics))
         .route("/plugins", get(list_plugins))
         .route("/plugin/{name}/manifest", get(plugin_manifest))
         .route("/plugin/{name}/logs", get(plugin_logs))
@@ -1831,6 +1862,10 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
         .route("/app/{name}/", axum::routing::any(proxy_app))
         .route("/app/{name}", axum::routing::any(proxy_app))
         .layer(tower_http::cors::CorsLayer::permissive())
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            count_requests,
+        ))
         .with_state(state);
 
     tracing::info!("listening on http://{addr}");
