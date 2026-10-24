@@ -449,6 +449,18 @@ struct CallReq {
     args: Vec<serde_json::Value>,
 }
 
+#[derive(Serialize)]
+struct ServiceStatusRes {
+    running: bool,
+    address: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ServiceStartReq {
+    #[serde(default)]
+    region_json: String,
+}
+
 #[derive(Deserialize)]
 struct BindReq {
     port: u16,
@@ -474,12 +486,6 @@ struct StartReq {
 struct SendTextReq {
     addr: String,
     text: String,
-}
-
-#[derive(Serialize)]
-struct ServiceStatusRes {
-    running: bool,
-    address: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -795,6 +801,121 @@ async fn call_export(
     };
     match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), work).await {
         Ok(r) => r,
+        Err(_) => Err((StatusCode::GATEWAY_TIMEOUT, "request timed out".to_string())),
+    }
+}
+
+async fn service_start_generic(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+    Json(req): Json<ServiceStartReq>,
+) -> Result<Json<OutputRes>, (StatusCode, String)> {
+    let p = state
+        .plugins
+        .get(&name)
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
+    let region_json = if req.region_json.trim().is_empty() {
+        default_region_json()
+    } else {
+        req.region_json
+    };
+    let timeout_ms = p.manifest.permissions.resources.timeout_ms.unwrap_or(30000);
+    let work = async {
+        let (mut store, instance) = instantiate(&state.engine, p).await.map_err(internal)?;
+        for candidate in ["start-service", "start-server"] {
+            if let Some(func) = instance.get_func(&mut store, candidate) {
+                let ty = func.ty(&store);
+                let mut params = vec![];
+                let mut results = ty.results().map(|ty| default_val(&ty)).collect::<Vec<_>>();
+                if ty.params().count() == 1 {
+                    params.push(Val::String(region_json.clone()));
+                }
+                func.call_async(&mut store, &params, &mut results)
+                    .await
+                    .map_err(internal)?;
+                let out = results
+                    .first()
+                    .map(val_to_json)
+                    .and_then(|v| v.as_str().map(|s| s.to_string()))
+                    .unwrap_or_else(|| "started".to_string());
+                return Ok::<_, (StatusCode, String)>(Json(OutputRes { output: out }));
+            }
+        }
+        Err((StatusCode::NOT_FOUND, "no start-service export".to_string()))
+    };
+    match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), work).await {
+        Ok(r) => r,
+        Err(_) => Err((StatusCode::GATEWAY_TIMEOUT, "request timed out".to_string())),
+    }
+}
+
+async fn service_stop_generic(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let p = state
+        .plugins
+        .get(&name)
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
+    let timeout_ms = p.manifest.permissions.resources.timeout_ms.unwrap_or(30000);
+    let work = async {
+        let (mut store, instance) = instantiate(&state.engine, p).await.map_err(internal)?;
+        for candidate in ["stop-service", "stop-server"] {
+            if let Some(func) = instance.get_func(&mut store, candidate) {
+                let ty = func.ty(&store);
+                let mut results = ty.results().map(|ty| default_val(&ty)).collect::<Vec<_>>();
+                func.call_async(&mut store, &[], &mut results)
+                    .await
+                    .map_err(internal)?;
+                return Ok::<_, (StatusCode, String)>(serde_json::json!({"stopped": true}));
+            }
+        }
+        Ok(serde_json::json!({"stopped": false, "reason": "no stop export"}))
+    };
+    match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), work).await {
+        Ok(r) => Ok(Json(r?)),
+        Err(_) => Err((StatusCode::GATEWAY_TIMEOUT, "request timed out".to_string())),
+    }
+}
+
+async fn service_status_generic(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> Result<Json<ServiceStatusRes>, (StatusCode, String)> {
+    let p = state
+        .plugins
+        .get(&name)
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
+    let timeout_ms = p.manifest.permissions.resources.timeout_ms.unwrap_or(30000);
+    let work = async {
+        let (mut store, instance) = instantiate(&state.engine, p).await.map_err(internal)?;
+        for candidate in ["service-status", "server-status"] {
+            if let Some(func) = instance.get_func(&mut store, candidate) {
+                let ty = func.ty(&store);
+                let mut results = ty.results().map(|ty| default_val(&ty)).collect::<Vec<_>>();
+                func.call_async(&mut store, &[], &mut results)
+                    .await
+                    .map_err(internal)?;
+                let running = results
+                    .first()
+                    .and_then(|v| match v {
+                        Val::Bool(b) => Some(*b),
+                        _ => None,
+                    })
+                    .unwrap_or(false);
+                return Ok::<_, (StatusCode, String)>(ServiceStatusRes {
+                    running,
+                    address: None,
+                });
+            }
+        }
+        Ok(ServiceStatusRes {
+            running: false,
+            address: None,
+        })
+    };
+    match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), work).await {
+        Ok(r) => Ok(Json(r?)),
         Err(_) => Err((StatusCode::GATEWAY_TIMEOUT, "request timed out".to_string())),
     }
 }
@@ -1669,6 +1790,9 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
         .route("/plugin/{name}/greet", post(greet))
         .route("/plugin/{name}/complete", post(complete))
         .route("/plugin/{name}/call", post(call_export))
+        .route("/plugin/{name}/service/start", post(service_start_generic))
+        .route("/plugin/{name}/service/stop", post(service_stop_generic))
+        .route("/plugin/{name}/service/status", get(service_status_generic))
         .route("/plugin/{name}/bind-udp", post(bind_udp))
         .route("/plugin/{name}/parse-address", post(parse_address))
         .route("/plugin/{name}/dial-tcp", post(dial_tcp))

@@ -19,6 +19,9 @@ Base URL: `http://127.0.0.1:8787` (configurable). CORS permissive. All JSON.
 
 - `GET /plugin/{name}/logs` → `{ "logs": ["..."] }`.
 - `GET /plugin/{name}/logs/stream` → SSE stream of log lines.
+- `POST /plugin/{name}/service/start` → generic service start.
+- `POST /plugin/{name}/service/stop` → generic service stop.
+- `GET /plugin/{name}/service/status` → generic service status.
 
 - `POST /plugin/{name}/reload` → re-reads manifest from disk and re-instantiates
   the component; returns `{ "reloaded": "name" }` or 4xx/5xx on validation failure.
