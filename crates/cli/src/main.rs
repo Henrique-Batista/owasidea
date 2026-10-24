@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
@@ -32,9 +33,9 @@ enum Commands {
     /// Scaffold a new application directory with wasm-app.toml and folders.
     #[command(about = "Scaffold a new application directory with wasm-app.toml and folders.")]
     Init {
-        /// Target directory.
+        /// Target directory (optional; prompted interactively).
         #[arg(help = "Target directory.")]
-        dir: PathBuf,
+        dir: Option<PathBuf>,
     },
     /// Check required and optional toolchain dependencies.
     #[command(about = "Check required and optional toolchain dependencies.")]
@@ -71,11 +72,11 @@ enum PluginCmd {
     /// Create a new plugin scaffold.
     #[command(about = "Create a new plugin scaffold.")]
     New {
-        name: String,
-        #[arg(long, default_value = "rust")]
-        lang: String,
-        #[arg(long, default_value = "library")]
-        r#type: String,
+        name: Option<String>,
+        #[arg(long)]
+        lang: Option<String>,
+        #[arg(long, name = "type")]
+        r#type: Option<String>,
     },
 }
 
@@ -83,10 +84,10 @@ enum PluginCmd {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Commands::Init { dir } => cmd_init(&dir),
+        Commands::Init { dir } => cmd_init(dir, cli.json),
         Commands::Doctor => cmd_doctor(cli.json),
         Commands::Plugin { cmd } => match cmd {
-            PluginCmd::New { name, lang, r#type } => cmd_plugin_new(&name, &lang, &r#type),
+            PluginCmd::New { name, lang, r#type } => cmd_plugin_new(name, lang, r#type, cli.json),
         },
         Commands::Build => cmd_build(&cli.config, &cli.manifest_dir),
         Commands::Dev => cmd_dev(&cli.manifest_dir, &cli.http_addr).await,
@@ -96,30 +97,61 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-fn cmd_init(dir: &Path) -> anyhow::Result<()> {
-    std::fs::create_dir_all(dir)?;
-    let cfg = dir.join("wasm-app.toml");
+fn cmd_init(dir: Option<PathBuf>, json: bool) -> anyhow::Result<()> {
+    let interactive = !json && std::io::stdin().is_terminal();
+    let target_dir = match dir {
+        Some(d) => d,
+        None => {
+            if interactive {
+                let input: String = dialoguer::Input::new()
+                    .with_prompt("Project directory")
+                    .default(".".to_string())
+                    .interact_text()?;
+                PathBuf::from(input)
+            } else {
+                PathBuf::from(".")
+            }
+        }
+    };
+    std::fs::create_dir_all(&target_dir)?;
+    let cfg = target_dir.join("wasm-app.toml");
     if !cfg.exists() {
-        std::fs::write(
-            &cfg,
+        let app_name = if interactive {
+            dialoguer::Input::new()
+                .with_prompt("App name")
+                .default("my-app".to_string())
+                .interact_text()?
+        } else {
+            "my-app".to_string()
+        };
+        let addr = if interactive {
+            dialoguer::Input::new()
+                .with_prompt("Host address")
+                .default("127.0.0.1:8787".to_string())
+                .interact_text()?
+        } else {
+            "127.0.0.1:8787".to_string()
+        };
+        let content = format!(
             r#"[app]
-name = "my-app"
+name = "{app_name}"
 version = "0.1.0"
-identifier = "dev.example.myapp"
+identifier = "dev.example.{app_name}"
 
 [host]
-addr = "127.0.0.1:8787"
+addr = "{addr}"
 
 [dev]
 watch = true
 hot_reload = true
-"#,
-        )?;
+"#
+        );
+        std::fs::write(&cfg, content)?;
     }
     for sub in ["plugins", "manifests", "ui", "docs"] {
-        std::fs::create_dir_all(dir.join(sub))?;
+        std::fs::create_dir_all(target_dir.join(sub))?;
     }
-    println!("scaffolded {}", dir.display());
+    println!("scaffolded {}", target_dir.display());
     Ok(())
 }
 
@@ -181,15 +213,66 @@ fn cmd_doctor(json: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_plugin_new(name: &str, lang: &str, kind: &str) -> anyhow::Result<()> {
-    let dir = std::path::Path::new("plugins").join(name);
+fn cmd_plugin_new(
+    name: Option<String>,
+    lang: Option<String>,
+    kind: Option<String>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let interactive = !json && std::io::stdin().is_terminal();
+    let name = match name {
+        Some(n) => n,
+        None => {
+            if interactive {
+                dialoguer::Input::new()
+                    .with_prompt("Plugin name")
+                    .interact_text()?
+            } else {
+                anyhow::bail!("plugin name required in non-interactive mode");
+            }
+        }
+    };
+    let lang = match lang {
+        Some(l) => l,
+        None => {
+            if interactive {
+                let items = ["rust", "go", "typescript", "csharp", "c", "cpp"];
+                let sel = dialoguer::Select::new()
+                    .with_prompt("Language")
+                    .items(&items)
+                    .default(0)
+                    .interact()?;
+                items[sel].to_string()
+            } else {
+                "rust".to_string()
+            }
+        }
+    };
+    let kind = match kind {
+        Some(k) => k,
+        None => {
+            if interactive {
+                let items = ["library", "executable"];
+                let sel = dialoguer::Select::new()
+                    .with_prompt("Type")
+                    .items(&items)
+                    .default(0)
+                    .interact()?;
+                items[sel].to_string()
+            } else {
+                "library".to_string()
+            }
+        }
+    };
+
+    let dir = std::path::Path::new("plugins").join(&name);
     std::fs::create_dir_all(dir.join("wit"))?;
     std::fs::create_dir_all(dir.join("src"))?;
     let wit = format!(
         "package poc:{name}@0.1.0;\n\nworld {name} {{\n    export greet: func(name: string) -> string;\n}}\n"
     );
     std::fs::write(dir.join("wit").join(format!("{name}.wit")), wit)?;
-    match lang {
+    match lang.as_str() {
         "rust" => {
             std::fs::write(
                 dir.join("Cargo.toml"),
@@ -205,10 +288,7 @@ fn cmd_plugin_new(name: &str, lang: &str, kind: &str) -> anyhow::Result<()> {
             )?;
         }
         "go" => {
-            std::fs::write(
-                dir.join("go.mod"),
-                format!("module poc/{name}\n\ngo 1.27.1\n"),
-            )?;
+            std::fs::write(dir.join("go.mod"), format!("module poc/{name}\n\ngo 1.27.1\n"))?;
             std::fs::write(
                 dir.join("main.go"),
                 "package main\n\nimport \"fmt\"\n\nfunc main() {}\n\nfunc Greet(name string) string {\n    return fmt.Sprintf(\"Hello, %s! (from Go)\", name)\n}\n",
@@ -242,7 +322,7 @@ fn cmd_plugin_new(name: &str, lang: &str, kind: &str) -> anyhow::Result<()> {
             std::fs::write(
                 dir.join("Makefile"),
                 format!(
-                    "WASI_SDK ?= /opt/wasi-sdk\\nCC = $(WASI_SDK)/bin/{compiler}\\n\\nall:\\n\\t$(CC) --target=wasm32-wasip1 -o {name}.wasm src/main.{ext}\\n\\twasm-tools component new {name}.wasm -o {name}.component.wasm\\n"
+                    "WASI_SDK ?= /opt/wasi-sdk\nCC = $(WASI_SDK)/bin/{compiler}\n\nall:\n\t$(CC) --target=wasm32-wasip1 -o {name}.wasm src/main.{ext}\n\twasm-tools component new {name}.wasm -o {name}.component.wasm\n"
                 ),
             )?;
             std::fs::write(
@@ -260,12 +340,7 @@ fn cmd_plugin_new(name: &str, lang: &str, kind: &str) -> anyhow::Result<()> {
         dir.join("README.md"),
         format!("# {name}\n\nLanguage: {lang}\nType: {kind}\n"),
     )?;
-    println!(
-        "created plugin scaffold at {} (lang={}, type={})",
-        dir.display(),
-        lang,
-        kind
-    );
+    println!("created plugin scaffold at {} (lang={}, type={})", dir.display(), lang, kind);
     Ok(())
 }
 
