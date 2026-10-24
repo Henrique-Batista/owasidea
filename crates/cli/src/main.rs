@@ -6,9 +6,19 @@ use std::path::{Path, PathBuf};
 struct Cli {
     #[arg(long, global = true, default_value = "wasm-app.toml")]
     config: PathBuf,
-    #[arg(long, global = true, default_value = "manifests", env = "OWASIDEA_MANIFESTS")]
+    #[arg(
+        long,
+        global = true,
+        default_value = "manifests",
+        env = "OWASIDEA_MANIFESTS"
+    )]
     manifest_dir: PathBuf,
-    #[arg(long, global = true, default_value = "127.0.0.1:8787", env = "HOST_ADDR")]
+    #[arg(
+        long,
+        global = true,
+        default_value = "127.0.0.1:8787",
+        env = "HOST_ADDR"
+    )]
     http_addr: String,
     #[arg(long, global = true)]
     json: bool,

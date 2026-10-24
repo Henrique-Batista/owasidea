@@ -321,6 +321,10 @@ async fn instantiate(
             http: WasiHttpCtx::new(),
         },
     );
+    // Wire manifest fuel limit (if declared).
+    if let Some(max_fuel) = plugin.manifest.permissions.resources.max_fuel {
+        let _ = store.set_fuel(max_fuel);
+    }
     let instance = linker
         .instantiate_async(&mut store, &component)
         .await
@@ -494,10 +498,22 @@ async fn reload(
         child: None,
         port: p.port,
     };
-    instantiate(&state.engine, &runtime)
-        .await
-        .map_err(internal)?;
-    Ok(Json(serde_json::json!({ "reloaded": name })))
+    let timeout_ms = runtime
+        .manifest
+        .permissions
+        .resources
+        .timeout_ms
+        .unwrap_or(30000);
+    match tokio::time::timeout(
+        std::time::Duration::from_millis(timeout_ms),
+        instantiate(&state.engine, &runtime),
+    )
+    .await
+    {
+        Ok(Ok(_)) => Ok(Json(serde_json::json!({ "reloaded": name }))),
+        Ok(Err(e)) => Err(internal(e)),
+        Err(_) => Err((StatusCode::GATEWAY_TIMEOUT, "reload timed out".to_string())),
+    }
 }
 
 async fn greet(
@@ -509,15 +525,22 @@ async fn greet(
         .plugins
         .get(&name)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
-    let (mut store, instance) = instantiate(&state.engine, p).await.map_err(internal)?;
-    let func = instance
-        .get_typed_func::<(String,), (String,)>(&mut store, "greet")
-        .map_err(internal)?;
-    let (output,) = func
-        .call_async(&mut store, (req.name,))
-        .await
-        .map_err(internal)?;
-    Ok(Json(OutputRes { output }))
+    let timeout_ms = p.manifest.permissions.resources.timeout_ms.unwrap_or(30000);
+    let work = async {
+        let (mut store, instance) = instantiate(&state.engine, p).await.map_err(internal)?;
+        let func = instance
+            .get_typed_func::<(String,), (String,)>(&mut store, "greet")
+            .map_err(internal)?;
+        let (output,) = func
+            .call_async(&mut store, (req.name,))
+            .await
+            .map_err(internal)?;
+        Ok::<_, (StatusCode, String)>(Json(OutputRes { output }))
+    };
+    match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), work).await {
+        Ok(r) => r,
+        Err(_) => Err((StatusCode::GATEWAY_TIMEOUT, "request timed out".to_string())),
+    }
 }
 
 async fn complete(
@@ -529,17 +552,25 @@ async fn complete(
         .plugins
         .get(&name)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
-    let (mut store, instance) = instantiate(&state.engine, p).await.map_err(internal)?;
-    let func = instance
-        .get_typed_func::<(String,), (Result<String, String>,)>(&mut store, "complete")
-        .map_err(internal)?;
-    let (output,) = func
-        .call_async(&mut store, (req.prompt,))
-        .await
-        .map_err(internal)?;
-    match output {
-        Ok(s) => Ok(Json(OutputRes { output: s })),
-        Err(e) => Err((StatusCode::BAD_REQUEST, e)),
+    let timeout_ms = p.manifest.permissions.resources.timeout_ms.unwrap_or(30000);
+    let prompt = req.prompt.clone();
+    let work = async {
+        let (mut store, instance) = instantiate(&state.engine, p).await.map_err(internal)?;
+        let func = instance
+            .get_typed_func::<(String,), (Result<String, String>,)>(&mut store, "complete")
+            .map_err(internal)?;
+        let (output,) = func
+            .call_async(&mut store, (prompt,))
+            .await
+            .map_err(internal)?;
+        match output {
+            Ok(s) => Ok::<_, (StatusCode, String)>(Json(OutputRes { output: s })),
+            Err(e) => Err((StatusCode::BAD_REQUEST, e)),
+        }
+    };
+    match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), work).await {
+        Ok(r) => r,
+        Err(_) => Err((StatusCode::GATEWAY_TIMEOUT, "request timed out".to_string())),
     }
 }
 
@@ -1087,6 +1118,8 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
 
     let mut config = wasmtime::Config::new();
     config.wasm_component_model(true);
+    // Enable fuel-based execution metering (manifest resources.max_fuel).
+    config.consume_fuel(true);
     let engine = Engine::new(&config)?;
 
     let mut plugins = HashMap::new();

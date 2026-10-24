@@ -21,4 +21,6 @@
 
 - Never hand-edit manifests; regenerate from WIT.
 - Host rejects undeclared host imports.
-- Resource limits fields exist but are not enforced in v0 (labeled not enforced).
+- `max_fuel` is enforced via Wasmtime fuel metering.
+- `timeout_ms` is enforced as per-request timeout.
+- `max_memory_mb` is declared but not enforced yet.

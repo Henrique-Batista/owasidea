@@ -11,8 +11,9 @@
 
 ## v0.1 — Hardening do runtime
 
-- [ ] Aplicar `max_fuel` e `timeout_ms` no Store (epoch interruption)
-- [ ] Limites de memória por instância
+- [x] Aplicar `max_fuel` no Store (`consume_fuel`)
+- [x] Aplicar `timeout_ms` como timeout de requisição (tokio)
+- [ ] Limites de memória por instância (não enforced)
 - [ ] Persistir KV host (SQLite/redb) em vez de memória
 - [ ] Re-ler manifest no reload (feito) + atualizar estado em memória
 - [ ] Hot-reload de bibliotecas com snapshot de estado (opcional)
