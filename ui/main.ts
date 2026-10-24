@@ -12,25 +12,50 @@ async function main() {
   }
   const plugins = await fetch(`${HOST}/plugins`).then(r => r.json());
   for (const p of plugins) {
+    const manifest = await fetch(`${HOST}/plugin/${p.name}/manifest`).then(r => r.json());
     const card = document.createElement('div');
     card.className = 'card';
-    card.innerHTML = `<h2>${p.name} <small>(${p.language}, ${p.type}, ${p.runtime ?? 'wasi-component'})</small></h2>
-      <p>exports: ${p.exports.join(', ')}</p>
-      <button data-greet="${p.name}">greet</button>
-      <pre id="out-${p.name}"></pre>`;
+    card.innerHTML = `<h2>${p.name} <small>(${p.language}, ${p.type})</small></h2>
+      <p>exports: ${p.exports.join(', ')}</p>`;
+    for (const exp of manifest.exports || []) {
+      const row = document.createElement('div');
+      row.style.margin = '0.5rem 0';
+      row.innerHTML = `<strong>${exp.name}</strong> <code>${exp.signature}</code><br/>
+        <input type="text" placeholder="args (comma separated)" style="width:60%" />
+        <button>call</button>
+        <pre style="background:#f5f5f5;padding:0.5rem"></pre>`;
+      const input = row.querySelector('input') as HTMLInputElement;
+      const btn = row.querySelector('button') as HTMLButtonElement;
+      const out = row.querySelector('pre') as HTMLPreElement;
+      btn.addEventListener('click', async () => {
+        const args = input.value.trim() === '' ? [] : input.value.split(',').map(s => s.trim());
+        // try to coerce numbers/booleans
+        const coerced = args.map(a => {
+          if (a === 'true') return true;
+          if (a === 'false') return false;
+          if (/^-?\d+$/.test(a)) return Number(a);
+          return a;
+        });
+        const res = await fetch(`${HOST}/plugin/${p.name}/call`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ function: exp.name, args: coerced }),
+        }).then(r => r.json());
+        out.textContent = JSON.stringify(res, null, 2);
+      });
+      card.appendChild(row);
+    }
+    // logs
+    const logsBtn = document.createElement('button');
+    logsBtn.textContent = 'show logs';
+    const logsPre = document.createElement('pre');
+    logsBtn.addEventListener('click', async () => {
+      const r = await fetch(`${HOST}/plugin/${p.name}/logs`).then(x => x.json());
+      logsPre.textContent = (r.logs || []).join('\n');
+    });
+    card.appendChild(logsBtn);
+    card.appendChild(logsPre);
     pluginsDiv.appendChild(card);
   }
-  pluginsDiv.addEventListener('click', async (e) => {
-    const t = e.target as HTMLElement;
-    const name = t.getAttribute('data-greet');
-    if (!name) return;
-    const out = document.getElementById(`out-${name}`)!;
-    const res = await fetch(`${HOST}/plugin/${name}/greet`, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ name: 'UI' }),
-    }).then(r => r.json());
-    out.textContent = JSON.stringify(res);
-  });
 }
 
 main();
