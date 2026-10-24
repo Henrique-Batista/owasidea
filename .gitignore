@@ -1,0 +1,11 @@
+/target
+**/target
+*.wasm
+*.component.wasm
+node_modules
+ui/dist
+ui/.vite
+manifests/*.manifest.json
+# keep generated? no, generated
+data/
+.DS_Store

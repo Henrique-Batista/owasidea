@@ -1,0 +1,21 @@
+[app]
+name = "owasidea"
+version = "0.1.0"
+identifier = "dev.owasidea.app"
+
+[host]
+addr = "127.0.0.1:8787"
+
+[plugins.notes]
+path = "plugins/notes"
+language = "rust"
+type = "library"
+
+[plugins.chat-go]
+path = "plugins/chat-go"
+language = "go"
+type = "executable"
+
+[dev]
+watch = true
+hot_reload = true

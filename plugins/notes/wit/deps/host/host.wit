@@ -1,0 +1,10 @@
+package poc:host@0.1.0;
+
+interface host-kv {
+    get: func(key: string) -> option<string>;
+    set: func(key: string, value: string);
+}
+
+interface host-log {
+    log: func(msg: string);
+}
