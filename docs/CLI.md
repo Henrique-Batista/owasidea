@@ -6,7 +6,7 @@ Binary: `owasidea`. All commands support `--json` where applicable.
 
 - `--config <path>` (default `wasm-app.toml`)
 - `--manifest-dir <path>` (default `manifests`)
-- `--http-addr <addr>` (default `127.0.0.1:8787`)
+- `--http-addr <addr>` (optional; default ephemeral port `127.0.0.1:0`)
 - `--json`
 
 ## Commands
