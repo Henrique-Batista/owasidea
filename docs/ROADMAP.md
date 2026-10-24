@@ -32,6 +32,7 @@
 
 - [x] Shell Tauri 2 embutindo o host (scaffold)
 - [x] UI carregando `ui/dist` e comunicação via API local (configurado)
+- [x] UI genérica chamando exports via /call
 - [ ] Telas: overview, plugins, detalhe, serviços, dev mode
 - [x] `owasidea bundle` produzindo app Tauri
 - [ ] Watch de arquivos + hot reload integrado
