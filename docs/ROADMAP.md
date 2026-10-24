@@ -13,7 +13,7 @@
 
 - [x] Aplicar `max_fuel` no Store (`consume_fuel`)
 - [x] Aplicar `timeout_ms` como timeout de requisição (tokio)
-- [ ] Limites de memória por instância (não enforced)
+- [x] Limites de memória por instância (StoreLimits)
 - [x] Persistir KV host (SQLite/redb) em vez de memória
 - [ ] Re-ler manifest no reload (feito) + atualizar estado em memória
 - [ ] Hot-reload de bibliotecas com snapshot de estado (opcional)

@@ -23,4 +23,4 @@
 - Host rejects undeclared host imports.
 - `max_fuel` is enforced via Wasmtime fuel metering.
 - `timeout_ms` is enforced as per-request timeout.
-- `max_memory_mb` is declared but not enforced yet.
+- `max_memory_mb` is enforced via Wasmtime StoreLimits.

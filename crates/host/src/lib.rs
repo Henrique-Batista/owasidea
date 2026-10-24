@@ -175,6 +175,7 @@ struct HostState {
     table: ResourceTable,
     http: WasiHttpCtx,
     http_hooks: AllowlistHooks,
+    limits: wasmtime::StoreLimits,
 }
 
 #[derive(Clone)]
@@ -237,6 +238,31 @@ impl WasiHttpView for HostState {
             table: &mut self.table,
             hooks: &mut self.http_hooks,
         }
+    }
+}
+
+impl wasmtime::ResourceLimiter for HostState {
+    fn memory_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> Result<bool, wasmtime::Error> {
+        self.limits.memory_growing(current, desired, maximum)
+    }
+    fn memory_grow_failed(&mut self, error: wasmtime::Error) -> Result<(), wasmtime::Error> {
+        self.limits.memory_grow_failed(error)
+    }
+    fn table_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> Result<bool, wasmtime::Error> {
+        self.limits.table_growing(current, desired, maximum)
+    }
+    fn table_grow_failed(&mut self, error: wasmtime::Error) -> Result<(), wasmtime::Error> {
+        self.limits.table_grow_failed(error)
     }
 }
 
@@ -381,8 +407,16 @@ async fn instantiate(
             http_hooks: AllowlistHooks {
                 allowed: plugin.manifest.permissions.http.outbound.clone(),
             },
+            limits: {
+                let mut b = wasmtime::StoreLimitsBuilder::new();
+                if let Some(mb) = plugin.manifest.permissions.resources.max_memory_mb {
+                    b = b.memory_size((mb as usize) * 1024 * 1024);
+                }
+                b.build()
+            },
         },
     );
+    store.limiter(|state| &mut state.limits);
     // Wire manifest fuel limit (if declared).
     if let Some(max_fuel) = plugin.manifest.permissions.resources.max_fuel {
         let _ = store.set_fuel(max_fuel);
