@@ -103,10 +103,11 @@ fn cmd_init(dir: Option<PathBuf>, json: bool) -> anyhow::Result<()> {
         Some(d) => d,
         None => {
             if interactive {
-                let input: String = dialoguer::Input::with_theme(&dialoguer::theme::ColorfulTheme::default())
-                    .with_prompt("Project directory")
-                    .default(".".to_string())
-                    .interact_text()?;
+                let input: String =
+                    dialoguer::Input::with_theme(&dialoguer::theme::ColorfulTheme::default())
+                        .with_prompt("Project directory")
+                        .default(".".to_string())
+                        .interact_text()?;
                 PathBuf::from(input)
             } else {
                 PathBuf::from(".")
@@ -237,11 +238,12 @@ fn cmd_plugin_new(
         None => {
             if interactive {
                 let items = ["rust", "go", "typescript", "csharp", "c", "cpp"];
-                let sel = dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
-                    .with_prompt("Language")
-                    .items(&items)
-                    .default(0)
-                    .interact()?;
+                let sel =
+                    dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
+                        .with_prompt("Language")
+                        .items(&items)
+                        .default(0)
+                        .interact()?;
                 items[sel].to_string()
             } else {
                 "rust".to_string()
@@ -253,11 +255,12 @@ fn cmd_plugin_new(
         None => {
             if interactive {
                 let items = ["library", "executable"];
-                let sel = dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
-                    .with_prompt("Type")
-                    .items(&items)
-                    .default(0)
-                    .interact()?;
+                let sel =
+                    dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
+                        .with_prompt("Type")
+                        .items(&items)
+                        .default(0)
+                        .interact()?;
                 items[sel].to_string()
             } else {
                 "library".to_string()
@@ -442,4 +445,3 @@ fn cmd_bundle() -> anyhow::Result<()> {
     println!("Bundle complete.");
     Ok(())
 }
-
