@@ -144,7 +144,7 @@ struct PluginRuntime {
     manifest: Manifest,
     manifest_path: PathBuf,
     component_path: PathBuf,
-    kv: Arc<Mutex<HashMap<String, String>>>,
+    kv: Arc<std::sync::Mutex<rusqlite::Connection>>,
     logs: Arc<Mutex<Vec<String>>>,
     // Executable plugins are served by a `wasmtime serve` child process for
     // this POC. A production host would embed wasmtime-wasi-http instead.
@@ -223,16 +223,27 @@ fn build_linker(engine: &Engine, plugin: &PluginRuntime) -> Result<Linker<HostSt
         inst.func_wrap(
             "get",
             move |_store: wasmtime::StoreContextMut<'_, HostState>, (key,): (String,)| {
-                let value = kv_get.try_lock().ok().and_then(|m| m.get(&key).cloned());
+                let value = kv_get.lock().ok().and_then(|conn| {
+                    conn.query_row(
+                        "SELECT value FROM kv WHERE key = ?1",
+                        rusqlite::params![key],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .ok()
+                });
                 Ok((value,))
             },
         )?;
+        let kv_set = kv.clone();
         inst.func_wrap(
             "set",
             move |_store: wasmtime::StoreContextMut<'_, HostState>,
                   (key, value): (String, String)| {
-                if let Ok(mut m) = kv.try_lock() {
-                    m.insert(key, value);
+                if let Ok(conn) = kv_set.lock() {
+                    let _ = conn.execute(
+                        "INSERT OR REPLACE INTO kv (key, value) VALUES (?1, ?2)",
+                        rusqlite::params![key, value],
+                    );
                 }
                 Ok(())
             },
@@ -977,6 +988,18 @@ fn internal<E: std::fmt::Display>(e: E) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
 }
 
+fn open_kv_db(name: &str) -> rusqlite::Connection {
+    let dir = std::path::PathBuf::from("./data").join(name);
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("kv.sqlite");
+    let conn = rusqlite::Connection::open(&path).expect("open kv db");
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+    )
+    .expect("init kv table");
+    conn
+}
+
 // ---------------------------------------------------------------------------
 // Executable plugin proxy (POC)
 // ---------------------------------------------------------------------------
@@ -1169,7 +1192,7 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
             manifest: manifest.clone(),
             manifest_path: manifest_path.clone(),
             component_path: component_path.clone(),
-            kv: Arc::new(Mutex::new(HashMap::new())),
+            kv: Arc::new(std::sync::Mutex::new(open_kv_db(&manifest.name))),
             logs: Arc::new(Mutex::new(Vec::new())),
             child: None,
             port: None,
