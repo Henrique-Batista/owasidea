@@ -65,6 +65,9 @@ enum Commands {
     /// Build the desktop bundle (Tauri).
     #[command(about = "Build the desktop bundle (Tauri).")]
     Bundle,
+    /// Launch the interactive terminal UI dashboard.
+    #[command(about = "Launch the interactive terminal UI dashboard.")]
+    Tui,
 }
 
 #[derive(Subcommand)]
@@ -94,6 +97,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Run => cmd_run(&cli.manifest_dir, &cli.http_addr).await,
         Commands::Inspect { plugin } => cmd_inspect(&cli.manifest_dir, &plugin, cli.json),
         Commands::Bundle => cmd_bundle(),
+        Commands::Tui => cmd_tui(&cli.http_addr).await,
     }
 }
 
@@ -440,5 +444,92 @@ fn cmd_bundle() -> anyhow::Result<()> {
         anyhow::bail!("tauri build failed");
     }
     println!("Bundle complete.");
+    Ok(())
+}
+
+async fn cmd_tui(http_addr: &str) -> anyhow::Result<()> {
+    use crossterm::event::{self, Event, KeyCode};
+    use crossterm::terminal::{
+        disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    };
+    use crossterm::ExecutableCommand;
+    use ratatui::prelude::*;
+    use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+    use std::io::stdout;
+    use std::time::{Duration, Instant};
+
+    enable_raw_mode()?;
+    stdout().execute(EnterAlternateScreen)?;
+    let backend = ratatui::backend::CrosstermBackend::new(stdout());
+    let mut terminal = ratatui::Terminal::new(backend)?;
+    let base = format!("http://{}", http_addr);
+
+    let mut overview = String::new();
+    let mut plugins: Vec<serde_json::Value> = Vec::new();
+    let mut last_refresh = Instant::now() - Duration::from_secs(10);
+    let mut should_quit = false;
+
+    while !should_quit {
+        if last_refresh.elapsed() > Duration::from_secs(2) {
+            if let Ok(resp) = reqwest::get(format!("{}/overview", base)).await {
+                if let Ok(v) = resp.json::<serde_json::Value>().await {
+                    overview = format!(
+                        "plugins: {} (lib:{} exec:{} svc:{})",
+                        v["plugins"], v["libraries"], v["executables"], v["services"]
+                    );
+                }
+            }
+            if let Ok(resp) = reqwest::get(format!("{}/plugins", base)).await {
+                if let Ok(v) = resp.json::<serde_json::Value>().await {
+                    plugins = v.as_array().cloned().unwrap_or_default();
+                }
+            }
+            last_refresh = Instant::now();
+        }
+
+        terminal.draw(|f| {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(3), Constraint::Min(0)])
+                .split(f.area());
+            f.render_widget(
+                Paragraph::new(format!("Owasidea TUI - {}  (q/Esc to quit)", base))
+                    .block(Block::default().borders(Borders::ALL).title("Status")),
+                chunks[0],
+            );
+            let items: Vec<ListItem> = plugins
+                .iter()
+                .map(|p| {
+                    ListItem::new(format!(
+                        "{} ({} , {})",
+                        p["name"].as_str().unwrap_or("?"),
+                        p["language"].as_str().unwrap_or("?"),
+                        p["type"].as_str().unwrap_or("?")
+                    ))
+                })
+                .collect();
+            let mut state = ListState::default();
+            f.render_stateful_widget(
+                List::new(items).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(format!("Plugins - {}", overview)),
+                ),
+                chunks[1],
+                &mut state,
+            );
+        })?;
+
+        if event::poll(Duration::from_millis(200))? {
+            if let Event::Key(key) = event::read()? {
+                if key.code == KeyCode::Char('q') || key.code == KeyCode::Esc {
+                    should_quit = true;
+                }
+            }
+        }
+    }
+
+    disable_raw_mode()?;
+    stdout().execute(LeaveAlternateScreen)?;
     Ok(())
 }
