@@ -22,7 +22,7 @@ use std::{
     },
 };
 use tokio::{sync::Mutex, task::JoinHandle};
-use wasmtime::component::{Component, Linker, ResourceTable};
+use wasmtime::component::{Component, Linker, ResourceTable, Type, Val};
 use wasmtime::{Engine, Store};
 use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpCtxView, WasiHttpView};
@@ -443,6 +443,13 @@ struct CompleteReq {
 }
 
 #[derive(Deserialize)]
+struct CallReq {
+    function: String,
+    #[serde(default)]
+    args: Vec<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
 struct BindReq {
     port: u16,
 }
@@ -694,6 +701,59 @@ async fn complete(
             Ok(s) => Ok::<_, (StatusCode, String)>(Json(OutputRes { output: s })),
             Err(e) => Err((StatusCode::BAD_REQUEST, e)),
         }
+    };
+    match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), work).await {
+        Ok(r) => r,
+        Err(_) => Err((StatusCode::GATEWAY_TIMEOUT, "request timed out".to_string())),
+    }
+}
+
+async fn call_export(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+    Json(req): Json<CallReq>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let p = state
+        .plugins
+        .get(&name)
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
+    let timeout_ms = p.manifest.permissions.resources.timeout_ms.unwrap_or(30000);
+    let work = async {
+        let (mut store, instance) = instantiate(&state.engine, p).await.map_err(internal)?;
+        let func = instance
+            .get_func(&mut store, &req.function)
+            .ok_or_else(|| {
+                (
+                    StatusCode::NOT_FOUND,
+                    format!("export {} not found", req.function),
+                )
+            })?;
+        let ty = func.ty(&store);
+        if ty.params().count() != req.args.len() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "expected {} args, got {}",
+                    ty.params().count(),
+                    req.args.len()
+                ),
+            ));
+        }
+        let mut params = Vec::new();
+        for (param, arg) in ty.params().zip(req.args.iter()) {
+            params.push(json_to_val(&param.1, arg).map_err(|e| (StatusCode::BAD_REQUEST, e))?);
+        }
+        let mut results = ty.results().map(|ty| default_val(&ty)).collect::<Vec<_>>();
+        func.call_async(&mut store, &params, &mut results)
+            .await
+            .map_err(internal)?;
+        let json_results: Vec<serde_json::Value> = results.iter().map(val_to_json).collect();
+        let body = if json_results.len() == 1 {
+            serde_json::json!({ "result": json_results[0] })
+        } else {
+            serde_json::json!({ "results": json_results })
+        };
+        Ok::<_, (StatusCode, String)>(Json(body))
     };
     match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), work).await {
         Ok(r) => r,
@@ -1104,6 +1164,228 @@ fn internal<E: std::fmt::Display>(e: E) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
 }
 
+fn default_val(ty: &Type) -> Val {
+    match ty {
+        Type::Bool => Val::Bool(false),
+        Type::S8 => Val::S8(0),
+        Type::U8 => Val::U8(0),
+        Type::S16 => Val::S16(0),
+        Type::U16 => Val::U16(0),
+        Type::S32 => Val::S32(0),
+        Type::U32 => Val::U32(0),
+        Type::S64 => Val::S64(0),
+        Type::U64 => Val::U64(0),
+        Type::Float32 => Val::Float32(0.0),
+        Type::Float64 => Val::Float64(0.0),
+        Type::Char => Val::Char('\0'),
+        Type::String => Val::String(String::new()),
+        Type::List(_) => Val::List(vec![]),
+        Type::Option(_) => Val::Option(None),
+        Type::Result(_) => Val::Result(Ok(None)),
+        Type::Record(r) => {
+            let fields = r
+                .fields()
+                .map(|f| (f.name.to_string(), default_val(&f.ty)))
+                .collect();
+            Val::Record(fields)
+        }
+        Type::Tuple(t) => Val::Tuple(t.types().map(|ty| default_val(&ty)).collect()),
+        Type::Enum(_) => Val::Enum(String::new()),
+        Type::Flags(_) => Val::Flags(vec![]),
+        _ => Val::Bool(false),
+    }
+}
+
+fn json_to_val(ty: &Type, value: &serde_json::Value) -> Result<Val, String> {
+    match ty {
+        Type::Bool => value
+            .as_bool()
+            .map(Val::Bool)
+            .ok_or_else(|| "expected bool".to_string()),
+        Type::S8 => value
+            .as_i64()
+            .map(|v| Val::S8(v as i8))
+            .ok_or_else(|| "expected integer".to_string()),
+        Type::U8 => value
+            .as_u64()
+            .map(|v| Val::U8(v as u8))
+            .ok_or_else(|| "expected integer".to_string()),
+        Type::S16 => value
+            .as_i64()
+            .map(|v| Val::S16(v as i16))
+            .ok_or_else(|| "expected integer".to_string()),
+        Type::U16 => value
+            .as_u64()
+            .map(|v| Val::U16(v as u16))
+            .ok_or_else(|| "expected integer".to_string()),
+        Type::S32 => value
+            .as_i64()
+            .map(|v| Val::S32(v as i32))
+            .ok_or_else(|| "expected integer".to_string()),
+        Type::U32 => value
+            .as_u64()
+            .map(|v| Val::U32(v as u32))
+            .ok_or_else(|| "expected integer".to_string()),
+        Type::S64 => value
+            .as_i64()
+            .map(Val::S64)
+            .ok_or_else(|| "expected integer".to_string()),
+        Type::U64 => value
+            .as_u64()
+            .map(Val::U64)
+            .ok_or_else(|| "expected integer".to_string()),
+        Type::Float32 => value
+            .as_f64()
+            .map(|v| Val::Float32(v as f32))
+            .ok_or_else(|| "expected number".to_string()),
+        Type::Float64 => value
+            .as_f64()
+            .map(Val::Float64)
+            .ok_or_else(|| "expected number".to_string()),
+        Type::Char => {
+            let s = value
+                .as_str()
+                .ok_or_else(|| "expected string".to_string())?;
+            let c = s
+                .chars()
+                .next()
+                .ok_or_else(|| "expected char".to_string())?;
+            Ok(Val::Char(c))
+        }
+        Type::String => {
+            let s = value
+                .as_str()
+                .ok_or_else(|| "expected string".to_string())?;
+            Ok(Val::String(s.to_string()))
+        }
+        Type::List(l) => {
+            let arr = value
+                .as_array()
+                .ok_or_else(|| "expected array".to_string())?;
+            let elem_ty = l.ty();
+            let mut out = Vec::with_capacity(arr.len());
+            for v in arr {
+                out.push(json_to_val(&elem_ty, v)?);
+            }
+            Ok(Val::List(out))
+        }
+        Type::Option(o) => {
+            if value.is_null() {
+                Ok(Val::Option(None))
+            } else {
+                let inner = json_to_val(&o.ty(), value)?;
+                Ok(Val::Option(Some(Box::new(inner))))
+            }
+        }
+        Type::Result(r) => {
+            if let Some(obj) = value.as_object() {
+                if let Some(okv) = obj.get("ok") {
+                    let val = r
+                        .ok()
+                        .map(|t| json_to_val(&t, okv).map(Box::new))
+                        .transpose()?;
+                    return Ok(Val::Result(Ok(val)));
+                }
+                if let Some(errv) = obj.get("err") {
+                    let val = r
+                        .err()
+                        .map(|t| json_to_val(&t, errv).map(Box::new))
+                        .transpose()?;
+                    return Ok(Val::Result(Err(val)));
+                }
+            }
+            if value.is_null() {
+                return Ok(Val::Result(Ok(None)));
+            }
+            Err("expected result object {ok:...} or {err:...}".to_string())
+        }
+        Type::Record(rec) => {
+            let obj = value
+                .as_object()
+                .ok_or_else(|| "expected object".to_string())?;
+            let mut fields = Vec::new();
+            for field in rec.fields() {
+                let fv = obj
+                    .get(field.name)
+                    .ok_or_else(|| format!("missing field {}", field.name))?;
+                fields.push((field.name.to_string(), json_to_val(&field.ty, fv)?));
+            }
+            Ok(Val::Record(fields))
+        }
+        Type::Tuple(t) => {
+            let arr = value
+                .as_array()
+                .ok_or_else(|| "expected array".to_string())?;
+            let types: Vec<Type> = t.types().collect();
+            if arr.len() != types.len() {
+                return Err("tuple arity mismatch".to_string());
+            }
+            let mut out = Vec::new();
+            for (ty, v) in types.iter().zip(arr.iter()) {
+                out.push(json_to_val(ty, v)?);
+            }
+            Ok(Val::Tuple(out))
+        }
+        Type::Enum(_) => {
+            let s = value
+                .as_str()
+                .ok_or_else(|| "expected string for enum".to_string())?;
+            Ok(Val::Enum(s.to_string()))
+        }
+        Type::Flags(_) => {
+            let arr = value
+                .as_array()
+                .ok_or_else(|| "expected array of strings for flags".to_string())?;
+            let mut out = Vec::new();
+            for v in arr {
+                out.push(
+                    v.as_str()
+                        .ok_or_else(|| "expected string".to_string())?
+                        .to_string(),
+                );
+            }
+            Ok(Val::Flags(out))
+        }
+        _ => Err(format!("unsupported type {:?}", ty)),
+    }
+}
+
+fn val_to_json(val: &Val) -> serde_json::Value {
+    match val {
+        Val::Bool(b) => serde_json::json!(b),
+        Val::S8(v) => serde_json::json!(v),
+        Val::U8(v) => serde_json::json!(v),
+        Val::S16(v) => serde_json::json!(v),
+        Val::U16(v) => serde_json::json!(v),
+        Val::S32(v) => serde_json::json!(v),
+        Val::U32(v) => serde_json::json!(v),
+        Val::S64(v) => serde_json::json!(v),
+        Val::U64(v) => serde_json::json!(v),
+        Val::Float32(v) => serde_json::json!(v),
+        Val::Float64(v) => serde_json::json!(v),
+        Val::Char(c) => serde_json::json!(c.to_string()),
+        Val::String(s) => serde_json::json!(s),
+        Val::List(v) => serde_json::Value::Array(v.iter().map(val_to_json).collect()),
+        Val::Record(fields) => {
+            let mut map = serde_json::Map::new();
+            for (k, v) in fields {
+                map.insert(k.clone(), val_to_json(v));
+            }
+            serde_json::Value::Object(map)
+        }
+        Val::Tuple(v) => serde_json::Value::Array(v.iter().map(val_to_json).collect()),
+        Val::Option(Some(b)) => val_to_json(b),
+        Val::Option(None) => serde_json::Value::Null,
+        Val::Result(Ok(Some(b))) => serde_json::json!({ "ok": val_to_json(b) }),
+        Val::Result(Ok(None)) => serde_json::json!({ "ok": null }),
+        Val::Result(Err(Some(b))) => serde_json::json!({ "err": val_to_json(b) }),
+        Val::Result(Err(None)) => serde_json::json!({ "err": null }),
+        Val::Enum(s) => serde_json::json!(s),
+        Val::Flags(v) => serde_json::json!(v),
+        _ => serde_json::Value::Null,
+    }
+}
+
 fn open_kv_db(name: &str) -> rusqlite::Connection {
     let dir = std::path::PathBuf::from("./data").join(name);
     let _ = std::fs::create_dir_all(&dir);
@@ -1347,6 +1629,7 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
         .route("/plugin/{name}/reload", post(reload))
         .route("/plugin/{name}/greet", post(greet))
         .route("/plugin/{name}/complete", post(complete))
+        .route("/plugin/{name}/call", post(call_export))
         .route("/plugin/{name}/bind-udp", post(bind_udp))
         .route("/plugin/{name}/parse-address", post(parse_address))
         .route("/plugin/{name}/dial-tcp", post(dial_tcp))

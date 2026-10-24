@@ -26,6 +26,8 @@ Base URL: `http://127.0.0.1:8787` (configurable). CORS permissive. All JSON.
 
 - `POST /plugin/{name}/greet` body `{ "name": "POC" }` → `{ "output": "Hello, POC! ..." }`.
 - `POST /plugin/{name}/complete` body `{ "prompt": "hi" }` → `{ "output": "..." }` or 400 with error.
+- `POST /plugin/{name}/call` body `{ "function": "greet", "args": ["name"] }` →
+  `{ "result": ... }` (generic dispatcher based on WIT types).
 
 ## Executable plugins (reverse proxy)
 
