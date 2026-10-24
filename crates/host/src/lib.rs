@@ -3,7 +3,10 @@ use axum::{
     body::Body,
     extract::{Path as AxumPath, State},
     http::{HeaderMap, Method, StatusCode, Uri},
-    response::Response,
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        Response,
+    },
     routing::{get, post},
     Json, Router,
 };
@@ -523,6 +526,37 @@ async fn plugin_logs(
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
     let logs = p.logs.lock().await.clone();
     Ok(Json(LogsRes { logs }))
+}
+
+async fn plugin_logs_stream(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> Result<
+    Sse<impl futures::Stream<Item = Result<Event, std::convert::Infallible>>>,
+    (StatusCode, String),
+> {
+    let p = state
+        .plugins
+        .get(&name)
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
+    let logs = p.logs.clone();
+    let stream = async_stream::stream! {
+        let mut last = 0usize;
+        loop {
+            let snapshot = {
+                let l = logs.lock().await;
+                l.clone()
+            };
+            if snapshot.len() > last {
+                for msg in &snapshot[last..] {
+                    yield Ok(Event::default().data(msg.clone()));
+                }
+                last = snapshot.len();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    };
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 async fn reload(
@@ -1275,6 +1309,7 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
         .route("/plugins", get(list_plugins))
         .route("/plugin/{name}/manifest", get(plugin_manifest))
         .route("/plugin/{name}/logs", get(plugin_logs))
+        .route("/plugin/{name}/logs/stream", get(plugin_logs_stream))
         .route("/plugin/{name}/reload", post(reload))
         .route("/plugin/{name}/greet", post(greet))
         .route("/plugin/{name}/complete", post(complete))

@@ -29,3 +29,6 @@ wasmtime-wasi-http.workspace = true
 rusqlite = { version = "0.32", features = ["bundled"] }
 http = "1"
 http-body-util = "0.1"
+tokio-stream = "0.1"
+async-stream = "0.3"
+futures = "0.3"
