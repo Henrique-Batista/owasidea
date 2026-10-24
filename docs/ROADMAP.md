@@ -49,9 +49,9 @@
 
 - [x] Verificação de integridade por checksum (sha256)
 - [ ] Assinatura criptográfica de plugins
-- [ ] Registry remoto / marketplace
-- [ ] Isolamento WASI completo (não apenas host interfaces)
-- [ ] Multi-instância concorrente com locks por plugin
+- [ ] Registry remoto / marketplace (non-goal for POC)
+- [ ] Isolamento WASI completo (parcial: host interfaces + preopens + network allowlist)
+- [x] Execução concorrente por requisição (instância por chamada)
 - [x] Observabilidade básica (métricas /metrics + tracing)
 - [x] Documentação de segurança e threat model (docs/SECURITY.md)
 
