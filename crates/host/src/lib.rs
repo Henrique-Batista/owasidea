@@ -354,6 +354,28 @@ async fn instantiate(
     engine: &Engine,
     plugin: &PluginRuntime,
 ) -> Result<(Store<HostState>, wasmtime::component::Instance)> {
+    // Verify component checksum if declared in manifest metadata.
+    if let Some(expected) = plugin
+        .manifest
+        .metadata
+        .get("sha256")
+        .and_then(|v| v.as_str())
+    {
+        use sha2::{Digest, Sha256};
+        let bytes =
+            std::fs::read(&plugin.component_path).map_err(|e| anyhow!("read component: {e}"))?;
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes);
+        let actual = format!("{:x}", hasher.finalize());
+        if actual != expected {
+            return Err(anyhow!(
+                "checksum mismatch for {}: expected {}, got {}",
+                plugin.manifest.name,
+                expected,
+                actual
+            ));
+        }
+    }
     let component = Component::from_file(engine, &plugin.component_path)
         .map_err(|e| anyhow!("failed to load component {:?}: {e}", plugin.component_path))?;
     let linker = build_linker(engine, plugin)?;

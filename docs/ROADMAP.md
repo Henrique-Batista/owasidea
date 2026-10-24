@@ -47,7 +47,8 @@
 
 ## v1.0 — Produção (não-escopo do POC)
 
-- [ ] Assinatura/verificação de plugins
+- [x] Verificação de integridade por checksum (sha256)
+- [ ] Assinatura criptográfica de plugins
 - [ ] Registry remoto / marketplace
 - [ ] Isolamento WASI completo (não apenas host interfaces)
 - [ ] Multi-instância concorrente com locks por plugin

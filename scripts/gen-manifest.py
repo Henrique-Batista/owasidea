@@ -7,6 +7,7 @@ the manifest against the component at load time.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -158,7 +159,8 @@ def main():
         "state": {"persistent": args.persistent, "storage": storage,
                   "root": f"./data/{args.name}" if storage == "wasi-filesystem" else None},
         "composition": {"strategy": "build-time", "entry": args.entry or args.kind == "executable"},
-        "metadata": {"author": "", "license": "MIT", "description": args.description},
+        "metadata": {"author": "", "license": "MIT", "description": args.description,
+                 "sha256": hashlib.sha256(component.read_bytes()).hexdigest()},
     }
 
     out.write_text(json.dumps(manifest, indent=2) + "\n")

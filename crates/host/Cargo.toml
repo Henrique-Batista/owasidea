@@ -32,6 +32,7 @@ http-body-util = "0.1"
 tokio-stream = "0.1"
 async-stream = "0.3"
 futures = "0.3"
+sha2 = "0.10"
 
 [dev-dependencies]
 reqwest = { workspace = true }
