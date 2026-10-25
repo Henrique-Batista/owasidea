@@ -797,14 +797,31 @@ async fn call_export(
     let timeout_ms = p.manifest.permissions.resources.timeout_ms.unwrap_or(30000);
     let work = async {
         let (mut store, instance) = instantiate(&state.engine, p).await.map_err(internal)?;
-        let func = instance
-            .get_func(&mut store, &req.function)
-            .ok_or_else(|| {
+        // Resolve function: top-level first, then inside exported interfaces.
+        let func = if let Some(f) = instance.get_func(&mut store, &req.function) {
+            f
+        } else {
+            let mut resolved = None;
+            for exp in &p.manifest.exports {
+                if let Some(idx) = instance.get_export_index(&mut store, None, &exp.name) {
+                    // ensure it's an instance export
+                    if let Some(func_idx) =
+                        instance.get_export_index(&mut store, Some(&idx), &req.function)
+                    {
+                        if let Some(f) = instance.get_func(&mut store, func_idx) {
+                            resolved = Some(f);
+                            break;
+                        }
+                    }
+                }
+            }
+            resolved.ok_or_else(|| {
                 (
                     StatusCode::NOT_FOUND,
                     format!("export {} not found", req.function),
                 )
-            })?;
+            })?
+        };
         let ty = func.ty(&store);
         if ty.params().count() != req.args.len() {
             return Err((

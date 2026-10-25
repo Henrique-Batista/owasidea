@@ -356,13 +356,65 @@ fn cmd_plugin_new(
             )?;
         }
         "csharp" => {
+            std::fs::create_dir_all(dir.join("wit"))?;
+            std::fs::create_dir_all(dir.join("wit/deps/host"))?;
             std::fs::write(
                 dir.join(format!("{name}.csproj")),
-                "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <PropertyGroup>\n    <OutputType>Exe</OutputType>\n    <TargetFramework>net8.0</TargetFramework>\n  </PropertyGroup>\n</Project>\n",
+                format!(
+                    r#"<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>{name}</RootNamespace>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RuntimeIdentifier>wasi-wasm</RuntimeIdentifier>
+    <UseAppHost>false</UseAppHost>
+    <PublishTrimmed>true</PublishTrimmed>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <SelfContained>true</SelfContained>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="BytecodeAlliance.Componentize.DotNet.Wasm.SDK" Version="0.8.0-preview*" />
+    <PackageReference Include="runtime.linux-x64.microsoft.dotnet.ilcompiler.llvm" Version="10.0.0-rc.1.26306.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Wit Update="wit/{name}.wit" World="library" />
+  </ItemGroup>
+</Project>
+"#
+                ),
             )?;
             std::fs::write(
-                dir.join("Program.cs"),
-                "using System;\nclass Program {\n    static void Main() { Console.WriteLine(\"Hello from C#\"); }\n}\n",
+                dir.join("wit").join(format!("{name}.wit")),
+                format!(
+                    "package poc:{name}@0.1.0;\n\ninterface api {{\n    greet: func(name: string) -> string;\n}}\n\nworld library {{\n    export api;\n}}\n"
+                ),
+            )?;
+            std::fs::write(
+                dir.join("wit/deps/host/host.wit"),
+                "package poc:host@0.1.0;\n\ninterface host-log {\n    log: func(msg: string);\n}\n",
+            )?;
+            std::fs::write(
+                dir.join(format!("{}Impl.cs", name)),
+                format!(
+                    "namespace LibraryWorld.wit.Exports.poc.{name}.v0_1_0;\n\npublic class ApiExportsImpl : IApiExports\n{{\n    public static string Greet(string name)\n    {{\n        return $\"Hello, {{name}}! (from C#)\";\n    }}\n}}\n",
+                    name = name
+                ),
+            )?;
+            std::fs::write(
+                dir.join("nuget.config"),
+                r#"<configuration>
+  <packageSources>
+    <clear />
+    <add key="dotnet-experimental" value="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-experimental/nuget/v3/index.json" />
+    <add key="nuget" value="https://api.nuget.org/v3/index.json" />
+  </packageSources>
+</configuration>
+"#,
             )?;
         }
         "c" | "cpp" | "c++" => {
@@ -719,16 +771,8 @@ fn cmd_build(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
                 let dotnet =
                     tool_path("dotnet").unwrap_or_else(|| std::path::PathBuf::from("dotnet"));
                 let mut cmd = std::process::Command::new(&dotnet);
-                cmd.args([
-                    "publish",
-                    "-c",
-                    "Release",
-                    "-r",
-                    "wasi-wasm",
-                    "--source",
-                    "",
-                ])
-                .current_dir(&p.path);
+                cmd.args(["build", "-c", "Release", "--source", ""])
+                    .current_dir(&p.path);
                 let wasi =
                     std::path::PathBuf::from("/home/pablitux/wasi-sdk/wasi-sdk-25.0-x86_64-linux");
                 if wasi.exists() {
@@ -738,15 +782,15 @@ fn cmd_build(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
                 if !status.success() {
                     anyhow::bail!("dotnet build failed for {}", name);
                 }
-                // .NET WASI produces dotnet.wasm (already a component). Prefer publish/AppBundle.
+                // componentize-dotnet produces <name>.wasm in publish/.
                 let mut found = None;
                 for candidate in [
+                    std::path::Path::new(&p.path).join(format!(
+                        "bin/Release/net10.0/wasi-wasm/publish/{}.wasm",
+                        name
+                    )),
                     std::path::Path::new(&p.path)
-                        .join("bin/Release/net10.0/wasi-wasm/AppBundle/dotnet.wasm"),
-                    std::path::Path::new(&p.path)
-                        .join("bin/Release/net9.0/wasi-wasm/AppBundle/dotnet.wasm"),
-                    std::path::Path::new(&p.path)
-                        .join("bin/Release/net8.0/wasi-wasm/AppBundle/dotnet.wasm"),
+                        .join(format!("bin/Release/net10.0/wasi-wasm/{}.wasm", name)),
                 ] {
                     if candidate.exists() {
                         found = Some(candidate);
@@ -755,7 +799,9 @@ fn cmd_build(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
                 }
                 if found.is_none() {
                     for entry in walkdir(std::path::Path::new(&p.path).join("bin")) {
-                        if entry.file_name().and_then(|s| s.to_str()) == Some("dotnet.wasm") {
+                        if entry.extension().and_then(|s| s.to_str()) == Some("wasm")
+                            && !entry.to_string_lossy().contains("component")
+                        {
                             found = Some(entry);
                             break;
                         }
