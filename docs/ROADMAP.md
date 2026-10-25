@@ -15,7 +15,8 @@
 - [x] Aplicar `timeout_ms` como timeout de requisição (tokio)
 - [x] Limites de memória por instância (StoreLimits)
 - [x] Persistir KV host (SQLite/redb) em vez de memória
-- [ ] Re-ler manifest no reload (feito) + atualizar estado em memória
+- [x] Re-ler manifest no reload (feito)
+- [ ] Atualizar estado em memória após reload
 - [ ] Hot-reload de bibliotecas com snapshot de estado (opcional)
 - [x] Outbound HTTP allowlist via `WasiHttpHooks::send_request`
 - [x] Streaming de logs via SSE
@@ -24,26 +25,29 @@
 
 - [x] Dispatcher genérico baseado em WIT (endpoint `/call`)
 - [x] Composição build-time via `wasm-tools compose` (exemplo `composed`)
-- [ ] Tipos de plugin: `service` formalizado (lifecycle start/stop/status genérico)
-- [ ] Hot-reload explícito para plugins stateful (restart) com status visível
-- [ ] Suporte a C# e JS/TS plugins
+- [x] Tipos de plugin: `service` formalizado (lifecycle genérico via /service/*)
+- [x] Hot-reload explícito para plugins stateful (restart) com status visível
+- [x] Suporte a C# e JS/TS plugins
 
 ## v0.3 — Desktop e UX
 
 - [x] Shell Tauri 2 embutindo o host (scaffold)
 - [x] UI carregando `ui/dist` e comunicação via API local (configurado)
 - [x] UI genérica chamando exports via /call
-- [ ] Telas: overview, plugins, detalhe, serviços, dev mode
+- [x] Telas: overview, plugins, detalhe, serviços, dev mode (hash router)
 - [x] `owasidea bundle` produzindo app Tauri
+- [ ] Validar bundle Tauri end-to-end (ícones, frontendDist, runtime)
+- [ ] Suporte a UI em frameworks WASM (Yew, Blazor, Uno) na webview
+- [ ] Integração `js-wasm` como plugin de UI (webview-only)
 - [ ] Watch de arquivos + hot reload integrado
 
 ## v0.4 — Ferramentas e DX
 
-- [ ] `owasidea dev` orquestrando host + UI dev server + watcher
-- [ ] Templates de plugin mais completos (Rust/Go)
+- [x] `owasidea dev` orquestrando host + UI dev server (watcher pendente)
+- [x] Templates de plugin para Rust/Go/TS/C/C++/C#
 - [ ] `owasidea inspect` com WIT formatado e permissões efetivas
 - [x] Testes de integração automatizados (cargo test + Playwright smoke)
-- [ ] Doctor com versões mínimas e mensagens acionáveis
+- [x] Doctor com ferramentas obrigatórias/opcionais
 
 ## v1.0 — Produção (não-escopo do POC)
 
