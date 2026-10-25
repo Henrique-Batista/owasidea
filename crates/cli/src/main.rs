@@ -365,7 +365,6 @@ fn cmd_plugin_new(
     Ok(())
 }
 
-
 #[derive(serde::Deserialize, Default, Clone)]
 struct PluginSection {
     path: String,
@@ -409,7 +408,10 @@ fn cmd_build(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
     }
     std::fs::create_dir_all(manifest_dir)?;
     let script_path = std::env::temp_dir().join("owasidea-gen-manifest.py");
-    std::fs::write(&script_path, include_str!("../../../scripts/gen-manifest.py"))?;
+    std::fs::write(
+        &script_path,
+        include_str!("../../../scripts/gen-manifest.py"),
+    )?;
 
     let app_version = cfg
         .app
@@ -472,7 +474,8 @@ fn cmd_build(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
                             .unwrap_or(false)
                     });
                 if let Some(src) = produced {
-                    let dst = std::path::Path::new(&p.path).join(format!("{}.component.wasm", name));
+                    let dst =
+                        std::path::Path::new(&p.path).join(format!("{}.component.wasm", name));
                     if src != dst {
                         std::fs::copy(&src, &dst)?;
                     }
@@ -504,7 +507,8 @@ fn cmd_build(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
                     }
                 }
                 if let Some(m) = module {
-                    let dst = std::path::Path::new(&p.path).join(format!("{}.component.wasm", name));
+                    let dst =
+                        std::path::Path::new(&p.path).join(format!("{}.component.wasm", name));
                     let status = std::process::Command::new("wasm-tools")
                         .args([
                             "component",
