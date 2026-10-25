@@ -154,4 +154,76 @@ async fn integration_smoke() {
         .await
         .unwrap();
     assert!(r.status().is_success());
+
+    // example plugin
+    if names.contains(&"example") {
+        let r = client
+            .post(format!("{}/plugin/example/call", base))
+            .json(&json!({"function": "greet", "args": ["Ex"]}))
+            .send()
+            .await
+            .unwrap();
+        assert!(r.status().is_success());
+        let r = client
+            .post(format!("{}/plugin/example/call", base))
+            .json(&json!({"function": "compute", "args": [4, 5]}))
+            .send()
+            .await
+            .unwrap();
+        let body: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(body["result"], 9);
+        let r = client
+            .post(format!("{}/plugin/example/call", base))
+            .json(&json!({"function": "remember", "args": ["k", "v"]}))
+            .send()
+            .await
+            .unwrap();
+        assert!(r.status().is_success());
+    }
+
+    // composed plugin
+    if names.contains(&"composed") {
+        let r = client
+            .post(format!("{}/plugin/composed/call", base))
+            .json(&json!({"function": "run", "args": ["Compose"]}))
+            .send()
+            .await
+            .unwrap();
+        assert!(r.status().is_success());
+        let body: serde_json::Value = r.json().await.unwrap();
+        assert!(body["result"].as_str().unwrap().contains("Hello, Compose!"));
+    }
+
+    // overview
+    let r = client.get(format!("{}/overview", base)).send().await.unwrap();
+    assert!(r.status().is_success());
+
+    // metrics
+    let r = client.get(format!("{}/metrics", base)).send().await.unwrap();
+    assert!(r.status().is_success());
+    let text = r.text().await.unwrap();
+    assert!(text.contains("owasidea_requests_total"));
+
+    // tampering: remove host imports from notes manifest, reload should fail
+    let manifest_path = manifests.join("notes.manifest.json");
+    if manifest_path.exists() {
+        let original = std::fs::read_to_string(&manifest_path).unwrap();
+        let mut val: serde_json::Value = serde_json::from_str(&original).unwrap();
+        val["imports"]["host"] = json!([]);
+        std::fs::write(&manifest_path, serde_json::to_string_pretty(&val).unwrap()).unwrap();
+        let r = client
+            .post(format!("{}/plugin/notes/reload", base))
+            .send()
+            .await
+            .unwrap();
+        assert!(r.status().is_server_error() || r.status().is_client_error());
+        // restore
+        std::fs::write(&manifest_path, original).unwrap();
+        let r = client
+            .post(format!("{}/plugin/notes/reload", base))
+            .send()
+            .await
+            .unwrap();
+        assert!(r.status().is_success());
+    }
 }
