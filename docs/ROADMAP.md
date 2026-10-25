@@ -49,7 +49,7 @@
 - [x] Testes de integração automatizados (cargo test + Playwright smoke)
 - [x] Doctor com ferramentas obrigatórias/opcionais
 
-## v1.0 — Produção (não-escopo do POC)
+## v1.0 — Achieved (POC scope): polyglot desktop framework
 
 - [x] Verificação de integridade por checksum (sha256)
 - [ ] Assinatura criptográfica de plugins

@@ -1,108 +1,103 @@
-# Owasidea — WASM App Framework
+# 🚀 Owasidea — Build Desktop Apps with Any Language
 
-Owasidea é um framework para construir aplicativos desktop que empacotam
-componentes WebAssembly independentes (escritos em Rust, Go e outras linguagens)
-em uma única aplicação. Cada componente é descrito por um contrato WIT e carregado
-por um host Rust baseado em Wasmtime.
+> **One framework. Many languages. Zero friction.**
 
-A ideia é simples: você escreve plugins pequenos e reutilizáveis, o framework
-cuida de descobrir, validar, carregar, chamar e isolar cada um deles.
+Owasidea lets teams build desktop applications where **Rust, Go, C, C++, C# and
+TypeScript/JavaScript components coexist** in a single app — each written in the
+language and framework its developers already know. No one blocks another. No one
+rewrites. Everyone ships.
 
-## O que já funciona (v0)
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Your App (Tauri)                                           │
+│  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐            │
+│  │  Rust lib   │ │  Go service │ │  C# module  │  ...       │
+│  │  (notes)    │ │  (chat-go)  │ │  (tester)   │            │
+│  └──────┬──────┘ └──────┬──────┘ └──────┬──────┘            │
+│         │               │               │                    │
+│         └───────┬───────┴───────┬───────┘                    │
+│                 │  WIT contracts │  Component Model          │
+│                 └───────┬───────┘                            │
+│                         │                                    │
+│              Host (Rust + Wasmtime)                          │
+│              HTTP API · Capability broker · Manifests       │
+└─────────────────────────────────────────────────────────────┘
+```
 
-- Host Rust com Wasmtime (Component Model, WASI 0.2 e 0.3)
-- Manifests gerados automaticamente a partir do WIT real do componente
-- Enforcement de capabilities: um componente só acessa o que declarou
-- Plugins de exemplo em Rust (`notes`) e Go (`chat-go`)
-- CLI `owasidea` para criar, compilar, inspecionar e rodar apps
-- API HTTP para a UI e automação
-- Frontend web (TypeScript + Vite) que consome a API do host
+## ✨ Why Owasidea?
 
-## Instalar a CLI
+- **Polyglot by design** — Rust, Go, C, C++, C#, TypeScript all build to WASI
+  components described by WIT.
+- **Manifests auto-generated** from real WIT — never hand-written, never stale.
+- **Capability enforcement** — plugins only get what they declare.
+- **Compose at build time** — wire components together with `wasm-tools compose`.
+- **One CLI** — `owasidea init/build/dev/run/inspect/validate/bundle`.
+- **Interactive & headless** — beautiful prompts for humans, `--json` for agents.
+
+## 🏁 Get Started in 60 Seconds
 
 ```bash
+# 1. Install the CLI
 cargo install --path crates/cli
-owasidea --help
+
+# 2. Scaffold an app
+owasidea init my-app && cd my-app
+
+# 3. Add plugins in any language
+owasidea plugin new notes --lang rust
+owasidea plugin new chat  --lang go
+owasidea plugin new ui    --lang typescript
+
+# 4. Build everything (compiles + generates manifests)
+owasidea build
+
+# 5. Run
+owasidea run        # host on an ephemeral port
+cd ui && npm run dev  # http://localhost:5173
 ```
 
-## Como começar
+## 🧩 Multi-Language Example
 
-### 1. Pré-requisitos
+The repository ships with plugins in **every supported language**:
 
-- Rust + `cargo-component` + `wasm-tools`
-- Go 1.27+ (para plugins Go)
-- Node 20+ (para a UI)
-- `wasmtime` (CLI, para plugins executáveis)
+| Plugin | Language | Type | What it does |
+|--------|----------|------|--------------|
+| `notes` | Rust | library | KV cache + greet/complete |
+| `chat-go` | Go | executable | HTTP inbound/outbound |
+| `example` | Rust | library | greet/compute/remember |
+| `attr-go` | Go | library | source-generated WIT |
+| `attr-ts` | TypeScript | library | source-generated WIT |
+| `tester` (C#) | C# | library | componentize-dotnet |
+| C/C++ examples | C/C++ | library | wit-bindgen + wasi-sdk |
+
+All of them expose WIT contracts and are callable via `/plugin/{name}/call`.
+Cross-language composition is validated (Go client → Rust notes).
+
+## 🛠 Commands
 
 ```bash
-rustup target add wasm32-wasip1 wasm32-wasip2
-cargo install cargo-component wasm-tools
+owasidea doctor          # check toolchain
+owasidea init <dir>      # scaffold app (interactive)
+owasidea plugin new ...  # scaffold plugin (interactive)
+owasidea build           # build + generate manifests
+owasidea validate        # verify checksums & capabilities
+owasidea run             # run host (ephemeral port)
+owasidea dev             # host + UI dev server
+owasidea inspect <name>  # show manifest
+owasidea bundle          # build Tauri desktop app
 ```
 
-### 2. Compilar
+## 📚 Documentation
 
-```bash
-./scripts/build-all.sh
-```
+- `docs/USAGE.md` — setup and running
+- `docs/CLI.md` — CLI reference
+- `docs/API.md` — HTTP API
+- `docs/ARCHITECTURE.md` — architecture
+- `docs/PLUGIN_AUTHORING.md` — writing plugins
+- `docs/SOURCE_GENERATORS.md` — source generators
+- `docs/SECURITY.md` — security model
+- `docs/ROADMAP.md` — roadmap
 
-Isso compila os plugins, copia os `.wasm` e regenera os manifests a partir do WIT.
-
-### 3. Rodar o host
-
-```bash
-./scripts/run-host.sh
-# http://127.0.0.1:8787
-```
-
-### 4. Rodar a UI
-
-```bash
-cd ui
-npm install
-npm run dev
-# http://localhost:5173
-```
-
-### 5. Usar a CLI
-
-```bash
-cargo run -p owasidea-cli -- doctor
-cargo run -p owasidea-cli -- build
-cargo run -p owasidea-cli -- inspect notes --json
-```
-
-## Comandos úteis
-
-```bash
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test
-```
-
-## Documentação
-
-- `docs/USAGE.md` — instalação e uso passo a passo
-- `docs/CLI.md` — referência da CLI
-- `docs/API.md` — API HTTP
-- `docs/ARCHITECTURE.md` — arquitetura
-- `docs/PLUGIN_AUTHORING.md` — como escrever plugins
-- `docs/SOURCE_GENERATORS.md` — source generators por linguagem
-- `docs/ROADMAP.md` — roadmap de funcionalidades
-- `CONTRIBUTING.md` — como contribuir
-
-## Estrutura do projeto
-
-```
-crates/host        runtime, manifests, capability broker, HTTP API
-crates/cli         binário owasidea (clap)
-crates/desktop     shell Tauri (planejado)
-ui                 frontend (TypeScript + Vite)
-plugins            plugins de exemplo
-manifests          manifests gerados (não editar à mão)
-scripts            build e execução
-docs               documentação
-```
-
-## Licença
+## 📄 License
 
 MIT
