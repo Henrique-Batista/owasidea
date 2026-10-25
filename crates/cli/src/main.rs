@@ -78,7 +78,10 @@ enum PluginCmd {
 fn read_host_addr(config: &Path) -> Option<String> {
     let raw = std::fs::read_to_string(config).ok()?;
     let val: toml::Value = toml::from_str(&raw).ok()?;
-    val.get("host")?.get("addr")?.as_str().map(|s| s.to_string())
+    val.get("host")?
+        .get("addr")?
+        .as_str()
+        .map(|s| s.to_string())
 }
 
 #[tokio::main]
