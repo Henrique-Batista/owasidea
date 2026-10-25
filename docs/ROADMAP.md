@@ -39,13 +39,13 @@
 - [ ] Validar bundle Tauri end-to-end (ícones, frontendDist, runtime)
 - [ ] Suporte a UI em frameworks WASM (Yew, Blazor, Uno) na webview
 - [ ] Integração `js-wasm` como plugin de UI (webview-only)
-- [ ] Watch de arquivos + hot reload integrado
+- [x] Watch de arquivos + hot reload integrado
 
 ## v0.4 — Ferramentas e DX
 
 - [x] `owasidea dev` orquestrando host + UI dev server (watcher pendente)
 - [x] Templates de plugin para Rust/Go/TS/C/C++/C#
-- [ ] `owasidea inspect` com WIT formatado e permissões efetivas
+- [x] `owasidea inspect` com WIT formatado e permissões efetivas
 - [x] Testes de integração automatizados (cargo test + Playwright smoke)
 - [x] Doctor com ferramentas obrigatórias/opcionais
 
