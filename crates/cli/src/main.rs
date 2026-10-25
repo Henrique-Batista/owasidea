@@ -75,7 +75,6 @@ enum PluginCmd {
     },
 }
 
-
 fn tool_path(name: &str) -> Option<std::path::PathBuf> {
     // PATH
     if let Ok(path) = std::process::Command::new("which").arg(name).output() {
@@ -87,7 +86,11 @@ fn tool_path(name: &str) -> Option<std::path::PathBuf> {
         }
     }
     let candidates = match name {
-        "dotnet" => vec!["/usr/share/dotnet/dotnet", "/root/.dotnet/dotnet", "/home/pablitux/.dotnet/dotnet"],
+        "dotnet" => vec![
+            "/usr/share/dotnet/dotnet",
+            "/root/.dotnet/dotnet",
+            "/home/pablitux/.dotnet/dotnet",
+        ],
         "clang" => vec!["/usr/bin/clang", "/opt/wasi-sdk/bin/clang"],
         "jco" => vec!["/home/pablitux/.npm-global/bin/jco"],
         _ => vec![],
@@ -712,7 +715,8 @@ fn cmd_build(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
                 }
             }
             "csharp" => {
-                let dotnet = tool_path("dotnet").unwrap_or_else(|| std::path::PathBuf::from("dotnet"));
+                let dotnet =
+                    tool_path("dotnet").unwrap_or_else(|| std::path::PathBuf::from("dotnet"));
                 let status = std::process::Command::new(&dotnet)
                     .args(["build", "-c", "Release", "--source", ""])
                     .current_dir(&p.path)
