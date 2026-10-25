@@ -18,7 +18,7 @@
 
 ## C# (componentize-dotnet)
 
-Supported target frameworks: net9.0, net10.0 and future net11.0.
+Supported target frameworks: net8.0, net9.0, net10.0 and future net11.0.
 
 1. Install .NET SDK (9/10/11) + wasi workload.
 2. Set `<TargetFramework>net9.0</TargetFramework>` (or newer).

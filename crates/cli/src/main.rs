@@ -325,7 +325,7 @@ fn cmd_plugin_new(
         "csharp" => {
             std::fs::write(
                 dir.join(format!("{name}.csproj")),
-                "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <PropertyGroup>\n    <OutputType>Exe</OutputType>\n    <TargetFramework>net9.0</TargetFramework>\n  </PropertyGroup>\n</Project>\n",
+                "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <PropertyGroup>\n    <OutputType>Exe</OutputType>\n    <TargetFramework>net8.0</TargetFramework>\n  </PropertyGroup>\n</Project>\n",
             )?;
             std::fs::write(
                 dir.join("Program.cs"),
