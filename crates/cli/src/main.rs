@@ -348,7 +348,7 @@ fn cmd_plugin_new(
             std::fs::write(
                 dir.join("package.json"),
                 format!(
-                    "{{\n  \"name\": \"{name}\",\n  \"private\": true,\n  \"type\": \"module\",\n  \"scripts\": {{\n    \"build\": \"jco componentize src/index.ts --wit wit --world {name} -o {name}.component.wasm\"\n  }}\n}}\n"
+                    "{{\n  \"name\": \"{name}\",\n  \"private\": true,\n  \"type\": \"module\",\n  \"scripts\": {{\n    \"build\": \"jco componentize src/index.ts --wit wit --world-name {name} -o {name}.component.wasm\"\n  }},\n  \"devDependencies\": {{\n    \"@bytecodealliance/jco\": \"latest\",\n    \"@bytecodealliance/componentize-js\": \"latest\"\n  }}\n}}\n"
                 ),
             )?;
             std::fs::write(
@@ -473,20 +473,38 @@ fn cmd_plugin_new(
         "c" | "cpp" | "c++" => {
             let ext = if lang == "c" { "c" } else { "cpp" };
             let compiler = if lang == "c" { "clang" } else { "clang++" };
+            let stdflag = if lang == "c" { "" } else { "-std=c++23 -fno-exceptions" };
+            std::fs::create_dir_all(dir.join("wit"))?;
+            std::fs::create_dir_all(dir.join("src"))?;
             std::fs::write(
-                dir.join("Makefile"),
+                dir.join("wit").join(format!("{name}.wit")),
                 format!(
-                    "WASI_SDK ?= /opt/wasi-sdk\nCC = $(WASI_SDK)/bin/{compiler}\n\nall:\n\t$(CC) --target=wasm32-wasip1 -o {name}.wasm src/main.{ext}\n\twasm-tools component new {name}.wasm -o {name}.component.wasm\n"
+                    "package poc:{name}@0.1.0;\n\ninterface api {{\n    greet: func(name: string) -> string;\n}}\n\nworld {name} {{\n    export api;\n}}\n"
                 ),
             )?;
             std::fs::write(
-                dir.join("src").join(format!("main.{ext}")),
-                if lang == "c" {
-                    "#include <stdio.h>\nint main(void) {\n    printf(\"Hello from C!\\n\");\n    return 0;\n}\n".to_string()
-                } else {
-                    "#include <iostream>\nint main() {\n    std::cout << \"Hello from C++!\" << std::endl;\n    return 0;\n}\n".to_string()
-                },
+                dir.join("Makefile"),
+                format!(
+                    "WASI_SDK ?= /home/pablitux/wasi-sdk/wasi-sdk-25.0-x86_64-linux\nADAPTER ?= /home/pablitux/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wasi-preview1-component-adapter-provider-48.0.7/artefacts/wasi_snapshot_preview1.reactor.wasm\nCC = $(WASI_SDK)/bin/{compiler}\n\nall:\n\twit-bindgen {lang} wit/{name}.wit --out-dir src\n\t$(CC) --target=wasm32-wasip1 {stdflag} -O2 -c src/{name}.c -o src/{name}.o 2>/dev/null || $(CC) --target=wasm32-wasip1 {stdflag} -O2 -c src/{name}.cpp -o src/{name}.o\n\t$(CC) --target=wasm32-wasip1 {stdflag} -O2 -c src/impl.{ext} -o src/impl.o\n\t$(CC) --target=wasm32-wasip1 {stdflag} -O2 src/{name}_component_type.o src/{name}.o src/impl.o -o {name}.wasm -mexec-model=reactor\n\twasm-tools component new {name}.wasm --adapt $(ADAPTER) -o {name}.component.wasm\n",
+                    lang = if lang == "c" { "c" } else { "cpp" },
+                    compiler = compiler,
+                    stdflag = stdflag,
+                    name = name,
+                    ext = ext,
+                ),
             )?;
+            let impl_content = if lang == "c" {
+                format!(
+                    "#include \"{name}.h\"\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n\nvoid exports_poc_{name}_api_greet({name}_string_t *name, {name}_string_t *ret) {{\n    size_t len = 7 + name->len + 11 + 1;\n    char *buf = (char*)malloc(len);\n    snprintf(buf, len, \"Hello, %.*s! (from C)\", (int)name->len, (char*)name->ptr);\n    {name}_string_dup(ret, buf);\n    free(buf);\n}}\n",
+                    name = name
+                )
+            } else {
+                format!(
+                    "#include \"{name}_cpp.h\"\n#include <cstring>\n#include <cstdlib>\n\nnamespace exports::poc::{name}::api {{\n    wit::string Greet(wit::string name) {{\n        const char* prefix = \"Hello, \";\n        const char* suffix = \"! (from C++)\";\n        size_t len = 7 + name.size() + 12;\n        char* buf = (char*)malloc(len + 1);\n        memcpy(buf, prefix, 7);\n        memcpy(buf + 7, name.data(), name.size());\n        memcpy(buf + 7 + name.size(), suffix, 12);\n        buf[len] = '\\0';\n        auto result = wit::string(buf, len);\n        return result;\n    }}\n}}\n",
+                    name = name
+                )
+            };
+            std::fs::write(dir.join("src").join(format!("impl.{ext}")), impl_content)?;
         }
         _ => {}
     }

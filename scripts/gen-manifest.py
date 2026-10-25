@@ -98,7 +98,8 @@ def main():
     ap.add_argument("--name", required=True)
     ap.add_argument("--version", default="0.1.0")
     ap.add_argument("--language", default="rust",
-                    choices=["rust", "csharp", "go", "typescript", "javascript"])
+                    choices=["rust", "csharp", "go", "typescript", "javascript",
+                             "c", "cpp"])
     ap.add_argument("--runtime", default="wasi-component",
                     choices=["wasi-component", "js-wasm"])
     ap.add_argument("--type", dest="kind", default="library",
