@@ -17,7 +17,7 @@
 - [x] Persistir KV host (SQLite/redb) em vez de memória
 - [x] Re-ler manifest no reload (feito)
 - [x] Atualizar estado em memória após reload
-- [ ] Hot-reload de bibliotecas com snapshot de estado (opcional)
+- [ ] Hot-reload de bibliotecas com snapshot de estado (opcional, non-goal v1.0)
 - [x] Outbound HTTP allowlist via `WasiHttpHooks::send_request`
 - [x] Streaming de logs via SSE
 
@@ -37,8 +37,8 @@
 - [x] Telas: overview, plugins, detalhe, serviços, dev mode (hash router)
 - [x] `owasidea bundle` produzindo app Tauri
 - [x] Validar bundle Tauri (deb/rpm gerados com sucesso)
-- [ ] Suporte a UI em frameworks WASM (Yew, Blazor, Uno) na webview
-- [ ] Integração `js-wasm` como plugin de UI (webview-only)
+- [ ] Suporte a UI em frameworks WASM (Yew, Blazor, Uno) na webview (vision)
+- [ ] Integração `js-wasm` como plugin de UI (webview-only) (vision)
 - [x] Watch de arquivos + hot reload integrado
 
 ## v0.4 — Ferramentas e DX
