@@ -210,6 +210,7 @@ fn cmd_doctor(json: bool) -> anyhow::Result<()> {
         ("clang (C/C++)", "clang --version"),
         ("dotnet (C#)", "dotnet --version"),
         ("jco (JS/TS)", "jco --version"),
+        ("componentize-dotnet (C#)", "componentize-dotnet --version"),
         ("python3 (optional)", "python3 --version"),
     ];
     let mut results: Vec<(&str, bool, bool)> = Vec::new();
