@@ -181,6 +181,7 @@ fn cmd_doctor(json: bool) -> anyhow::Result<()> {
         ("clang (C/C++)", "clang --version"),
         ("dotnet (C#)", "dotnet --version"),
         ("jco (JS/TS)", "jco --version"),
+        ("python3 (optional)", "python3 --version"),
     ];
     let mut results: Vec<(&str, bool, bool)> = Vec::new();
     for (name, cmd) in checks {
@@ -398,6 +399,177 @@ struct AppSection {
     version: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
+fn generate_manifest(
+    component: &Path,
+    name: &str,
+    version: &str,
+    language: &str,
+    kind: &str,
+    out: &Path,
+    fs: &[String],
+    kv: Option<&str>,
+    http_outbound: &[String],
+    persistent: bool,
+) -> anyhow::Result<()> {
+    use regex::Regex;
+    use serde_json::json;
+    use sha2::{Digest, Sha256};
+    use std::collections::BTreeSet;
+
+    // Run wasm-tools component wit --json
+    let out_json = std::process::Command::new("wasm-tools")
+        .args(["component", "wit", "--json"])
+        .arg(component)
+        .output()?;
+    if !out_json.status.success() {
+        anyhow::bail!("wasm-tools component wit --json failed");
+    }
+    let doc: serde_json::Value = serde_json::from_slice(&out_json.stdout)?;
+
+    let interfaces = doc.get("interfaces").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let packages = doc.get("packages").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let worlds = doc.get("worlds").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let world = worlds.first().cloned().unwrap_or_else(|| serde_json::json!({}));
+
+    fn package_parts(pkg_name: &str) -> (String, Option<String>) {
+        if let Some((base, ver)) = pkg_name.rsplit_once('@') {
+            (base.to_string(), Some(ver.to_string()))
+        } else {
+            (pkg_name.to_string(), None)
+        }
+    }
+
+    let mut wasi_set = BTreeSet::new();
+    let mut host_set = BTreeSet::new();
+    if let Some(imports) = world.get("imports").and_then(|v| v.as_object()) {
+        for (_key, entry) in imports {
+            let iface_id = entry
+                .get("interface")
+                .and_then(|v| v.get("id"))
+                .and_then(|v| v.as_u64());
+            let Some(id) = iface_id else { continue; };
+            let iface = interfaces.get(id as usize);
+            let Some(iface) = iface else { continue; };
+            let pkg_idx = iface.get("package").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let Some(pkg) = packages.get(pkg_idx) else { continue; };
+            let pkg_name = pkg.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let (base, version) = package_parts(pkg_name);
+            let iface_name = iface.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let mut full = format!("{}/{}", base, iface_name);
+            if let Some(v) = version {
+                full = format!("{}@{}", full, v);
+            }
+            if base.starts_with("wasi:") {
+                wasi_set.insert(full);
+            } else {
+                host_set.insert(full);
+            }
+        }
+    }
+    let wasi: Vec<String> = wasi_set.into_iter().collect();
+    let host: Vec<String> = host_set.into_iter().collect();
+
+    // exports via text
+    let text_out = std::process::Command::new("wasm-tools")
+        .args(["component", "wit"])
+        .arg(component)
+        .output()?;
+    let text = String::from_utf8_lossy(&text_out.stdout);
+    let export_re = Regex::new(r"(?m)^\s*export\s+([A-Za-z0-9_-]+)\s*:\s*(?:async\s+)?(func\(.*?\)(?:\s*->\s*[^;]+)?);").unwrap();
+    let export_iface_re = Regex::new(r"(?m)^\s*export\s+([A-Za-z0-9:_/-]+(?:@[0-9.]+)?)\s*;").unwrap();
+    let mut exports = Vec::new();
+    for cap in export_re.captures_iter(&text) {
+        exports.push(json!({"name": &cap[1], "signature": cap[2].trim()}));
+    }
+    for cap in export_iface_re.captures_iter(&text) {
+        exports.push(json!({"name": &cap[1], "signature": "interface"}));
+    }
+
+    // abi
+    let abi = if wasi.iter().any(|w| w.contains("@0.3.")) {
+        "wasi-0.3"
+    } else {
+        "wasi-0.2"
+    };
+
+    // fs
+    let mut fs_perms = Vec::new();
+    for v in fs {
+        let (path, access) = if let Some((p, a)) = v.rsplit_once(':') {
+            (p.to_string(), a.to_string())
+        } else {
+            (v.clone(), "read-write".to_string())
+        };
+        fs_perms.push(json!({"path": path, "access": access, "preopen": true}));
+    }
+
+    // kv
+    let kv = kv.map(|k| {
+        let (ns, access) = if let Some((n, a)) = k.rsplit_once(':') {
+            (n.to_string(), a.to_string())
+        } else {
+            (k.to_string(), "read-write".to_string())
+        };
+        json!({"namespace": ns, "access": access})
+    });
+
+    let storage = if persistent {
+        if !fs.is_empty() {
+            "wasi-filesystem"
+        } else if kv.is_some() {
+            "host-kv"
+        } else {
+            "none"
+        }
+    } else {
+        "none"
+    };
+
+    // sha256
+    let bytes = std::fs::read(component)?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let sha = format!("{:x}", hasher.finalize());
+
+    let manifest = json!({
+        "name": name,
+        "version": version,
+        "language": language,
+        "abi": abi,
+        "runtime": "wasi-component",
+        "type": kind,
+        "component": std::path::Path::new(component).file_name().unwrap_or_default().to_string_lossy(),
+        "exports": exports,
+        "imports": {"wasi": wasi, "host": host, "plugins": []},
+        "permissions": {
+            "filesystem": fs_perms,
+            "http": {"outbound": http_outbound, "inbound": kind == "executable" || kind == "hybrid"},
+            "kv": kv,
+            "resources": {"max_memory_mb": 64, "max_fuel": 1000000000, "timeout_ms": 30000, "max_instances": 1}
+        },
+        "state": {"persistent": persistent, "storage": storage,
+                  "root": if storage == "wasi-filesystem" { format!("./data/{}", name) } else { String::new() }},
+        "composition": {"strategy": "build-time", "entry": kind == "executable"},
+        "metadata": {"author": "", "license": "MIT", "description": "", "sha256": sha}
+    });
+
+    // component path should be relative to manifest dir; Python used relpath. We'll store just filename? Host resolves relative to manifest parent. Use relative path from manifest dir to component.
+    // Compute relative path.
+    let comp_abs = component.canonicalize().unwrap_or_else(|_| component.to_path_buf());
+    let manifest_dir = out.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let manifest_abs = manifest_dir.canonicalize().unwrap_or_else(|_| manifest_dir.to_path_buf());
+    let rel = comp_abs.strip_prefix(&manifest_abs).map(|p| p.to_path_buf()).unwrap_or_else(|_| component.to_path_buf());
+    let mut manifest = manifest;
+    manifest["component"] = json!(rel.to_string_lossy().to_string());
+
+    std::fs::create_dir_all(manifest_dir)?;
+    std::fs::write(out, serde_json::to_string_pretty(&manifest)? + "\n")?;
+    println!("wrote {} ({} wasi imports, {} host imports, {} exports)", out.display(), wasi.len(), host.len(), exports.len());
+    Ok(())
+}
+
+
 fn cmd_build(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
     let raw = std::fs::read_to_string(config)?;
     let cfg: AppConfig = toml::from_str(&raw)?;
@@ -407,11 +579,6 @@ fn cmd_build(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
         return Ok(());
     }
     std::fs::create_dir_all(manifest_dir)?;
-    let script_path = std::env::temp_dir().join("owasidea-gen-manifest.py");
-    std::fs::write(
-        &script_path,
-        include_str!("../../../scripts/gen-manifest.py"),
-    )?;
 
     let app_version = cfg
         .app
@@ -531,41 +698,18 @@ fn cmd_build(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
             anyhow::bail!("component not found after build: {}", component.display());
         }
         let manifest = manifest_dir.join(format!("{}.manifest.json", name));
-        let mut cmd = std::process::Command::new("python3");
-        cmd.arg(&script_path)
-            .arg("--component")
-            .arg(&component)
-            .arg("--name")
-            .arg(name)
-            .arg("--version")
-            .arg(p.version.clone().unwrap_or_else(|| app_version.clone()))
-            .arg("--language")
-            .arg(lang)
-            .arg("--type")
-            .arg(&p.kind)
-            .arg("--out")
-            .arg(&manifest);
-        for fs in &p.fs {
-            cmd.arg("--fs").arg(fs);
-        }
-        if let Some(kv) = &p.kv {
-            cmd.arg("--kv").arg(kv);
-        }
-        for h in &p.http_outbound {
-            cmd.arg("--http-outbound").arg(h);
-        }
-        if p.persistent {
-            cmd.arg("--persistent");
-            if !p.fs.is_empty() {
-                cmd.arg("--storage").arg("wasi-filesystem");
-            } else if p.kv.is_some() {
-                cmd.arg("--storage").arg("host-kv");
-            }
-        }
-        let status = cmd.status()?;
-        if !status.success() {
-            anyhow::bail!("manifest generation failed for {}", name);
-        }
+        generate_manifest(
+            &component,
+            name,
+            &p.version.clone().unwrap_or_else(|| app_version.clone()),
+            lang,
+            &p.kind,
+            &manifest,
+            &p.fs,
+            p.kv.as_deref(),
+            &p.http_outbound,
+            p.persistent,
+        )?;
         println!("    manifest: {}", manifest.display());
     }
     println!("Build complete.");
