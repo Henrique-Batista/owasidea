@@ -427,10 +427,25 @@ fn generate_manifest(
     }
     let doc: serde_json::Value = serde_json::from_slice(&out_json.stdout)?;
 
-    let interfaces = doc.get("interfaces").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-    let packages = doc.get("packages").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-    let worlds = doc.get("worlds").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-    let world = worlds.first().cloned().unwrap_or_else(|| serde_json::json!({}));
+    let interfaces = doc
+        .get("interfaces")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let packages = doc
+        .get("packages")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let worlds = doc
+        .get("worlds")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let world = worlds
+        .first()
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
 
     fn package_parts(pkg_name: &str) -> (String, Option<String>) {
         if let Some((base, ver)) = pkg_name.rsplit_once('@') {
@@ -448,11 +463,17 @@ fn generate_manifest(
                 .get("interface")
                 .and_then(|v| v.get("id"))
                 .and_then(|v| v.as_u64());
-            let Some(id) = iface_id else { continue; };
+            let Some(id) = iface_id else {
+                continue;
+            };
             let iface = interfaces.get(id as usize);
-            let Some(iface) = iface else { continue; };
+            let Some(iface) = iface else {
+                continue;
+            };
             let pkg_idx = iface.get("package").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-            let Some(pkg) = packages.get(pkg_idx) else { continue; };
+            let Some(pkg) = packages.get(pkg_idx) else {
+                continue;
+            };
             let pkg_name = pkg.get("name").and_then(|v| v.as_str()).unwrap_or("");
             let (base, version) = package_parts(pkg_name);
             let iface_name = iface.get("name").and_then(|v| v.as_str()).unwrap_or("");
@@ -476,8 +497,12 @@ fn generate_manifest(
         .arg(component)
         .output()?;
     let text = String::from_utf8_lossy(&text_out.stdout);
-    let export_re = Regex::new(r"(?m)^\s*export\s+([A-Za-z0-9_-]+)\s*:\s*(?:async\s+)?(func\(.*?\)(?:\s*->\s*[^;]+)?);").unwrap();
-    let export_iface_re = Regex::new(r"(?m)^\s*export\s+([A-Za-z0-9:_/-]+(?:@[0-9.]+)?)\s*;").unwrap();
+    let export_re = Regex::new(
+        r"(?m)^\s*export\s+([A-Za-z0-9_-]+)\s*:\s*(?:async\s+)?(func\(.*?\)(?:\s*->\s*[^;]+)?);",
+    )
+    .unwrap();
+    let export_iface_re =
+        Regex::new(r"(?m)^\s*export\s+([A-Za-z0-9:_/-]+(?:@[0-9.]+)?)\s*;").unwrap();
     let mut exports = Vec::new();
     for cap in export_re.captures_iter(&text) {
         exports.push(json!({"name": &cap[1], "signature": cap[2].trim()}));
@@ -556,19 +581,31 @@ fn generate_manifest(
 
     // component path should be relative to manifest dir; Python used relpath. We'll store just filename? Host resolves relative to manifest parent. Use relative path from manifest dir to component.
     // Compute relative path.
-    let comp_abs = component.canonicalize().unwrap_or_else(|_| component.to_path_buf());
+    let comp_abs = component
+        .canonicalize()
+        .unwrap_or_else(|_| component.to_path_buf());
     let manifest_dir = out.parent().unwrap_or_else(|| std::path::Path::new("."));
-    let manifest_abs = manifest_dir.canonicalize().unwrap_or_else(|_| manifest_dir.to_path_buf());
-    let rel = comp_abs.strip_prefix(&manifest_abs).map(|p| p.to_path_buf()).unwrap_or_else(|_| component.to_path_buf());
+    let manifest_abs = manifest_dir
+        .canonicalize()
+        .unwrap_or_else(|_| manifest_dir.to_path_buf());
+    let rel = comp_abs
+        .strip_prefix(&manifest_abs)
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|_| component.to_path_buf());
     let mut manifest = manifest;
     manifest["component"] = json!(rel.to_string_lossy().to_string());
 
     std::fs::create_dir_all(manifest_dir)?;
     std::fs::write(out, serde_json::to_string_pretty(&manifest)? + "\n")?;
-    println!("wrote {} ({} wasi imports, {} host imports, {} exports)", out.display(), wasi.len(), host.len(), exports.len());
+    println!(
+        "wrote {} ({} wasi imports, {} host imports, {} exports)",
+        out.display(),
+        wasi.len(),
+        host.len(),
+        exports.len()
+    );
     Ok(())
 }
-
 
 fn cmd_build(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
     let raw = std::fs::read_to_string(config)?;
