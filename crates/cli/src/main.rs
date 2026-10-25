@@ -75,6 +75,32 @@ enum PluginCmd {
     },
 }
 
+
+fn tool_path(name: &str) -> Option<std::path::PathBuf> {
+    // PATH
+    if let Ok(path) = std::process::Command::new("which").arg(name).output() {
+        if path.status.success() {
+            let p = String::from_utf8_lossy(&path.stdout).trim().to_string();
+            if !p.is_empty() {
+                return Some(std::path::PathBuf::from(p));
+            }
+        }
+    }
+    let candidates = match name {
+        "dotnet" => vec!["/usr/share/dotnet/dotnet", "/root/.dotnet/dotnet", "/home/pablitux/.dotnet/dotnet"],
+        "clang" => vec!["/usr/bin/clang", "/opt/wasi-sdk/bin/clang"],
+        "jco" => vec!["/home/pablitux/.npm-global/bin/jco"],
+        _ => vec![],
+    };
+    for c in candidates {
+        let p = std::path::Path::new(c);
+        if p.exists() {
+            return Some(p.to_path_buf());
+        }
+    }
+    None
+}
+
 fn read_host_addr(config: &Path) -> Option<String> {
     let raw = std::fs::read_to_string(config).ok()?;
     let val: toml::Value = toml::from_str(&raw).ok()?;
@@ -194,8 +220,10 @@ fn cmd_doctor(json: bool) -> anyhow::Result<()> {
         results.push((name, ok, false));
     }
     for (name, cmd) in optional {
+        let tool = cmd.split_whitespace().next().unwrap_or("");
+        let resolved = tool_path(tool).unwrap_or_else(|| std::path::PathBuf::from(tool));
         let parts: Vec<&str> = cmd.split_whitespace().collect();
-        let ok = Command::new(parts[0])
+        let ok = Command::new(&resolved)
             .args(&parts[1..])
             .output()
             .map(|o| o.status.success())
@@ -684,8 +712,9 @@ fn cmd_build(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
                 }
             }
             "csharp" => {
-                let status = std::process::Command::new("dotnet")
-                    .args(["build", "-c", "Release"])
+                let dotnet = tool_path("dotnet").unwrap_or_else(|| std::path::PathBuf::from("dotnet"));
+                let status = std::process::Command::new(&dotnet)
+                    .args(["build", "-c", "Release", "--source", ""])
                     .current_dir(&p.path)
                     .status()?;
                 if !status.success() {
