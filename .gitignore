@@ -8,4 +8,5 @@ ui/.vite
 manifests/*.manifest.json
 # keep generated? no, generated
 data/
+test-results/
 .DS_Store
