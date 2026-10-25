@@ -365,22 +365,222 @@ fn cmd_plugin_new(
     Ok(())
 }
 
-fn cmd_build(_config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
-    // Invoke build-all.sh if present
-    let script = std::path::Path::new("scripts/build-all.sh");
-    if script.exists() {
-        let status = std::process::Command::new("bash").arg(script).status()?;
-        if !status.success() {
-            anyhow::bail!("build failed");
-        }
-        Ok(())
-    } else {
-        println!(
-            "no build script found; manifests in {}",
-            manifest_dir.display()
-        );
-        Ok(())
+
+#[derive(serde::Deserialize, Default, Clone)]
+struct PluginSection {
+    path: String,
+    language: String,
+    #[serde(rename = "type", default = "default_plugin_type")]
+    kind: String,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    fs: Vec<String>,
+    #[serde(default)]
+    kv: Option<String>,
+    #[serde(default)]
+    http_outbound: Vec<String>,
+    #[serde(default)]
+    persistent: bool,
+}
+
+fn default_plugin_type() -> String {
+    "library".to_string()
+}
+
+#[derive(serde::Deserialize, Default)]
+struct AppConfig {
+    app: Option<AppSection>,
+    plugins: Option<std::collections::BTreeMap<String, PluginSection>>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct AppSection {
+    version: Option<String>,
+}
+
+fn cmd_build(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
+    let raw = std::fs::read_to_string(config)?;
+    let cfg: AppConfig = toml::from_str(&raw)?;
+    let plugins = cfg.plugins.clone().unwrap_or_default();
+    if plugins.is_empty() {
+        println!("no plugins declared in {}", config.display());
+        return Ok(());
     }
+    std::fs::create_dir_all(manifest_dir)?;
+    let script_path = std::env::temp_dir().join("owasidea-gen-manifest.py");
+    std::fs::write(&script_path, include_str!("../../../scripts/gen-manifest.py"))?;
+
+    let app_version = cfg
+        .app
+        .as_ref()
+        .and_then(|a| a.version.clone())
+        .unwrap_or_else(|| "0.1.0".to_string());
+
+    for (name, p) in &plugins {
+        println!("==> Building {} ({})", name, p.language);
+        let lang = p.language.as_str();
+        match lang {
+            "rust" => {
+                let status = std::process::Command::new("cargo")
+                    .args(["component", "build", "--release"])
+                    .current_dir(&p.path)
+                    .status()?;
+                if !status.success() {
+                    anyhow::bail!("rust build failed for {}", name);
+                }
+                let out = std::process::Command::new("cargo")
+                    .args(["metadata", "--format-version", "1", "--no-deps"])
+                    .current_dir(&p.path)
+                    .output()?;
+                let meta: serde_json::Value = serde_json::from_slice(&out.stdout)?;
+                let td = meta["target_directory"].as_str().unwrap_or("");
+                let artifact_name = name.replace('-', "_");
+                let src = std::path::Path::new(td)
+                    .join("wasm32-wasip1/release")
+                    .join(format!("{}.wasm", artifact_name));
+                let dst = std::path::Path::new(&p.path).join(format!("{}.component.wasm", name));
+                std::fs::copy(&src, &dst)?;
+            }
+            "go" => {
+                let status = std::process::Command::new("go")
+                    .args(["tool", "componentize-go", "build"])
+                    .current_dir(&p.path)
+                    .status()?;
+                if !status.success() {
+                    anyhow::bail!("go build failed for {}", name);
+                }
+                let src = std::path::Path::new(&p.path).join("main.wasm");
+                let dst = std::path::Path::new(&p.path).join(format!("{}.component.wasm", name));
+                std::fs::copy(&src, &dst)?;
+            }
+            "typescript" | "javascript" => {
+                let status = std::process::Command::new("npm")
+                    .args(["run", "build"])
+                    .current_dir(&p.path)
+                    .status()?;
+                if !status.success() {
+                    anyhow::bail!("npm build failed for {}", name);
+                }
+                let produced = std::fs::read_dir(&p.path)?
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .find(|pp| {
+                        pp.file_name()
+                            .and_then(|s| s.to_str())
+                            .map(|s| s.ends_with(".component.wasm"))
+                            .unwrap_or(false)
+                    });
+                if let Some(src) = produced {
+                    let dst = std::path::Path::new(&p.path).join(format!("{}.component.wasm", name));
+                    if src != dst {
+                        std::fs::copy(&src, &dst)?;
+                    }
+                }
+            }
+            "c" | "cpp" | "c++" => {
+                let status = std::process::Command::new("make")
+                    .current_dir(&p.path)
+                    .status()?;
+                if !status.success() {
+                    anyhow::bail!("make failed for {}", name);
+                }
+            }
+            "csharp" => {
+                let status = std::process::Command::new("dotnet")
+                    .args(["build", "-c", "Release"])
+                    .current_dir(&p.path)
+                    .status()?;
+                if !status.success() {
+                    anyhow::bail!("dotnet build failed for {}", name);
+                }
+                let mut module = None;
+                for entry in walkdir(std::path::Path::new(&p.path).join("bin")) {
+                    if entry.extension().and_then(|e| e.to_str()) == Some("wasm")
+                        && !entry.to_string_lossy().contains("component")
+                    {
+                        module = Some(entry);
+                        break;
+                    }
+                }
+                if let Some(m) = module {
+                    let dst = std::path::Path::new(&p.path).join(format!("{}.component.wasm", name));
+                    let status = std::process::Command::new("wasm-tools")
+                        .args([
+                            "component",
+                            "new",
+                            m.to_str().unwrap(),
+                            "-o",
+                            dst.to_str().unwrap(),
+                        ])
+                        .status()?;
+                    if !status.success() {
+                        anyhow::bail!("wasm-tools component new failed");
+                    }
+                }
+            }
+            other => anyhow::bail!("unsupported language: {}", other),
+        }
+
+        let component = std::path::Path::new(&p.path).join(format!("{}.component.wasm", name));
+        if !component.exists() {
+            anyhow::bail!("component not found after build: {}", component.display());
+        }
+        let manifest = manifest_dir.join(format!("{}.manifest.json", name));
+        let mut cmd = std::process::Command::new("python3");
+        cmd.arg(&script_path)
+            .arg("--component")
+            .arg(&component)
+            .arg("--name")
+            .arg(name)
+            .arg("--version")
+            .arg(p.version.clone().unwrap_or_else(|| app_version.clone()))
+            .arg("--language")
+            .arg(lang)
+            .arg("--type")
+            .arg(&p.kind)
+            .arg("--out")
+            .arg(&manifest);
+        for fs in &p.fs {
+            cmd.arg("--fs").arg(fs);
+        }
+        if let Some(kv) = &p.kv {
+            cmd.arg("--kv").arg(kv);
+        }
+        for h in &p.http_outbound {
+            cmd.arg("--http-outbound").arg(h);
+        }
+        if p.persistent {
+            cmd.arg("--persistent");
+            if !p.fs.is_empty() {
+                cmd.arg("--storage").arg("wasi-filesystem");
+            } else if p.kv.is_some() {
+                cmd.arg("--storage").arg("host-kv");
+            }
+        }
+        let status = cmd.status()?;
+        if !status.success() {
+            anyhow::bail!("manifest generation failed for {}", name);
+        }
+        println!("    manifest: {}", manifest.display());
+    }
+    println!("Build complete.");
+    Ok(())
+}
+
+fn walkdir(dir: std::path::PathBuf) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for e in entries.flatten() {
+            let pth = e.path();
+            if pth.is_dir() {
+                out.extend(walkdir(pth));
+            } else {
+                out.push(pth);
+            }
+        }
+    }
+    out
 }
 
 async fn cmd_dev(manifest_dir: &Path, http_addr: &str) -> anyhow::Result<()> {
