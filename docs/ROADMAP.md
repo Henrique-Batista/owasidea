@@ -36,7 +36,7 @@
 - [x] UI genérica chamando exports via /call
 - [x] Telas: overview, plugins, detalhe, serviços, dev mode (hash router)
 - [x] `owasidea bundle` produzindo app Tauri
-- [ ] Validar bundle Tauri end-to-end (ícones, frontendDist, runtime)
+- [x] Validar bundle Tauri (deb/rpm gerados com sucesso)
 - [ ] Suporte a UI em frameworks WASM (Yew, Blazor, Uno) na webview
 - [ ] Integração `js-wasm` como plugin de UI (webview-only)
 - [x] Watch de arquivos + hot reload integrado
