@@ -18,9 +18,12 @@
 
 ## C# (componentize-dotnet)
 
-1. Install .NET SDK + wasi workload.
-2. Build component with `dotnet build`.
-3. Generate manifest.
+Supported target frameworks: net9.0, net10.0 and future net11.0.
+
+1. Install .NET SDK (9/10/11) + wasi workload.
+2. Set `<TargetFramework>net9.0</TargetFramework>` (or newer).
+3. Build component with `dotnet build`.
+4. Generate manifest.
 
 ## TypeScript/JavaScript (jco)
 
