@@ -1025,6 +1025,39 @@ async fn cmd_dev(manifest_dir: &Path, http_addr: &str) -> anyhow::Result<()> {
         }
     }
 
+    // File watcher for hot reload (best-effort)
+    let base = format!("http://{}", http_addr);
+    std::thread::spawn(move || {
+        use inotify::{Inotify, WatchMask};
+        let mut inotify = match Inotify::init() {
+            Ok(i) => i,
+            Err(_) => return,
+        };
+        // watch plugins dir
+        let plugins_dir = std::path::Path::new("plugins");
+        if plugins_dir.exists() {
+            let _ = inotify.watches().add(plugins_dir, WatchMask::MODIFY | WatchMask::CLOSE_WRITE | WatchMask::CREATE);
+        }
+        let mut buffer = [0u8; 4096];
+        loop {
+            if let Ok(events) = inotify.read_events_blocking(&mut buffer) {
+                for ev in events {
+                    if let Some(name) = ev.name {
+                        let n = name.to_string_lossy();
+                        if n.ends_with(".component.wasm") {
+                            // derive plugin name from parent dir
+                            // plugins/<plugin>/<name>.component.wasm
+                            let plugin = n.trim_end_matches(".component.wasm").to_string();
+                            println!("[dev] detected change: {} -> reloading {}", n, plugin);
+                            let url = format!("{}/plugin/{}/reload", base, plugin);
+                            let _ = reqwest::blocking::Client::new().post(&url).send();
+                        }
+                    }
+                }
+            }
+        }
+    });
+
     let manifests = manifest_dir.to_path_buf();
     let addr = http_addr.to_string();
     let res = owasidea_host::run(manifests, addr).await;
@@ -1055,6 +1088,25 @@ fn cmd_inspect(manifest_dir: &Path, plugin: &str, json: bool) -> anyhow::Result<
     } else {
         let v: serde_json::Value = serde_json::from_str(&raw)?;
         println!("{}", serde_json::to_string_pretty(&v)?);
+        // Show WIT if component exists
+        let comp = found
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join(v["component"].as_str().unwrap_or(""));
+        if comp.exists() {
+            println!("\n--- WIT ---");
+            let status = std::process::Command::new("wasm-tools")
+                .args(["component", "wit"])
+                .arg(&comp)
+                .status();
+            if status.is_ok() {
+                let out = std::process::Command::new("wasm-tools")
+                    .args(["component", "wit"])
+                    .arg(&comp)
+                    .output()?;
+                print!("{}", String::from_utf8_lossy(&out.stdout));
+            }
+        }
     }
     Ok(())
 }
