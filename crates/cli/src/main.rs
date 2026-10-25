@@ -719,9 +719,18 @@ fn cmd_build(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
                 let dotnet =
                     tool_path("dotnet").unwrap_or_else(|| std::path::PathBuf::from("dotnet"));
                 let mut cmd = std::process::Command::new(&dotnet);
-                cmd.args(["publish", "-c", "Release", "-r", "wasi-wasm", "--source", ""])
-                    .current_dir(&p.path);
-                let wasi = std::path::PathBuf::from("/home/pablitux/wasi-sdk/wasi-sdk-25.0-x86_64-linux");
+                cmd.args([
+                    "publish",
+                    "-c",
+                    "Release",
+                    "-r",
+                    "wasi-wasm",
+                    "--source",
+                    "",
+                ])
+                .current_dir(&p.path);
+                let wasi =
+                    std::path::PathBuf::from("/home/pablitux/wasi-sdk/wasi-sdk-25.0-x86_64-linux");
                 if wasi.exists() {
                     cmd.env("WASI_SDK_PATH", wasi);
                 }
