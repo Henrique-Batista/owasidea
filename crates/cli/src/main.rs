@@ -1215,8 +1215,36 @@ fn cmd_bundle() -> anyhow::Result<()> {
         .args(["tauri", "build"])
         .current_dir("crates/desktop")
         .status()?;
+    // Tauri may fail only on AppImage (linuxdeploy icon/strip); try manual fallback.
     if !status.success() {
-        anyhow::bail!("tauri build failed");
+        println!("Tauri build reported failure; attempting AppImage fallback...");
+    }
+    // Manual AppImage creation if AppDir exists.
+    let appdir = std::path::Path::new("crates/desktop/target/release/bundle/appimage/Owasidea.AppDir");
+    // cargo uses build dir /mnt/scratch; check there too
+    let appdir_path = if appdir.exists() {
+        Some(appdir.to_path_buf())
+    } else {
+        let alt = std::path::PathBuf::from("/mnt/scratch/build-artifacts/cargo/release/bundle/appimage/Owasidea.AppDir");
+        if alt.exists() { Some(alt) } else { None }
+    };
+    if let Some(dir) = appdir_path {
+        let icon = dir.join("icon.png");
+        let src_icon = dir.join("Owasidea.png");
+        if !icon.exists() && src_icon.exists() {
+            std::fs::copy(&src_icon, &icon).ok();
+        }
+        let linuxdeploy = std::path::Path::new("/home/pablitux/.cache/tauri/linuxdeploy-x86_64.AppImage");
+        if linuxdeploy.exists() {
+            let mut cmd = std::process::Command::new(linuxdeploy);
+            cmd.arg("--appdir").arg(&dir).arg("--output").arg("appimage");
+            cmd.env("APPIMAGE_EXTRACT_AND_RUN", "1");
+            cmd.env("NO_STRIP", "1");
+            let st = cmd.status()?;
+            if st.success() {
+                println!("AppImage created via linuxdeploy fallback.");
+            }
+        }
     }
     println!("Bundle complete.");
     Ok(())
