@@ -60,6 +60,19 @@ enum Commands {
     /// Build the desktop bundle (Tauri).
     #[command(about = "Build the desktop bundle (Tauri).")]
     Bundle,
+    /// Generate an Ed25519 keypair for signing plugins.
+    #[command(about = "Generate an Ed25519 keypair for signing plugins.")]
+    Keygen {
+        #[arg(long, default_value = ".")]
+        out: PathBuf,
+    },
+    /// Sign a plugin component and update its manifest.
+    #[command(about = "Sign a plugin component and update its manifest.")]
+    Sign {
+        plugin: String,
+        #[arg(long)]
+        key: PathBuf,
+    },
     /// WIT utilities (generate WIT from Rust attributes).
     #[command(about = "WIT utilities (generate WIT from Rust attributes).")]
     Wit {
@@ -161,6 +174,8 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Inspect { plugin } => cmd_inspect(&cli.manifest_dir, &plugin, cli.json),
         Commands::Bundle => cmd_bundle(),
+        Commands::Keygen { out } => cmd_keygen(&out),
+        Commands::Sign { plugin, key } => cmd_sign(&cli.manifest_dir, &plugin, &key),
         Commands::Wit { cmd } => match cmd {
             WitCmd::Generate { path } => cmd_wit_generate(&path, cli.json),
         },
@@ -1036,7 +1051,10 @@ async fn cmd_dev(manifest_dir: &Path, http_addr: &str) -> anyhow::Result<()> {
         // watch plugins dir
         let plugins_dir = std::path::Path::new("plugins");
         if plugins_dir.exists() {
-            let _ = inotify.watches().add(plugins_dir, WatchMask::MODIFY | WatchMask::CLOSE_WRITE | WatchMask::CREATE);
+            let _ = inotify.watches().add(
+                plugins_dir,
+                WatchMask::MODIFY | WatchMask::CLOSE_WRITE | WatchMask::CREATE,
+            );
         }
         let mut buffer = [0u8; 4096];
         loop {
@@ -2275,4 +2293,52 @@ fn parse_cpp_params(raw: &str) -> String {
 
 fn cmd_wit_generate(path: &Path, _json: bool) -> anyhow::Result<()> {
     generate_wit(path)
+}
+
+fn cmd_keygen(out: &Path) -> anyhow::Result<()> {
+    use ring::signature::{Ed25519KeyPair, KeyPair};
+    std::fs::create_dir_all(out)?;
+    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+        .map_err(|e| anyhow::anyhow!("keygen failed: {e}"))?;
+    let keypair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())
+        .map_err(|e| anyhow::anyhow!("parse key failed: {e}"))?;
+    let pub_bytes = keypair.public_key().as_ref();
+    std::fs::write(out.join("owasidea.key"), base64_encode(pkcs8.as_ref()))?;
+    std::fs::write(out.join("owasidea.pub"), base64_encode(pub_bytes))?;
+    println!("generated {}/owasidea.key and owasidea.pub", out.display());
+    Ok(())
+}
+
+fn base64_encode(data: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(data)
+}
+
+fn cmd_sign(manifest_dir: &Path, plugin: &str, key_path: &Path) -> anyhow::Result<()> {
+    use ring::signature::Ed25519KeyPair;
+    let manifest_path = manifest_dir.join(format!("{}.manifest.json", plugin));
+    let raw = std::fs::read_to_string(&manifest_path)?;
+    let mut manifest: serde_json::Value = serde_json::from_str(&raw)?;
+    let comp_rel = manifest["component"].as_str().unwrap_or("").to_string();
+    let comp_path = manifest_path.parent().unwrap().join(&comp_rel);
+    let bytes = std::fs::read(&comp_path)?;
+    let key_b64 = std::fs::read_to_string(key_path)?;
+    let key_bytes = base64_decode(key_b64.trim())?;
+    let keypair = Ed25519KeyPair::from_pkcs8(&key_bytes)
+        .map_err(|e| anyhow::anyhow!("invalid private key: {e}"))?;
+    let sig = keypair.sign(&bytes);
+    manifest["metadata"]["signature"] = serde_json::json!(base64_encode(sig.as_ref()));
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest)? + "\n",
+    )?;
+    println!("signed {} -> {}", plugin, manifest_path.display());
+    Ok(())
+}
+
+fn base64_decode(s: &str) -> anyhow::Result<Vec<u8>> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(s)
+        .map_err(|e| anyhow::anyhow!("base64 decode failed: {e}"))
 }

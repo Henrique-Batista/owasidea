@@ -16,7 +16,7 @@
 - [x] Limites de memória por instância (StoreLimits)
 - [x] Persistir KV host (SQLite/redb) em vez de memória
 - [x] Re-ler manifest no reload (feito)
-- [ ] Atualizar estado em memória após reload
+- [x] Atualizar estado em memória após reload
 - [ ] Hot-reload de bibliotecas com snapshot de estado (opcional)
 - [x] Outbound HTTP allowlist via `WasiHttpHooks::send_request`
 - [x] Streaming de logs via SSE
@@ -52,7 +52,7 @@
 ## v1.0 — Achieved (POC scope): polyglot desktop framework
 
 - [x] Verificação de integridade por checksum (sha256)
-- [ ] Assinatura criptográfica de plugins
+- [x] Assinatura criptográfica de plugins (Ed25519 via `owasidea keygen/sign`)
 - [ ] Registry remoto / marketplace (non-goal for POC)
 - [ ] Isolamento WASI completo (parcial: host interfaces + preopens + network allowlist)
 - [x] Execução concorrente por requisição (instância por chamada)

@@ -33,6 +33,8 @@ tokio-stream = "0.1"
 async-stream = "0.3"
 futures = "0.3"
 sha2 = "0.10"
+ring = "0.17"
+base64 = "0.22"
 
 [dev-dependencies]
 reqwest = { workspace = true }

@@ -167,10 +167,16 @@ struct TailcatSession {
 #[derive(Clone)]
 struct AppState {
     engine: Engine,
-    plugins: Arc<HashMap<String, PluginRuntime>>,
+    plugins: Arc<std::sync::RwLock<HashMap<String, std::sync::Arc<PluginRuntime>>>>,
     tailcat_session: Arc<Mutex<Option<TailcatSession>>>,
     requests: Arc<std::sync::atomic::AtomicU64>,
     errors: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl AppState {
+    fn plugin(&self, name: &str) -> Option<std::sync::Arc<PluginRuntime>> {
+        self.plugins.read().ok()?.get(name).cloned()
+    }
 }
 
 struct HostState {
@@ -379,6 +385,32 @@ async fn instantiate(
             ));
         }
     }
+    // Verify signature if declared.
+    if let Some(sig_b64) = plugin
+        .manifest
+        .metadata
+        .get("signature")
+        .and_then(|v| v.as_str())
+    {
+        if let Ok(pub_path) = std::env::var("OWASIDEA_PUBLIC_KEY") {
+            use base64::Engine;
+            use ring::signature::{UnparsedPublicKey, ED25519};
+            let pub_b64 =
+                std::fs::read_to_string(&pub_path).map_err(|e| anyhow!("read pub key: {e}"))?;
+            let pub_bytes = base64::engine::general_purpose::STANDARD
+                .decode(pub_b64.trim())
+                .map_err(|e| anyhow!("decode pub key: {e}"))?;
+            let sig_bytes = base64::engine::general_purpose::STANDARD
+                .decode(sig_b64)
+                .map_err(|e| anyhow!("decode signature: {e}"))?;
+            let pk = UnparsedPublicKey::new(&ED25519, &pub_bytes);
+            let bytes = std::fs::read(&plugin.component_path)
+                .map_err(|e| anyhow!("read component: {e}"))?;
+            pk.verify(&bytes, &sig_bytes).map_err(|_| {
+                anyhow!("signature verification failed for {}", plugin.manifest.name)
+            })?;
+        }
+    }
     let component = Component::from_file(engine, &plugin.component_path)
         .map_err(|e| anyhow!("failed to load component {:?}: {e}", plugin.component_path))?;
     let linker = build_linker(engine, plugin)?;
@@ -582,7 +614,7 @@ async fn overview(State(state): State<AppState>) -> Json<OverviewRes> {
     let mut executables = 0;
     let mut services = 0;
     let mut runtimes = std::collections::BTreeSet::new();
-    for p in state.plugins.values() {
+    for p in state.plugins.read().unwrap().values() {
         match p.manifest.kind.as_str() {
             "executable" => executables += 1,
             "hybrid" => services += 1,
@@ -597,7 +629,7 @@ async fn overview(State(state): State<AppState>) -> Json<OverviewRes> {
     }
     Json(OverviewRes {
         host: "ok",
-        plugins: state.plugins.len(),
+        plugins: state.plugins.read().unwrap().len(),
         libraries,
         executables,
         services,
@@ -607,7 +639,7 @@ async fn overview(State(state): State<AppState>) -> Json<OverviewRes> {
 
 async fn list_plugins(State(state): State<AppState>) -> Json<Vec<PluginInfo>> {
     let mut out = Vec::new();
-    for (name, p) in state.plugins.iter() {
+    for (name, p) in state.plugins.read().unwrap().iter() {
         out.push(PluginInfo {
             name: name.clone(),
             version: p.manifest.version.clone(),
@@ -628,8 +660,7 @@ async fn plugin_manifest(
     AxumPath(name): AxumPath<String>,
 ) -> Result<Json<Manifest>, (StatusCode, String)> {
     state
-        .plugins
-        .get(&name)
+        .plugin(&name)
         .map(|p| Json(p.manifest.clone()))
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))
 }
@@ -639,8 +670,7 @@ async fn plugin_logs(
     AxumPath(name): AxumPath<String>,
 ) -> Result<Json<LogsRes>, (StatusCode, String)> {
     let p = state
-        .plugins
-        .get(&name)
+        .plugin(&name)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
     let logs = p.logs.lock().await.clone();
     Ok(Json(LogsRes { logs }))
@@ -654,8 +684,7 @@ async fn plugin_logs_stream(
     (StatusCode, String),
 > {
     let p = state
-        .plugins
-        .get(&name)
+        .plugin(&name)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
     let logs = p.logs.clone();
     let stream = async_stream::stream! {
@@ -682,8 +711,7 @@ async fn reload(
     AxumPath(name): AxumPath<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let p = state
-        .plugins
-        .get(&name)
+        .plugin(&name)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
     // Re-read the manifest from disk so capability/permission edits are
     // enforced on reload (not just the component bytes).
@@ -721,7 +749,12 @@ async fn reload(
     )
     .await
     {
-        Ok(Ok(_)) => Ok(Json(serde_json::json!({ "reloaded": name }))),
+        Ok(Ok(_)) => {
+            if let Ok(mut m) = state.plugins.write() {
+                m.insert(name.clone(), std::sync::Arc::new(runtime));
+            }
+            Ok(Json(serde_json::json!({ "reloaded": name })))
+        }
         Ok(Err(e)) => Err(internal(e)),
         Err(_) => Err((StatusCode::GATEWAY_TIMEOUT, "reload timed out".to_string())),
     }
@@ -733,12 +766,13 @@ async fn greet(
     Json(req): Json<GreetReq>,
 ) -> Result<Json<OutputRes>, (StatusCode, String)> {
     let p = state
-        .plugins
-        .get(&name)
+        .plugin(&name)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
     let timeout_ms = p.manifest.permissions.resources.timeout_ms.unwrap_or(30000);
     let work = async {
-        let (mut store, instance) = instantiate(&state.engine, p).await.map_err(internal)?;
+        let (mut store, instance) = instantiate(&state.engine, p.as_ref())
+            .await
+            .map_err(internal)?;
         let func = instance
             .get_typed_func::<(String,), (String,)>(&mut store, "greet")
             .map_err(internal)?;
@@ -760,13 +794,14 @@ async fn complete(
     Json(req): Json<CompleteReq>,
 ) -> Result<Json<OutputRes>, (StatusCode, String)> {
     let p = state
-        .plugins
-        .get(&name)
+        .plugin(&name)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
     let timeout_ms = p.manifest.permissions.resources.timeout_ms.unwrap_or(30000);
     let prompt = req.prompt.clone();
     let work = async {
-        let (mut store, instance) = instantiate(&state.engine, p).await.map_err(internal)?;
+        let (mut store, instance) = instantiate(&state.engine, p.as_ref())
+            .await
+            .map_err(internal)?;
         let func = instance
             .get_typed_func::<(String,), (Result<String, String>,)>(&mut store, "complete")
             .map_err(internal)?;
@@ -791,12 +826,13 @@ async fn call_export(
     Json(req): Json<CallReq>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let p = state
-        .plugins
-        .get(&name)
+        .plugin(&name)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
     let timeout_ms = p.manifest.permissions.resources.timeout_ms.unwrap_or(30000);
     let work = async {
-        let (mut store, instance) = instantiate(&state.engine, p).await.map_err(internal)?;
+        let (mut store, instance) = instantiate(&state.engine, p.as_ref())
+            .await
+            .map_err(internal)?;
         // Resolve function: top-level first, then inside exported interfaces.
         let func = if let Some(f) = instance.get_func(&mut store, &req.function) {
             f
@@ -861,8 +897,7 @@ async fn service_start_generic(
     Json(req): Json<ServiceStartReq>,
 ) -> Result<Json<OutputRes>, (StatusCode, String)> {
     let p = state
-        .plugins
-        .get(&name)
+        .plugin(&name)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
     let region_json = if req.region_json.trim().is_empty() {
         default_region_json()
@@ -871,7 +906,9 @@ async fn service_start_generic(
     };
     let timeout_ms = p.manifest.permissions.resources.timeout_ms.unwrap_or(30000);
     let work = async {
-        let (mut store, instance) = instantiate(&state.engine, p).await.map_err(internal)?;
+        let (mut store, instance) = instantiate(&state.engine, p.as_ref())
+            .await
+            .map_err(internal)?;
         for candidate in ["start-service", "start-server"] {
             if let Some(func) = instance.get_func(&mut store, candidate) {
                 let ty = func.ty(&store);
@@ -904,12 +941,13 @@ async fn service_stop_generic(
     AxumPath(name): AxumPath<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let p = state
-        .plugins
-        .get(&name)
+        .plugin(&name)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
     let timeout_ms = p.manifest.permissions.resources.timeout_ms.unwrap_or(30000);
     let work = async {
-        let (mut store, instance) = instantiate(&state.engine, p).await.map_err(internal)?;
+        let (mut store, instance) = instantiate(&state.engine, p.as_ref())
+            .await
+            .map_err(internal)?;
         for candidate in ["stop-service", "stop-server"] {
             if let Some(func) = instance.get_func(&mut store, candidate) {
                 let ty = func.ty(&store);
@@ -933,12 +971,13 @@ async fn service_status_generic(
     AxumPath(name): AxumPath<String>,
 ) -> Result<Json<ServiceStatusRes>, (StatusCode, String)> {
     let p = state
-        .plugins
-        .get(&name)
+        .plugin(&name)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
     let timeout_ms = p.manifest.permissions.resources.timeout_ms.unwrap_or(30000);
     let work = async {
-        let (mut store, instance) = instantiate(&state.engine, p).await.map_err(internal)?;
+        let (mut store, instance) = instantiate(&state.engine, p.as_ref())
+            .await
+            .map_err(internal)?;
         for candidate in ["service-status", "server-status"] {
             if let Some(func) = instance.get_func(&mut store, candidate) {
                 let ty = func.ty(&store);
@@ -976,10 +1015,11 @@ async fn echo_udp(
     Json(req): Json<BindReq>,
 ) -> Result<Json<OutputRes>, (StatusCode, String)> {
     let p = state
-        .plugins
-        .get(&name)
+        .plugin(&name)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
-    let (mut store, instance) = instantiate(&state.engine, p).await.map_err(internal)?;
+    let (mut store, instance) = instantiate(&state.engine, p.as_ref())
+        .await
+        .map_err(internal)?;
     let func = instance
         .get_typed_func::<(u16,), (Result<String, String>,)>(&mut store, "echo-udp")
         .map_err(internal)?;
@@ -999,10 +1039,11 @@ async fn dial_echo(
     Json(req): Json<P3Req>,
 ) -> Result<Json<OutputRes>, (StatusCode, String)> {
     let p = state
-        .plugins
-        .get(&name)
+        .plugin(&name)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
-    let (mut store, instance) = instantiate(&state.engine, p).await.map_err(internal)?;
+    let (mut store, instance) = instantiate(&state.engine, p.as_ref())
+        .await
+        .map_err(internal)?;
     let func = instance
         .get_typed_func::<(String, u16), (Result<String, String>,)>(&mut store, "dial-echo")
         .map_err(internal)?;
@@ -1022,10 +1063,11 @@ async fn tls_probe(
     Json(req): Json<TlsReq>,
 ) -> Result<Json<OutputRes>, (StatusCode, String)> {
     let p = state
-        .plugins
-        .get(&name)
+        .plugin(&name)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
-    let (mut store, instance) = instantiate(&state.engine, p).await.map_err(internal)?;
+    let (mut store, instance) = instantiate(&state.engine, p.as_ref())
+        .await
+        .map_err(internal)?;
     let func = instance
         .get_typed_func::<(String, u16, String), (Result<String, String>,)>(&mut store, "tls-probe")
         .map_err(internal)?;
@@ -1089,13 +1131,15 @@ async fn start_service(
 
     let mut guard = state.tailcat_session.lock().await;
     if guard.is_none() {
-        let p = state.plugins.get("tailcat-wasi").ok_or_else(|| {
+        let p = state.plugin("tailcat-wasi").ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
                 "tailcat-wasi plugin not loaded".to_string(),
             )
         })?;
-        let (store, instance) = instantiate(&state.engine, p).await.map_err(internal)?;
+        let (store, instance) = instantiate(&state.engine, p.as_ref())
+            .await
+            .map_err(internal)?;
         *guard = Some(TailcatSession {
             store,
             instance,
@@ -1283,10 +1327,11 @@ async fn start_server(
     Json(req): Json<StartReq>,
 ) -> Result<Json<OutputRes>, (StatusCode, String)> {
     let p = state
-        .plugins
-        .get(&name)
+        .plugin(&name)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
-    let (mut store, instance) = instantiate(&state.engine, p).await.map_err(internal)?;
+    let (mut store, instance) = instantiate(&state.engine, p.as_ref())
+        .await
+        .map_err(internal)?;
     let func = instance
         .get_typed_func::<(String,), (Result<String, String>,)>(&mut store, "start-server")
         .map_err(internal)?;
@@ -1306,10 +1351,11 @@ async fn dial_tcp(
     Json(req): Json<DialReq>,
 ) -> Result<Json<OutputRes>, (StatusCode, String)> {
     let p = state
-        .plugins
-        .get(&name)
+        .plugin(&name)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
-    let (mut store, instance) = instantiate(&state.engine, p).await.map_err(internal)?;
+    let (mut store, instance) = instantiate(&state.engine, p.as_ref())
+        .await
+        .map_err(internal)?;
     let func = instance
         .get_typed_func::<(String, u16), (Result<String, String>,)>(&mut store, "dial-tcp")
         .map_err(internal)?;
@@ -1329,10 +1375,11 @@ async fn parse_address(
     Json(req): Json<ParseReq>,
 ) -> Result<Json<OutputRes>, (StatusCode, String)> {
     let p = state
-        .plugins
-        .get(&name)
+        .plugin(&name)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
-    let (mut store, instance) = instantiate(&state.engine, p).await.map_err(internal)?;
+    let (mut store, instance) = instantiate(&state.engine, p.as_ref())
+        .await
+        .map_err(internal)?;
     let func = instance
         .get_typed_func::<(String,), (Result<String, String>,)>(&mut store, "parse-address")
         .map_err(internal)?;
@@ -1352,10 +1399,11 @@ async fn bind_udp(
     Json(req): Json<BindReq>,
 ) -> Result<Json<OutputRes>, (StatusCode, String)> {
     let p = state
-        .plugins
-        .get(&name)
+        .plugin(&name)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
-    let (mut store, instance) = instantiate(&state.engine, p).await.map_err(internal)?;
+    let (mut store, instance) = instantiate(&state.engine, p.as_ref())
+        .await
+        .map_err(internal)?;
     let func = instance
         .get_typed_func::<(u16,), (Result<String, String>,)>(&mut store, "bind-udp")
         .map_err(internal)?;
@@ -1624,8 +1672,7 @@ async fn proxy_app(
         .cloned()
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing plugin name".to_string()))?;
     let p = state
-        .plugins
-        .get(&name)
+        .plugin(&name)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
     let port = p.port.ok_or_else(|| {
         (
@@ -1820,12 +1867,12 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
                 .with_context(|| format!("startup smoke test failed for {}", manifest.name))?;
         }
 
-        plugins.insert(manifest.name.clone(), runtime);
+        plugins.insert(manifest.name.clone(), std::sync::Arc::new(runtime));
     }
 
     let state = AppState {
         engine,
-        plugins: Arc::new(plugins),
+        plugins: Arc::new(std::sync::RwLock::new(plugins)),
         tailcat_session: Arc::new(Mutex::new(None)),
         requests: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         errors: Arc::new(std::sync::atomic::AtomicU64::new(0)),
