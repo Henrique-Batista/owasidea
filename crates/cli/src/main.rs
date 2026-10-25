@@ -473,7 +473,11 @@ fn cmd_plugin_new(
         "c" | "cpp" | "c++" => {
             let ext = if lang == "c" { "c" } else { "cpp" };
             let compiler = if lang == "c" { "clang" } else { "clang++" };
-            let stdflag = if lang == "c" { "" } else { "-std=c++23 -fno-exceptions" };
+            let stdflag = if lang == "c" {
+                ""
+            } else {
+                "-std=c++23 -fno-exceptions"
+            };
             std::fs::create_dir_all(dir.join("wit"))?;
             std::fs::create_dir_all(dir.join("src"))?;
             std::fs::write(
