@@ -195,11 +195,19 @@ async fn integration_smoke() {
     }
 
     // overview
-    let r = client.get(format!("{}/overview", base)).send().await.unwrap();
+    let r = client
+        .get(format!("{}/overview", base))
+        .send()
+        .await
+        .unwrap();
     assert!(r.status().is_success());
 
     // metrics
-    let r = client.get(format!("{}/metrics", base)).send().await.unwrap();
+    let r = client
+        .get(format!("{}/metrics", base))
+        .send()
+        .await
+        .unwrap();
     assert!(r.status().is_success());
     let text = r.text().await.unwrap();
     assert!(text.contains("owasidea_requests_total"));
