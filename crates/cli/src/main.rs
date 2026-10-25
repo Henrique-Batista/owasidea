@@ -75,6 +75,12 @@ enum PluginCmd {
     },
 }
 
+fn read_host_addr(config: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(config).ok()?;
+    let val: toml::Value = toml::from_str(&raw).ok()?;
+    val.get("host")?.get("addr")?.as_str().map(|s| s.to_string())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -86,18 +92,20 @@ async fn main() -> anyhow::Result<()> {
         },
         Commands::Build => cmd_build(&cli.config, &cli.manifest_dir),
         Commands::Dev => {
-            cmd_dev(
-                &cli.manifest_dir,
-                cli.http_addr.as_deref().unwrap_or("127.0.0.1:0"),
-            )
-            .await
+            let addr = cli
+                .http_addr
+                .clone()
+                .or_else(|| read_host_addr(&cli.config))
+                .unwrap_or_else(|| "127.0.0.1:0".to_string());
+            cmd_dev(&cli.manifest_dir, &addr).await
         }
         Commands::Run => {
-            cmd_run(
-                &cli.manifest_dir,
-                cli.http_addr.as_deref().unwrap_or("127.0.0.1:0"),
-            )
-            .await
+            let addr = cli
+                .http_addr
+                .clone()
+                .or_else(|| read_host_addr(&cli.config))
+                .unwrap_or_else(|| "127.0.0.1:0".to_string());
+            cmd_run(&cli.manifest_dir, &addr).await
         }
         Commands::Inspect { plugin } => cmd_inspect(&cli.manifest_dir, &plugin, cli.json),
         Commands::Bundle => cmd_bundle(),
@@ -132,14 +140,6 @@ fn cmd_init(dir: Option<PathBuf>, json: bool) -> anyhow::Result<()> {
         } else {
             "my-app".to_string()
         };
-        let addr = if interactive {
-            dialoguer::Input::with_theme(&dialoguer::theme::ColorfulTheme::default())
-                .with_prompt("Host address")
-                .default("127.0.0.1:8787".to_string())
-                .interact_text()?
-        } else {
-            "127.0.0.1:8787".to_string()
-        };
         let content = format!(
             r#"[app]
 name = "{app_name}"
@@ -147,7 +147,7 @@ version = "0.1.0"
 identifier = "dev.example.{app_name}"
 
 [host]
-addr = "{addr}"
+addr = "127.0.0.1:0"
 
 [dev]
 watch = true
