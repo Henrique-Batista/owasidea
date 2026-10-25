@@ -86,6 +86,7 @@ cargo test
 - `docs/API.md` — API HTTP
 - `docs/ARCHITECTURE.md` — arquitetura
 - `docs/PLUGIN_AUTHORING.md` — como escrever plugins
+- `docs/SOURCE_GENERATORS.md` — source generators por linguagem
 - `docs/ROADMAP.md` — roadmap de funcionalidades
 - `CONTRIBUTING.md` — como contribuir
 
