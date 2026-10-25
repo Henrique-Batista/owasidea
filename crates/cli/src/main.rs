@@ -718,37 +718,46 @@ fn cmd_build(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
             "csharp" => {
                 let dotnet =
                     tool_path("dotnet").unwrap_or_else(|| std::path::PathBuf::from("dotnet"));
-                let status = std::process::Command::new(&dotnet)
-                    .args(["build", "-c", "Release", "--source", ""])
-                    .current_dir(&p.path)
-                    .status()?;
+                let mut cmd = std::process::Command::new(&dotnet);
+                cmd.args(["publish", "-c", "Release", "-r", "wasi-wasm", "--source", ""])
+                    .current_dir(&p.path);
+                let wasi = std::path::PathBuf::from("/home/pablitux/wasi-sdk/wasi-sdk-25.0-x86_64-linux");
+                if wasi.exists() {
+                    cmd.env("WASI_SDK_PATH", wasi);
+                }
+                let status = cmd.status()?;
                 if !status.success() {
                     anyhow::bail!("dotnet build failed for {}", name);
                 }
-                let mut module = None;
-                for entry in walkdir(std::path::Path::new(&p.path).join("bin")) {
-                    if entry.extension().and_then(|e| e.to_str()) == Some("wasm")
-                        && !entry.to_string_lossy().contains("component")
-                    {
-                        module = Some(entry);
+                // .NET WASI produces dotnet.wasm (already a component). Prefer publish/AppBundle.
+                let mut found = None;
+                for candidate in [
+                    std::path::Path::new(&p.path)
+                        .join("bin/Release/net10.0/wasi-wasm/AppBundle/dotnet.wasm"),
+                    std::path::Path::new(&p.path)
+                        .join("bin/Release/net9.0/wasi-wasm/AppBundle/dotnet.wasm"),
+                    std::path::Path::new(&p.path)
+                        .join("bin/Release/net8.0/wasi-wasm/AppBundle/dotnet.wasm"),
+                ] {
+                    if candidate.exists() {
+                        found = Some(candidate);
                         break;
                     }
                 }
-                if let Some(m) = module {
+                if found.is_none() {
+                    for entry in walkdir(std::path::Path::new(&p.path).join("bin")) {
+                        if entry.file_name().and_then(|s| s.to_str()) == Some("dotnet.wasm") {
+                            found = Some(entry);
+                            break;
+                        }
+                    }
+                }
+                if let Some(src) = found {
                     let dst =
                         std::path::Path::new(&p.path).join(format!("{}.component.wasm", name));
-                    let status = std::process::Command::new("wasm-tools")
-                        .args([
-                            "component",
-                            "new",
-                            m.to_str().unwrap(),
-                            "-o",
-                            dst.to_str().unwrap(),
-                        ])
-                        .status()?;
-                    if !status.success() {
-                        anyhow::bail!("wasm-tools component new failed");
-                    }
+                    std::fs::copy(&src, &dst)?;
+                } else {
+                    anyhow::bail!("dotnet.wasm not found after build");
                 }
             }
             other => anyhow::bail!("unsupported language: {}", other),

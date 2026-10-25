@@ -16,14 +16,20 @@
 3. Wrap as component: `wasm-tools component new app.wasm -o app.component.wasm`.
 4. Generate manifest with `--language` (use `rust` placeholder or add `c`/`cpp`).
 
-## C# (componentize-dotnet)
+## C# (.NET WASI)
 
 Supported target frameworks: net8.0, net9.0, net10.0 and future net11.0.
 
-1. Install .NET SDK (9/10/11) + wasi workload.
-2. Set `<TargetFramework>net9.0</TargetFramework>` (or newer).
-3. Build component with `dotnet build`.
-4. Generate manifest.
+Notes:
+- .NET WASI produces a **command component** (`wasi:cli/run`), not a WIT library.
+- The framework builds it as an executable plugin; serving HTTP requires
+  `wasi:http/incoming-handler` (not provided by the default template).
+- For WIT-based libraries, use Rust/Go/TypeScript (jco) instead.
+
+1. Install .NET SDK + wasi workload + wasi-sdk.
+2. Build with `dotnet publish -c Release -r wasi-wasm`.
+3. The framework copies `dotnet.wasm` and generates the manifest.
+4. Run via host; HTTP proxy may not apply (command component).
 
 ## TypeScript/JavaScript (jco)
 
