@@ -1,0 +1,11 @@
+[package]
+name = "owasidea"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Procedural macros (attribute markers) for Owasidea components"
+
+[lib]
+proc-macro = true
+
+[dependencies]

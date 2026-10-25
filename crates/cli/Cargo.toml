@@ -23,6 +23,7 @@ owasidea-host = { path = "../host" }
 console = "0.15"
 toml = "0.8"
 regex = "1"
+syn = { version = "2", features = ["full"] }
 sha2 = "0.10"
 pathdiff = "0.2"
 dialoguer = "0.11"

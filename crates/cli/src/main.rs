@@ -60,6 +60,12 @@ enum Commands {
     /// Build the desktop bundle (Tauri).
     #[command(about = "Build the desktop bundle (Tauri).")]
     Bundle,
+    /// WIT utilities (generate WIT from Rust attributes).
+    #[command(about = "WIT utilities (generate WIT from Rust attributes).")]
+    Wit {
+        #[command(subcommand)]
+        cmd: WitCmd,
+    },
     /// Validate manifests, checksums and capabilities against config.
     #[command(about = "Validate manifests, checksums and capabilities against config.")]
     Validate,
@@ -75,6 +81,17 @@ enum PluginCmd {
         lang: Option<String>,
         #[arg(long, name = "type")]
         r#type: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum WitCmd {
+    /// Generate WIT from Rust source attributes.
+    #[command(about = "Generate WIT from Rust source attributes.")]
+    Generate {
+        /// Plugin/project directory to scan (defaults to current dir).
+        #[arg(default_value = ".")]
+        path: PathBuf,
     },
 }
 
@@ -144,6 +161,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Inspect { plugin } => cmd_inspect(&cli.manifest_dir, &plugin, cli.json),
         Commands::Bundle => cmd_bundle(),
+        Commands::Wit { cmd } => match cmd {
+            WitCmd::Generate { path } => cmd_wit_generate(&path, cli.json),
+        },
         Commands::Validate => cmd_validate(&cli.config, &cli.manifest_dir),
     }
 }
@@ -357,7 +377,9 @@ fn cmd_plugin_new(
             )?;
             std::fs::write(
                 dir.join("src").join("index.ts"),
-                "export function greet(name: string): string {\n  return `Hello, ${name}! (from TypeScript)`;\n}\n",
+                format!(
+                    "/** @owasidea-world {name} */\n/** @owasidea-export */\nexport function greet(name: string): string {{\n  return `Hello, ${{name}}! (from TypeScript)`;\n}}\n"
+                ),
             )?;
         }
         "csharp" => {
@@ -760,6 +782,7 @@ fn generate_manifest(
     Ok(())
 }
 
+#[allow(clippy::regex_creation_in_loops)]
 fn cmd_build(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
     let raw = std::fs::read_to_string(config)?;
     let cfg: AppConfig = toml::from_str(&raw)?;
@@ -781,6 +804,8 @@ fn cmd_build(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
         let lang = p.language.as_str();
         match lang {
             "rust" => {
+                // Generate WIT from Rust attributes if present.
+                let _ = generate_wit(std::path::Path::new(&p.path));
                 let status = std::process::Command::new("cargo")
                     .args(["component", "build", "--release"])
                     .current_dir(&p.path)
@@ -802,10 +827,54 @@ fn cmd_build(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
                 std::fs::copy(&src, &dst)?;
             }
             "go" => {
-                let status = std::process::Command::new("go")
-                    .args(["tool", "componentize-go", "build"])
-                    .current_dir(&p.path)
-                    .status()?;
+                let _ = generate_wit(std::path::Path::new(&p.path));
+                let wit_dir = std::path::Path::new(&p.path).join("wit");
+                let status = if wit_dir.exists() {
+                    // derive world arg from generated WIT
+                    let mut world_arg: Option<String> = None;
+                    let world_re = regex::Regex::new(r"world\s+([A-Za-z0-9_-]+)").unwrap();
+                    let pkg_re =
+                        regex::Regex::new(r"package\s+([A-Za-z0-9_-]+:[A-Za-z0-9_-]+)").unwrap();
+                    if let Ok(entries) = std::fs::read_dir(&wit_dir) {
+                        for e in entries.flatten() {
+                            let pp = e.path();
+                            if pp.extension().and_then(|x| x.to_str()) == Some("wit") {
+                                if let Ok(content) = std::fs::read_to_string(&pp) {
+                                    let world =
+                                        world_re.captures(&content).map(|c| c[1].to_string());
+                                    let pkg = pkg_re.captures(&content).map(|c| c[1].to_string());
+                                    if let (Some(w), Some(pk)) = (world, pkg) {
+                                        world_arg = Some(format!("{}/{}", pk, w));
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    let mut cmd = std::process::Command::new("go");
+                    cmd.current_dir(&p.path);
+                    if let Some(wa) = &world_arg {
+                        cmd.args([
+                            "tool",
+                            "componentize-go",
+                            "-d",
+                            "wit",
+                            "-w",
+                            wa,
+                            "build",
+                            "-o",
+                            "main.wasm",
+                        ]);
+                    } else {
+                        cmd.args(["tool", "componentize-go", "build"]);
+                    }
+                    cmd.status()?
+                } else {
+                    std::process::Command::new("go")
+                        .args(["tool", "componentize-go", "build"])
+                        .current_dir(&p.path)
+                        .status()?
+                };
                 if !status.success() {
                     anyhow::bail!("go build failed for {}", name);
                 }
@@ -814,6 +883,7 @@ fn cmd_build(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
                 std::fs::copy(&src, &dst)?;
             }
             "typescript" | "javascript" => {
+                let _ = generate_wit(std::path::Path::new(&p.path));
                 let status = std::process::Command::new("npm")
                     .args(["run", "build"])
                     .current_dir(&p.path)
@@ -839,6 +909,7 @@ fn cmd_build(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
                 }
             }
             "c" | "cpp" | "c++" => {
+                let _ = generate_wit(std::path::Path::new(&p.path));
                 let status = std::process::Command::new("make")
                     .current_dir(&p.path)
                     .status()?;
@@ -847,6 +918,7 @@ fn cmd_build(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
                 }
             }
             "csharp" => {
+                let _ = generate_wit(std::path::Path::new(&p.path));
                 let dotnet =
                     tool_path("dotnet").unwrap_or_else(|| std::path::PathBuf::from("dotnet"));
                 let mut cmd = std::process::Command::new(&dotnet);
@@ -1078,4 +1150,1077 @@ fn cmd_bundle() -> anyhow::Result<()> {
     }
     println!("Bundle complete.");
     Ok(())
+}
+
+#[derive(Clone)]
+struct ExportSig {
+    name: String,
+    params: String,
+    ret: String,
+    is_async: bool,
+}
+
+fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                collect_rs_files(&p, out);
+            } else if p.extension().and_then(|s| s.to_str()) == Some("rs") {
+                out.push(p);
+            }
+        }
+    }
+}
+
+fn collect_cs_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                collect_cs_files(&p, out);
+            } else if p.extension().and_then(|s| s.to_str()) == Some("cs") {
+                out.push(p);
+            }
+        }
+    }
+}
+
+fn csharp_type_to_wit(ty: &str) -> String {
+    let mut t = ty.trim();
+    t = t.trim_end_matches('?');
+    if t.ends_with("[]") {
+        let inner = t.trim_end_matches("[]");
+        return format!("list<{}>", csharp_type_to_wit(inner));
+    }
+    match t {
+        "string" => "string".to_string(),
+        "int" => "s32".to_string(),
+        "long" => "s64".to_string(),
+        "short" => "s16".to_string(),
+        "byte" => "u8".to_string(),
+        "sbyte" => "s8".to_string(),
+        "uint" => "u32".to_string(),
+        "ulong" => "u64".to_string(),
+        "ushort" => "u16".to_string(),
+        "float" => "f32".to_string(),
+        "double" => "f64".to_string(),
+        "bool" => "bool".to_string(),
+        "char" => "char".to_string(),
+        "void" => String::new(),
+        "Task" => String::new(),
+        _ => {
+            if let Some(inner) = t.strip_prefix("List<").and_then(|s| s.strip_suffix('>')) {
+                return format!("list<{}>", csharp_type_to_wit(inner.trim()));
+            }
+            if let Some(inner) = t
+                .strip_prefix("IEnumerable<")
+                .and_then(|s| s.strip_suffix('>'))
+            {
+                return format!("list<{}>", csharp_type_to_wit(inner.trim()));
+            }
+            if let Some(inner) = t.strip_prefix("Task<").and_then(|s| s.strip_suffix('>')) {
+                return csharp_type_to_wit(inner.trim());
+            }
+            t.to_lowercase()
+        }
+    }
+}
+
+fn parse_csharp_params(raw: &str) -> String {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return String::new();
+    }
+    let mut out = Vec::new();
+    for part in raw.split(',') {
+        let mut part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if let Some((left, _)) = part.split_once('=') {
+            part = left.trim();
+        }
+        let tokens: Vec<&str> = part.split_whitespace().collect();
+        if tokens.len() < 2 {
+            continue;
+        }
+        let pname = tokens[tokens.len() - 1];
+        let ty = tokens[..tokens.len() - 1].join(" ");
+        let wit_ty = csharp_type_to_wit(&ty);
+        out.push(format!("{}: {}", pname, wit_ty));
+    }
+    out.join(", ")
+}
+
+fn collect_ts_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                collect_ts_files(&p, out);
+            } else if p.extension().and_then(|s| s.to_str()) == Some("ts") {
+                out.push(p);
+            }
+        }
+    }
+}
+
+fn collect_go_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                collect_go_files(&p, out);
+            } else if p.extension().and_then(|s| s.to_str()) == Some("go") {
+                out.push(p);
+            }
+        }
+    }
+}
+
+fn collect_c_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                collect_c_files(&p, out);
+            } else if p.extension().and_then(|s| s.to_str()) == Some("c") {
+                out.push(p);
+            }
+        }
+    }
+}
+
+fn collect_cpp_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                collect_cpp_files(&p, out);
+            } else {
+                match p.extension().and_then(|s| s.to_str()) {
+                    Some("cpp") | Some("cc") | Some("cxx") | Some("C") => out.push(p),
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+fn attr_last(attr: &syn::Attribute) -> Option<String> {
+    attr.path().segments.last().map(|s| s.ident.to_string())
+}
+
+fn has_attr(attrs: &[syn::Attribute], name: &str) -> bool {
+    attrs.iter().any(|a| attr_last(a).as_deref() == Some(name))
+}
+
+fn parse_world_attr(attr: &syn::Attribute) -> Option<String> {
+    attr.parse_args::<syn::LitStr>().ok().map(|l| l.value())
+}
+
+fn rust_type_to_wit(ty: &syn::Type) -> String {
+    match ty {
+        syn::Type::Path(tp) => {
+            let seg = match tp.path.segments.last() {
+                Some(s) => s,
+                None => return "string".to_string(),
+            };
+            let ident = seg.ident.to_string();
+            match ident.as_str() {
+                "String" | "str" => "string".to_string(),
+                "i8" => "s8".to_string(),
+                "i16" => "s16".to_string(),
+                "i32" => "s32".to_string(),
+                "i64" => "s64".to_string(),
+                "u8" => "u8".to_string(),
+                "u16" => "u16".to_string(),
+                "u32" => "u32".to_string(),
+                "u64" => "u64".to_string(),
+                "f32" => "f32".to_string(),
+                "f64" => "f64".to_string(),
+                "bool" => "bool".to_string(),
+                "char" => "char".to_string(),
+                "Option" => {
+                    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                        if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
+                            return format!("option<{}>", rust_type_to_wit(inner));
+                        }
+                    }
+                    "option<string>".to_string()
+                }
+                "Result" => {
+                    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                        let mut it = args.args.iter();
+                        let ok = it
+                            .next()
+                            .map(type_arg_to_wit)
+                            .unwrap_or_else(|| "string".to_string());
+                        let err = it
+                            .next()
+                            .map(type_arg_to_wit)
+                            .unwrap_or_else(|| "string".to_string());
+                        return format!("result<{}, {}>", ok, err);
+                    }
+                    "result<string, string>".to_string()
+                }
+                "Vec" => {
+                    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                        if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
+                            return format!("list<{}>", rust_type_to_wit(inner));
+                        }
+                    }
+                    "list<string>".to_string()
+                }
+                other => other.to_lowercase(),
+            }
+        }
+        syn::Type::Reference(r) => rust_type_to_wit(&r.elem),
+        _ => "string".to_string(),
+    }
+}
+
+fn type_arg_to_wit(arg: &syn::GenericArgument) -> String {
+    match arg {
+        syn::GenericArgument::Type(ty) => rust_type_to_wit(ty),
+        _ => "string".to_string(),
+    }
+}
+
+fn parse_fn_sig(sig: &syn::Signature) -> ExportSig {
+    let params = sig
+        .inputs
+        .iter()
+        .filter_map(|arg| {
+            if let syn::FnArg::Typed(t) = arg {
+                let pname = match &*t.pat {
+                    syn::Pat::Ident(pi) => pi.ident.to_string(),
+                    _ => "arg".to_string(),
+                };
+                let ty = rust_type_to_wit(&t.ty);
+                Some(format!("{}: {}", pname, ty))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let ret = match &sig.output {
+        syn::ReturnType::Default => String::new(),
+        syn::ReturnType::Type(_, ty) => format!(" -> {}", rust_type_to_wit(ty)),
+    };
+    ExportSig {
+        name: sig.ident.to_string(),
+        params,
+        ret,
+        is_async: sig.asyncness.is_some(),
+    }
+}
+
+fn split_top_level(s: &str, sep: char) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut cur = String::new();
+    let mut depth = 0i32;
+    for c in s.chars() {
+        match c {
+            '<' | '(' | '[' | '{' => {
+                depth += 1;
+                cur.push(c);
+            }
+            '>' | ')' | ']' | '}' => {
+                depth = (depth - 1).max(0);
+                cur.push(c);
+            }
+            _ if c == sep && depth == 0 => {
+                parts.push(cur.clone());
+                cur.clear();
+            }
+            _ => cur.push(c),
+        }
+    }
+    if !cur.trim().is_empty() {
+        parts.push(cur);
+    }
+    parts
+}
+
+fn unwrap_generic(ty: &str, name: &str) -> Option<String> {
+    let ty = ty.trim();
+    let prefix = format!("{}<", name);
+    if ty.starts_with(&prefix) && ty.ends_with('>') {
+        Some(ty[prefix.len()..ty.len() - 1].to_string())
+    } else {
+        None
+    }
+}
+
+fn ts_type_to_wit(ty: &str) -> String {
+    let ty = ty.trim();
+    if ty.is_empty() {
+        return String::new();
+    }
+    if let Some(inner) = unwrap_generic(ty, "Promise") {
+        return ts_type_to_wit(&inner);
+    }
+    if let Some(inner) = unwrap_generic(ty, "Array") {
+        return format!("list<{}>", ts_type_to_wit(&inner));
+    }
+    if ty.ends_with("[]") {
+        return format!(
+            "list<{}>",
+            ts_type_to_wit(ty.strip_suffix("[]").unwrap_or(ty))
+        );
+    }
+    // handle union by taking first alternative
+    if ty.contains('|') {
+        let first = ty.split('|').next().unwrap_or(ty).trim();
+        return ts_type_to_wit(first);
+    }
+    match ty {
+        "string" => "string".to_string(),
+        "number" => "f64".to_string(),
+        "boolean" => "bool".to_string(),
+        "bigint" => "s64".to_string(),
+        "void" | "undefined" | "null" => String::new(),
+        "any" | "unknown" => "string".to_string(),
+        _ => {
+            // generic list<T>?
+            if ty.starts_with("list<") {
+                ty.to_string()
+            } else {
+                ty.to_lowercase()
+            }
+        }
+    }
+}
+
+fn parse_ts_params(raw: &str) -> String {
+    if raw.trim().is_empty() {
+        return String::new();
+    }
+    let parts = split_top_level(raw, ',');
+    let mut out = Vec::new();
+    for part in parts {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if let Some(colon) = part.find(':') {
+            let name = part[..colon].trim().trim_end_matches('?').to_string();
+            let ty = part[colon + 1..].trim();
+            let wit = ts_type_to_wit(ty);
+            if wit.is_empty() {
+                out.push(name);
+            } else {
+                out.push(format!("{}: {}", name, wit));
+            }
+        }
+    }
+    out.join(", ")
+}
+
+pub fn generate_wit(plugin_dir: &Path) -> anyhow::Result<()> {
+    let src_dir = plugin_dir.join("src");
+    let mut rs_files = Vec::new();
+    collect_rs_files(&src_dir, &mut rs_files);
+    if rs_files.is_empty() {
+        collect_rs_files(plugin_dir, &mut rs_files);
+    }
+    let mut ts_files = Vec::new();
+    collect_ts_files(&src_dir, &mut ts_files);
+    if ts_files.is_empty() {
+        collect_ts_files(plugin_dir, &mut ts_files);
+    }
+    let mut go_files = Vec::new();
+    collect_go_files(&src_dir, &mut go_files);
+    if go_files.is_empty() {
+        collect_go_files(plugin_dir, &mut go_files);
+    }
+    let mut cs_files = Vec::new();
+    collect_cs_files(&src_dir, &mut cs_files);
+    if cs_files.is_empty() {
+        collect_cs_files(plugin_dir, &mut cs_files);
+    }
+
+    let mut c_files = Vec::new();
+    collect_c_files(&src_dir, &mut c_files);
+    if c_files.is_empty() {
+        collect_c_files(plugin_dir, &mut c_files);
+    }
+    let mut cpp_files = Vec::new();
+    collect_cpp_files(&src_dir, &mut cpp_files);
+    if cpp_files.is_empty() {
+        collect_cpp_files(plugin_dir, &mut cpp_files);
+    }
+
+    let mut world_name: Option<String> = None;
+    let mut host_log = false;
+    let mut host_kv = false;
+    let mut exports: Vec<ExportSig> = Vec::new();
+
+    if !ts_files.is_empty() {
+        let world_re = regex::Regex::new(r"@owasidea-world\s+([A-Za-z0-9_-]+)").unwrap();
+        let func_re = regex::Regex::new(
+            r"(?s)/\*\*(.*?)\*/\s*export\s+(async\s+)?function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)\s*(?::\s*([^\{]+))?",
+        )
+        .unwrap();
+        for file in &ts_files {
+            let content = std::fs::read_to_string(file)?;
+            // world name from any @owasidea-world tag
+            for cap in world_re.captures_iter(&content) {
+                world_name = Some(cap[1].to_string());
+            }
+            if content.contains("@owasidea-host-log") {
+                host_log = true;
+            }
+            if content.contains("@owasidea-host-kv") {
+                host_kv = true;
+            }
+
+            // exported functions preceded by a JSDoc block containing @owasidea-export
+            for cap in func_re.captures_iter(&content) {
+                let jsdoc = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+                if !jsdoc.contains("@owasidea-export") {
+                    continue;
+                }
+                let is_async = cap.get(2).is_some();
+                let name = cap.get(3).unwrap().as_str().to_string();
+                let params_raw = cap.get(4).map(|m| m.as_str()).unwrap_or("");
+                let ret_raw = cap.get(5).map(|m| m.as_str()).unwrap_or("");
+                let params = parse_ts_params(params_raw);
+                let mut ret = ts_type_to_wit(ret_raw.trim());
+                let async_ret = if ret_raw.trim().starts_with("Promise") {
+                    // unwrap Promise<T>
+                    if let Some(inner) = unwrap_generic(ret_raw.trim(), "Promise") {
+                        ret = ts_type_to_wit(&inner);
+                    }
+                    true
+                } else {
+                    is_async
+                };
+                let ret_str = if ret_raw.trim().is_empty() || ret_raw.trim() == "void" {
+                    String::new()
+                } else {
+                    format!(" -> {}", ret)
+                };
+                exports.push(ExportSig {
+                    name,
+                    params,
+                    ret: ret_str,
+                    is_async: async_ret || is_async,
+                });
+            }
+        }
+    } else if !go_files.is_empty() {
+        let world_re = regex::Regex::new(r"(?m)//\s*owasidea:world\s+([A-Za-z0-9_-]+)").unwrap();
+        let host_log_re = regex::Regex::new(r"(?m)//\s*owasidea:host_log\b").unwrap();
+        let host_kv_re = regex::Regex::new(r"(?m)//\s*owasidea:host_kv\b").unwrap();
+        let export_re = regex::Regex::new(
+            r"(?ms)//[^\n]*owasidea:export[^\n]*\n\s*func\s+(\w+)\s*\(([^)]*)\)\s*([^\n{]*)",
+        )
+        .unwrap();
+
+        for file in &go_files {
+            let content = std::fs::read_to_string(file)?;
+            if let Some(c) = world_re.captures(&content) {
+                world_name = Some(c[1].to_string());
+            }
+            if host_log_re.is_match(&content) {
+                host_log = true;
+            }
+            if host_kv_re.is_match(&content) {
+                host_kv = true;
+            }
+            for cap in export_re.captures_iter(&content) {
+                let name = cap[1].to_string();
+                let params_raw = cap[2].to_string();
+                let ret_raw = cap[3].to_string();
+                let marker = &cap[0];
+                let is_async = marker.contains("async");
+                exports.push(parse_go_fn_sig(&name, &params_raw, &ret_raw, is_async));
+            }
+        }
+    } else if !cs_files.is_empty() {
+        let world_re =
+            regex::Regex::new(r#"(?i)\[\s*owasideaworld\s*\(\s*"([^"]+)"\s*\)\s*\]"#).unwrap();
+        let host_log_re = regex::Regex::new(r#"(?i)\[\s*owasideahostlog\s*\]"#).unwrap();
+        let host_kv_re = regex::Regex::new(r#"(?i)\[\s*owasideahostkv\s*\]"#).unwrap();
+        let export_re = regex::Regex::new(r#"(?is)\[\s*owasideaexport\s*\]\s*(?:\[[^\]]*\]\s*)*((?:(?:public|private|protected|internal|static|async|virtual|override|new|unsafe|extern|partial)\s+)+)([\w<>,\.\?\[\]\s]+?)\s+(\w+)\s*\(([^)]*)\)"#).unwrap();
+        for file in &cs_files {
+            let content = std::fs::read_to_string(file)?;
+            if let Some(c) = world_re.captures(&content) {
+                world_name = Some(c[1].to_string());
+            }
+            if host_log_re.is_match(&content) {
+                host_log = true;
+            }
+            if host_kv_re.is_match(&content) {
+                host_kv = true;
+            }
+            for cap in export_re.captures_iter(&content) {
+                let modifiers = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+                let ret_raw = cap.get(2).map(|m| m.as_str().trim()).unwrap_or("");
+                let raw_name = cap.get(3).unwrap().as_str().to_string();
+                let name = if let Some(first) = raw_name.chars().next() {
+                    first.to_lowercase().to_string() + &raw_name[first.len_utf8()..]
+                } else {
+                    raw_name
+                };
+                let params_raw = cap.get(4).map(|m| m.as_str()).unwrap_or("");
+                let is_async = modifiers.contains("async") || ret_raw.starts_with("Task");
+                let ret_str = if ret_raw.is_empty() || ret_raw == "void" || ret_raw == "Task" {
+                    String::new()
+                } else if let Some(inner) = ret_raw
+                    .strip_prefix("Task<")
+                    .and_then(|s| s.strip_suffix('>'))
+                {
+                    let m = csharp_type_to_wit(inner.trim());
+                    if m.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" -> {}", m)
+                    }
+                } else {
+                    let m = csharp_type_to_wit(ret_raw);
+                    if m.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" -> {}", m)
+                    }
+                };
+                let params = parse_csharp_params(params_raw);
+                exports.push(ExportSig {
+                    name,
+                    params,
+                    ret: ret_str,
+                    is_async,
+                });
+            }
+        }
+    } else if !c_files.is_empty() || !cpp_files.is_empty() {
+        let is_cpp = !cpp_files.is_empty();
+        let files = if is_cpp { &cpp_files } else { &c_files };
+        let world_re =
+            regex::Regex::new(r"(?im)//\s*owasidea[: _-]?world\s+([A-Za-z0-9_-]+)").unwrap();
+        let host_log_re = regex::Regex::new(r"(?i)owasidea[: _-]?host[: _-]?log").unwrap();
+        let host_kv_re = regex::Regex::new(r"(?i)owasidea[: _-]?host[: _-]?kv").unwrap();
+        for file in files {
+            let content = std::fs::read_to_string(file)?;
+            for cap in world_re.captures_iter(&content) {
+                world_name = Some(cap[1].to_string());
+            }
+            if host_log_re.is_match(&content) {
+                host_log = true;
+            }
+            if host_kv_re.is_match(&content) {
+                host_kv = true;
+            }
+
+            let lines: Vec<&str> = content.lines().collect();
+            let mut i = 0usize;
+            while i < lines.len() {
+                let l = lines[i].trim();
+                let low = l.to_lowercase();
+                if low.contains("owasidea") && low.contains("export") {
+                    let is_async = low.contains("async");
+                    // find next non-empty, non-comment declaration
+                    let mut j = i + 1;
+                    while j < lines.len() {
+                        let t = lines[j].trim();
+                        if t.is_empty()
+                            || t.starts_with("//")
+                            || t.starts_with("/*")
+                            || t.starts_with("*")
+                        {
+                            j += 1;
+                            continue;
+                        }
+                        break;
+                    }
+                    if j < lines.len() {
+                        let mut decl = lines[j].trim().to_string();
+                        decl = decl.trim_end_matches(';').trim().to_string();
+                        decl = decl.trim_end_matches('{').trim().to_string();
+                        if let Some(paren) = decl.find('(') {
+                            // matching close paren
+                            let mut depth = 0i32;
+                            let mut close = None;
+                            for (idx, ch) in decl.char_indices().skip(paren) {
+                                match ch {
+                                    '(' => depth += 1,
+                                    ')' => {
+                                        depth -= 1;
+                                        if depth == 0 {
+                                            close = Some(idx);
+                                            break;
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            let before = decl[..paren].trim();
+                            let mut toks: Vec<&str> = before.split_whitespace().collect();
+                            let popped = toks.pop().unwrap_or("").to_string();
+                            let had_ptr = popped.starts_with('*');
+                            let fname = popped.trim_start_matches('*').to_string();
+                            let mut ret_raw = toks.join(" ");
+                            if had_ptr {
+                                ret_raw = format!("{} *", ret_raw).trim().to_string();
+                            }
+                            let params_raw = if let Some(c) = close {
+                                decl[paren + 1..c].to_string()
+                            } else {
+                                String::new()
+                            };
+                            let name = if fname.is_empty() {
+                                String::new()
+                            } else {
+                                fname
+                            };
+                            if !name.is_empty() {
+                                let params = if is_cpp {
+                                    parse_cpp_params(&params_raw)
+                                } else {
+                                    parse_c_params(&params_raw)
+                                };
+                                let ret_mapped = if is_cpp {
+                                    cpp_type_to_wit(&ret_raw)
+                                } else {
+                                    c_type_to_wit(&ret_raw)
+                                };
+                                let ret_str = if ret_mapped.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(" -> {}", ret_mapped)
+                                };
+                                exports.push(ExportSig {
+                                    name,
+                                    params,
+                                    ret: ret_str,
+                                    is_async,
+                                });
+                            }
+                        }
+                    }
+                }
+                i += 1;
+            }
+        }
+    } else {
+        for file in &rs_files {
+            let content = std::fs::read_to_string(file)?;
+            let ast = match syn::parse_file(&content) {
+                Ok(a) => a,
+                Err(_) => continue,
+            };
+            for item in ast.items {
+                match item {
+                    syn::Item::Struct(s) => {
+                        for attr in &s.attrs {
+                            match attr_last(attr).as_deref() {
+                                Some("world") => {
+                                    if let Some(n) = parse_world_attr(attr) {
+                                        world_name = Some(n);
+                                    }
+                                }
+                                Some("host_log") => host_log = true,
+                                Some("host_kv") => host_kv = true,
+                                _ => {}
+                            }
+                        }
+                    }
+                    syn::Item::Fn(f) => {
+                        if has_attr(&f.attrs, "export") {
+                            exports.push(parse_fn_sig(&f.sig));
+                        }
+                    }
+                    syn::Item::Impl(i) => {
+                        for ii in &i.items {
+                            if let syn::ImplItem::Fn(m) = ii {
+                                if has_attr(&m.attrs, "export") {
+                                    exports.push(parse_fn_sig(&m.sig));
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    let world = match world_name {
+        Some(w) => w,
+        None => return Ok(()),
+    };
+
+    // dedup exports by name
+    let mut seen = std::collections::BTreeSet::new();
+    let mut deduped = Vec::new();
+    for e in exports {
+        if seen.insert(e.name.clone()) {
+            deduped.push(e);
+        }
+    }
+
+    let wit_dir = plugin_dir.join("wit");
+    std::fs::create_dir_all(&wit_dir)?;
+    let wit_path = wit_dir.join(format!("{}.wit", world));
+
+    let mut out = String::new();
+    out.push_str(&format!("package poc:{}@0.1.0;\n\n", world));
+    out.push_str(&format!("world {} {{\n", world));
+    if host_log {
+        out.push_str("    import poc:host/host-log@0.1.0;\n");
+    }
+    if host_kv {
+        out.push_str("    import poc:host/host-kv@0.1.0;\n");
+    }
+    if (host_log || host_kv) && !deduped.is_empty() {
+        out.push('\n');
+    }
+    for e in &deduped {
+        let async_kw = if e.is_async { "async " } else { "" };
+        out.push_str(&format!(
+            "    export {}: {}func({}){};\n",
+            e.name, async_kw, e.params, e.ret
+        ));
+    }
+    out.push_str("}\n");
+    std::fs::write(&wit_path, out)?;
+
+    if host_log || host_kv {
+        let deps_dir = wit_dir.join("deps").join("host");
+        std::fs::create_dir_all(&deps_dir)?;
+        let host_wit = deps_dir.join("host.wit");
+        if !host_wit.exists() {
+            std::fs::write(
+                &host_wit,
+                "package poc:host@0.1.0;\n\ninterface host-kv {\n    get: func(key: string) -> option<string>;\n    set: func(key: string, value: string);\n}\n\ninterface host-log {\n    log: func(msg: string);\n}\n",
+            )?;
+        }
+    }
+
+    println!("generated {}", wit_path.display());
+    Ok(())
+}
+
+fn go_type_to_wit(t: &str) -> String {
+    let t = t.trim();
+    if t.is_empty() {
+        return String::new();
+    }
+    if let Some(inner) = t.strip_prefix("[]") {
+        return format!("list<{}>", go_type_to_wit(inner));
+    }
+    if let Some(inner) = t.strip_prefix("*") {
+        return go_type_to_wit(inner);
+    }
+    match t {
+        "string" => "string".to_string(),
+        "bool" => "bool".to_string(),
+        "int" | "int32" => "s32".to_string(),
+        "int8" => "s8".to_string(),
+        "int16" => "s16".to_string(),
+        "int64" => "s64".to_string(),
+        "uint" | "uint32" => "u32".to_string(),
+        "uint8" | "byte" => "u8".to_string(),
+        "uint16" => "u16".to_string(),
+        "uint64" => "u64".to_string(),
+        "float32" => "f32".to_string(),
+        "float64" => "f64".to_string(),
+        "rune" => "char".to_string(),
+        "error" => "string".to_string(),
+        _ => t.to_lowercase(),
+    }
+}
+
+fn parse_go_params(raw: &str) -> String {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return String::new();
+    }
+    // Split by commas, tracking grouping: names without types accumulate
+    // until a typed segment appears.
+    let parts: Vec<&str> = raw.split(',').collect();
+    let mut pending: Vec<String> = Vec::new();
+    let mut out: Vec<String> = Vec::new();
+    for part in parts {
+        let fields: Vec<&str> = part.split_whitespace().collect();
+        if fields.is_empty() {
+            continue;
+        }
+        if fields.len() == 1 {
+            pending.push(fields[0].to_string());
+        } else {
+            // typed: all but last are names, last is type
+            for f in &fields[..fields.len() - 1] {
+                pending.push(f.to_string());
+            }
+            let ty_raw = fields[fields.len() - 1];
+            let wit = go_type_to_wit(ty_raw);
+            for n in pending.drain(..) {
+                if wit.is_empty() {
+                    out.push(n);
+                } else {
+                    out.push(format!("{}: {}", n, wit));
+                }
+            }
+        }
+    }
+    // trailing names without type -> default string
+    for n in pending.drain(..) {
+        out.push(format!("{}: string", n));
+    }
+    out.join(", ")
+}
+
+fn camel_to_kebab(s: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if c.is_uppercase() {
+            if i != 0 {
+                out.push('-');
+            }
+            out.push(c.to_ascii_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn parse_go_fn_sig(name: &str, params_raw: &str, ret_raw: &str, is_async: bool) -> ExportSig {
+    let params = parse_go_params(params_raw);
+    let ret_trim = ret_raw.trim();
+    let ret_str = if ret_trim.is_empty() {
+        String::new()
+    } else if ret_trim.starts_with('(') && ret_trim.ends_with(')') {
+        let inner = &ret_trim[1..ret_trim.len() - 1];
+        let ret_parts: Vec<&str> = inner
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if ret_parts.len() >= 2 && ret_parts[1] == "error" {
+            format!(" -> result<{}, string>", go_type_to_wit(ret_parts[0]))
+        } else if ret_parts.len() == 1 {
+            let w = go_type_to_wit(ret_parts[0]);
+            if w.is_empty() {
+                String::new()
+            } else {
+                format!(" -> {}", w)
+            }
+        } else {
+            // unsupported multi-return; take first
+            let w = go_type_to_wit(ret_parts[0]);
+            if w.is_empty() {
+                String::new()
+            } else {
+                format!(" -> {}", w)
+            }
+        }
+    } else {
+        let w = go_type_to_wit(ret_trim);
+        if w.is_empty() {
+            String::new()
+        } else {
+            format!(" -> {}", w)
+        }
+    };
+    ExportSig {
+        name: camel_to_kebab(name),
+        params,
+        ret: ret_str,
+        is_async,
+    }
+}
+
+fn c_type_to_wit(ty: &str) -> String {
+    let t = ty.trim();
+    if t.is_empty() {
+        return String::new();
+    }
+    // strip qualifiers/pointers for primitive mapping, but track pointer-ness for strings
+    let lower = t.to_lowercase();
+    if lower.contains("char") && (lower.contains('*') || lower.contains("char*")) {
+        return "string".to_string();
+    }
+    if lower.contains("char *") || lower.contains("char*") {
+        return "string".to_string();
+    }
+    let t = t
+        .trim_start_matches("const")
+        .trim_start_matches("volatile")
+        .trim();
+    let t = t.trim_end_matches('*').trim();
+    match t {
+        "void" => String::new(),
+        "bool" | "_Bool" => "bool".to_string(),
+        "char" | "signed char" => "s8".to_string(),
+        "unsigned char" | "uint8_t" => "u8".to_string(),
+        "short" | "short int" | "int16_t" => "s16".to_string(),
+        "unsigned short" | "uint16_t" => "u16".to_string(),
+        "int" | "signed int" | "int32_t" => "s32".to_string(),
+        "unsigned int" | "uint32_t" => "u32".to_string(),
+        "long" | "long int" | "int64_t" => "s64".to_string(),
+        "unsigned long" | "uint64_t" => "u64".to_string(),
+        "long long" => "s64".to_string(),
+        "float" => "f32".to_string(),
+        "double" => "f64".to_string(),
+        "size_t" => "u64".to_string(),
+        _ => {
+            if t.starts_with("list<") || t.starts_with("option<") || t.starts_with("result<") {
+                t.to_string()
+            } else {
+                t.to_lowercase()
+            }
+        }
+    }
+}
+
+fn cpp_type_to_wit(ty: &str) -> String {
+    let t = ty.trim();
+    if t.is_empty() {
+        return String::new();
+    }
+    let lower = t.to_lowercase();
+    if lower == "void" {
+        return String::new();
+    }
+    if lower == "std::string" || lower == "string" {
+        return "string".to_string();
+    }
+    if lower == "bool" {
+        return "bool".to_string();
+    }
+    if lower == "char" {
+        return "s8".to_string();
+    }
+    if lower == "int" || lower == "int32_t" {
+        return "s32".to_string();
+    }
+    if lower == "unsigned int" || lower == "uint32_t" {
+        return "u32".to_string();
+    }
+    if lower == "long" || lower == "int64_t" {
+        return "s64".to_string();
+    }
+    if lower == "unsigned long" || lower == "uint64_t" {
+        return "u64".to_string();
+    }
+    if lower == "float" {
+        return "f32".to_string();
+    }
+    if lower == "double" {
+        return "f64".to_string();
+    }
+    if let Some(inner) = t
+        .strip_prefix("std::vector<")
+        .and_then(|s| s.strip_suffix('>'))
+    {
+        return format!("list<{}>", cpp_type_to_wit(inner.trim()));
+    }
+    if let Some(inner) = t
+        .strip_prefix("std::optional<")
+        .and_then(|s| s.strip_suffix('>'))
+    {
+        return format!("option<{}>", cpp_type_to_wit(inner.trim()));
+    }
+    if let Some(inner) = t
+        .strip_prefix("std::list<")
+        .and_then(|s| s.strip_suffix('>'))
+    {
+        return format!("list<{}>", cpp_type_to_wit(inner.trim()));
+    }
+    t.to_lowercase()
+}
+
+fn parse_c_params(raw: &str) -> String {
+    let raw = raw.trim();
+    if raw.is_empty() || raw == "void" {
+        return String::new();
+    }
+    let parts = split_top_level(raw, ',');
+    let mut out = Vec::new();
+    for part in parts {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        // param form: "type name" (name last token)
+        let toks: Vec<&str> = part.split_whitespace().collect();
+        if toks.is_empty() {
+            continue;
+        }
+        if toks.len() == 1 {
+            // name only -> default string
+            out.push(format!("{}: string", toks[0]));
+            continue;
+        }
+        let pname = toks[toks.len() - 1].trim_matches('*');
+        let ty = toks[..toks.len() - 1].join(" ");
+        let wit = if ty.to_lowercase().contains("char") && part.contains('*') {
+            "string".to_string()
+        } else {
+            c_type_to_wit(&ty)
+        };
+        if wit.is_empty() {
+            out.push(pname.to_string());
+        } else {
+            out.push(format!("{}: {}", pname, wit));
+        }
+    }
+    out.join(", ")
+}
+
+fn parse_cpp_params(raw: &str) -> String {
+    let raw = raw.trim();
+    if raw.is_empty() || raw == "void" {
+        return String::new();
+    }
+    let parts = split_top_level(raw, ',');
+    let mut out = Vec::new();
+    for part in parts {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        // support "type name" or "name: type"
+        if part.contains(':') && !part.contains("::") {
+            if let Some(colon) = part.find(':') {
+                let name = part[..colon].trim().to_string();
+                let ty = part[colon + 1..].trim();
+                let wit = cpp_type_to_wit(ty);
+                if wit.is_empty() {
+                    out.push(name);
+                } else {
+                    out.push(format!("{}: {}", name, wit));
+                }
+                continue;
+            }
+        }
+        let toks: Vec<&str> = part.split_whitespace().collect();
+        if toks.is_empty() {
+            continue;
+        }
+        if toks.len() == 1 {
+            out.push(format!("{}: string", toks[0]));
+            continue;
+        }
+        let pname = toks[toks.len() - 1].trim_matches('&').trim_matches('*');
+        let ty = toks[..toks.len() - 1].join(" ");
+        let wit = cpp_type_to_wit(&ty);
+        if wit.is_empty() {
+            out.push(pname.to_string());
+        } else {
+            out.push(format!("{}: {}", pname, wit));
+        }
+    }
+    out.join(", ")
+}
+
+fn cmd_wit_generate(path: &Path, _json: bool) -> anyhow::Result<()> {
+    generate_wit(path)
 }

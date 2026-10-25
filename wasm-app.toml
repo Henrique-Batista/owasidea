@@ -16,11 +16,34 @@ path = "plugins/chat-go"
 language = "go"
 type = "executable"
 
+[plugins.attr-example]
+path = "plugins/attr-example"
+language = "rust"
+type = "library"
+kv = "attr-example:read-write"
+
 [plugins.example]
 path = "plugins/example"
 language = "rust"
 type = "library"
 kv = "example:read-write"
+
+[plugins.attr-ts]
+path = "plugins/attr-ts"
+language = "typescript"
+type = "library"
+
+[plugins.attr-go]
+path = "plugins/attr-go"
+language = "go"
+type = "library"
+kv = "attr-go:read-write"
+
+[plugins.tester]
+path = "plugins/tester"
+language = "csharp"
+type = "library"
+kv = "tester:read-write"
 
 [dev]
 watch = true

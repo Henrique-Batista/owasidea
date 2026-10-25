@@ -4,9 +4,11 @@ members = [
     "crates/host",
     "crates/cli",
     "crates/desktop",
+    "crates/macros",
+    "crates/owasidea",
 ]
 # desktop added later (Tauri)
-default-members = ["crates/host", "crates/cli"]
+default-members = ["crates/host", "crates/cli", "crates/macros", "crates/owasidea"]
 exclude = ["plugins/*"]
 
 [workspace.package]

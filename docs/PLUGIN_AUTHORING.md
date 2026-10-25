@@ -9,12 +9,15 @@
 5. Copy `.wasm` to `plugins/<name>/<name>.component.wasm`.
 6. Generate manifest: `python3 scripts/gen-manifest.py --component ... --name ... --language rust --type library ...`.
 
-## C/C++ (wasi-sdk + wasm-tools)
+## C/C++ (wasi-sdk + wasm-tools + wit-bindgen)
 
-1. Install wasi-sdk and ensure `clang` is on PATH.
-2. Compile to `wasm32-wasip1`: `clang --target=wasm32-wasip1 -o app.wasm src/main.c`.
-3. Wrap as component: `wasm-tools component new app.wasm -o app.component.wasm`.
-4. Generate manifest with `--language` (use `rust` placeholder or add `c`/`cpp`).
+1. Scaffold: `owasidea plugin new <name> --lang c|cpp`.
+2. Annotate the source with `// owasidea:...` markers (see `docs/SOURCE_GENERATORS.md`).
+   `owasidea wit generate` (and `owasidea build`) regenerates `wit/<name>.wit`.
+3. Build the generated bindings and implementation with the scaffolded `Makefile`
+   (`make`), which runs `wit-bindgen` and `clang`/`clang++`.
+4. Copy the resulting `*.component.wasm` if needed and generate the manifest with
+   `--language c` or `--language cpp`.
 
 ## C# (.NET WASI)
 
