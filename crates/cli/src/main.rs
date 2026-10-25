@@ -257,6 +257,7 @@ fn cmd_doctor(json: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[allow(clippy::useless_format)]
 fn cmd_plugin_new(
     name: Option<String>,
     lang: Option<String>,
@@ -356,12 +357,35 @@ fn cmd_plugin_new(
             )?;
         }
         "csharp" => {
-            std::fs::create_dir_all(dir.join("wit"))?;
-            std::fs::create_dir_all(dir.join("wit/deps/host"))?;
-            std::fs::write(
-                dir.join(format!("{name}.csproj")),
-                format!(
-                    r#"<Project Sdk="Microsoft.NET.Sdk">
+            if kind == "executable" {
+                std::fs::write(
+                    dir.join(format!("{name}.csproj")),
+                    format!(
+                        r#"<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RuntimeIdentifier>wasi-wasm</RuntimeIdentifier>
+    <PublishTrimmed>true</PublishTrimmed>
+  </PropertyGroup>
+</Project>
+"#
+                    ),
+                )?;
+                std::fs::write(
+                    dir.join("Program.cs"),
+                    "using System;\nConsole.WriteLine(\"Hello from C# WASI component!\");\n",
+                )?;
+            } else {
+                std::fs::create_dir_all(dir.join("wit"))?;
+                std::fs::create_dir_all(dir.join("wit/deps/host"))?;
+                std::fs::write(
+                    dir.join(format!("{name}.csproj")),
+                    format!(
+                        r#"<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>Library</OutputType>
@@ -386,8 +410,37 @@ fn cmd_plugin_new(
   </ItemGroup>
 </Project>
 "#
-                ),
-            )?;
+                    ),
+                )?;
+                std::fs::write(
+                    dir.join("wit").join(format!("{name}.wit")),
+                    format!(
+                        "package poc:{name}@0.1.0;\n\ninterface api {{\n    greet: func(name: string) -> string;\n}}\n\nworld library {{\n    export api;\n}}\n"
+                    ),
+                )?;
+                std::fs::write(
+                    dir.join("wit/deps/host/host.wit"),
+                    "package poc:host@0.1.0;\n\ninterface host-log {\n    log: func(msg: string);\n}\n",
+                )?;
+                std::fs::write(
+                    dir.join(format!("{}Impl.cs", name)),
+                    format!(
+                        "namespace LibraryWorld.wit.Exports.poc.{name}.v0_1_0;\n\npublic class ApiExportsImpl : IApiExports\n{{\n    public static string Greet(string name)\n    {{\n        return $\"Hello, {{name}}! (from C#)\";\n    }}\n}}\n",
+                        name = name
+                    ),
+                )?;
+                std::fs::write(
+                    dir.join("nuget.config"),
+                    r#"<configuration>
+  <packageSources>
+    <clear />
+    <add key="dotnet-experimental" value="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-experimental/nuget/v3/index.json" />
+    <add key="nuget" value="https://api.nuget.org/v3/index.json" />
+  </packageSources>
+</configuration>
+"#,
+                )?;
+            }
             std::fs::write(
                 dir.join("wit").join(format!("{name}.wit")),
                 format!(
