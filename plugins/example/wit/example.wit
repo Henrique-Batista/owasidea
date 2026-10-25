@@ -1,0 +1,10 @@
+package poc:example@0.1.0;
+
+world example {
+    import poc:host/host-kv@0.1.0;
+    import poc:host/host-log@0.1.0;
+
+    export greet: func(name: string) -> string;
+    export compute: func(a: s32, b: s32) -> s32;
+    export remember: func(key: string, value: string) -> string;
+}

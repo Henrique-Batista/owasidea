@@ -16,6 +16,12 @@ path = "plugins/chat-go"
 language = "go"
 type = "executable"
 
+[plugins.example]
+path = "plugins/example"
+language = "rust"
+type = "library"
+kv = "example:read-write"
+
 [dev]
 watch = true
 hot_reload = true

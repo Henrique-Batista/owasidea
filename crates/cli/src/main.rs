@@ -579,19 +579,9 @@ fn generate_manifest(
         "metadata": {"author": "", "license": "MIT", "description": "", "sha256": sha}
     });
 
-    // component path should be relative to manifest dir; Python used relpath. We'll store just filename? Host resolves relative to manifest parent. Use relative path from manifest dir to component.
-    // Compute relative path.
-    let comp_abs = component
-        .canonicalize()
-        .unwrap_or_else(|_| component.to_path_buf());
     let manifest_dir = out.parent().unwrap_or_else(|| std::path::Path::new("."));
-    let manifest_abs = manifest_dir
-        .canonicalize()
-        .unwrap_or_else(|_| manifest_dir.to_path_buf());
-    let rel = comp_abs
-        .strip_prefix(&manifest_abs)
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|_| component.to_path_buf());
+    let rel =
+        pathdiff::diff_paths(component, manifest_dir).unwrap_or_else(|| component.to_path_buf());
     let mut manifest = manifest;
     manifest["component"] = json!(rel.to_string_lossy().to_string());
 
