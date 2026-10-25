@@ -1023,9 +1023,17 @@ fn cmd_validate(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
             errors += 1;
         }
         // capabilities: fs count
-        let mfs = manifest["permissions"]["filesystem"].as_array().map(|a| a.len()).unwrap_or(0);
+        let mfs = manifest["permissions"]["filesystem"]
+            .as_array()
+            .map(|a| a.len())
+            .unwrap_or(0);
         if mfs != p.fs.len() {
-            println!("{}: fs permission mismatch (manifest {}, config {})", name, mfs, p.fs.len());
+            println!(
+                "{}: fs permission mismatch (manifest {}, config {})",
+                name,
+                mfs,
+                p.fs.len()
+            );
             errors += 1;
         }
         // kv
@@ -1035,7 +1043,10 @@ fn cmd_validate(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
             errors += 1;
         }
         // http outbound
-        let mout = manifest["permissions"]["http"]["outbound"].as_array().map(|a| a.len()).unwrap_or(0);
+        let mout = manifest["permissions"]["http"]["outbound"]
+            .as_array()
+            .map(|a| a.len())
+            .unwrap_or(0);
         if mout != p.http_outbound.len() {
             println!("{}: http outbound mismatch", name);
             errors += 1;
