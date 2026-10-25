@@ -60,6 +60,9 @@ enum Commands {
     /// Build the desktop bundle (Tauri).
     #[command(about = "Build the desktop bundle (Tauri).")]
     Bundle,
+    /// Validate manifests, checksums and capabilities against config.
+    #[command(about = "Validate manifests, checksums and capabilities against config.")]
+    Validate,
 }
 
 #[derive(Subcommand)]
@@ -141,6 +144,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Inspect { plugin } => cmd_inspect(&cli.manifest_dir, &plugin, cli.json),
         Commands::Bundle => cmd_bundle(),
+        Commands::Validate => cmd_validate(&cli.config, &cli.manifest_dir),
     }
 }
 
@@ -980,6 +984,67 @@ fn cmd_inspect(manifest_dir: &Path, plugin: &str, json: bool) -> anyhow::Result<
         let v: serde_json::Value = serde_json::from_str(&raw)?;
         println!("{}", serde_json::to_string_pretty(&v)?);
     }
+    Ok(())
+}
+
+fn cmd_validate(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
+    use sha2::{Digest, Sha256};
+    let raw = std::fs::read_to_string(config)?;
+    let cfg: AppConfig = toml::from_str(&raw)?;
+    let plugins = cfg.plugins.clone().unwrap_or_default();
+    let mut errors = 0;
+    for (name, p) in &plugins {
+        let manifest_path = manifest_dir.join(format!("{}.manifest.json", name));
+        if !manifest_path.exists() {
+            println!("MISSING manifest: {}", manifest_path.display());
+            errors += 1;
+            continue;
+        }
+        let mraw = std::fs::read_to_string(&manifest_path)?;
+        let manifest: serde_json::Value = serde_json::from_str(&mraw)?;
+        // checksum
+        let comp = std::path::Path::new(&p.path).join(format!("{}.component.wasm", name));
+        if comp.exists() {
+            let bytes = std::fs::read(&comp)?;
+            let mut h = Sha256::new();
+            h.update(&bytes);
+            let actual = format!("{:x}", h.finalize());
+            let expected = manifest["metadata"]["sha256"].as_str().unwrap_or("");
+            if expected.is_empty() {
+                println!("{}: no checksum in manifest", name);
+            } else if expected != actual {
+                println!("{}: CHECKSUM MISMATCH", name);
+                errors += 1;
+            } else {
+                println!("{}: checksum ok", name);
+            }
+        } else {
+            println!("{}: component not found", name);
+            errors += 1;
+        }
+        // capabilities: fs count
+        let mfs = manifest["permissions"]["filesystem"].as_array().map(|a| a.len()).unwrap_or(0);
+        if mfs != p.fs.len() {
+            println!("{}: fs permission mismatch (manifest {}, config {})", name, mfs, p.fs.len());
+            errors += 1;
+        }
+        // kv
+        let mkv = manifest["permissions"]["kv"].is_null();
+        if p.kv.is_some() != !mkv {
+            println!("{}: kv permission mismatch", name);
+            errors += 1;
+        }
+        // http outbound
+        let mout = manifest["permissions"]["http"]["outbound"].as_array().map(|a| a.len()).unwrap_or(0);
+        if mout != p.http_outbound.len() {
+            println!("{}: http outbound mismatch", name);
+            errors += 1;
+        }
+    }
+    if errors > 0 {
+        anyhow::bail!("validation failed with {} error(s)", errors);
+    }
+    println!("Validation OK.");
     Ok(())
 }
 
