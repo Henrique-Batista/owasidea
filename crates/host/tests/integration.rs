@@ -194,6 +194,22 @@ async fn integration_smoke() {
         assert!(body["result"].as_str().unwrap().contains("Hello, Compose!"));
     }
 
+    // cross-language composed plugin (Go client -> Rust notes)
+    if names.contains(&"composed-go") {
+        let r = client
+            .post(format!("{}/plugin/composed-go/call", base))
+            .json(&json!({"function": "run", "args": ["Cross"]}))
+            .send()
+            .await
+            .unwrap();
+        assert!(r.status().is_success());
+        let body: serde_json::Value = r.json().await.unwrap();
+        assert!(body["result"]
+            .as_str()
+            .unwrap()
+            .contains("composed-go client got"));
+    }
+
     // overview
     let r = client
         .get(format!("{}/overview", base))

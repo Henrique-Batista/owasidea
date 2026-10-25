@@ -1,0 +1,23 @@
+[workspace]
+
+[package]
+name = "attr-example"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.41"
+owasidea = { path = "../../crates/owasidea" }
+
+[package.metadata.component]
+package = "poc:attr-example"
+
+[package.metadata.component.target]
+path = "wit"
+world = "attr-example"
+
+[package.metadata.component.target.dependencies]
+"poc:host" = { path = "wit/deps/host" }

@@ -1,0 +1,12 @@
+{
+  "name": "attr-ts",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "jco componentize src/index.ts --wit wit --world-name tester -o attr-ts.component.wasm"
+  },
+  "devDependencies": {
+    "@bytecodealliance/jco": "latest",
+    "@bytecodealliance/componentize-js": "latest"
+  }
+}
