@@ -350,3 +350,16 @@ line/column. All supported fields:
 | `[[smoke.services]]` | `plugin` | string | smoke services |
 | `[plugins.<name>]` | `path`, `language`, `type`, `version`, `fs`, `kv`, `http_outbound`, `network_outbound`, `network_inbound`, `persistent`, `runtime`, `ui_entry`, `ui_build`, `build`, `compose_with` | mixed | plugin config |
 | `[dev]` | `watch`, `hot_reload`, `ui_addr` | bool/string | dev mode |
+
+### Validation rules (RF-01)
+
+- `[host].addr` and `[dev].ui_addr` must parse as `SocketAddr`; errors name the
+  field and value (e.g. `invalid address for host.addr "127.0.0.1:70000"`).
+- Port `0` is allowed for `run`/`dev` (ephemeral) but is rejected by
+  `bundle` via `validate_for_bundle`.
+- Path fields (`[desktop].path/ui/output`, `[signing].key/public_key`,
+  `[plugins.<name>].path`, and each entry of `[plugins.<name>].fs`) must be
+  non-empty strings. Relative paths resolve against the config file directory;
+  absolute paths are used unchanged (`resolve_path`).
+- `[app].name`, `[app].identifier`, and `[app].version` (when present) must be
+  non-empty (whitespace-only counts as empty).

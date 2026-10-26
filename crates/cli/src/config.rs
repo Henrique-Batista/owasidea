@@ -21,6 +21,11 @@ impl AppConfig {
                     anyhow::bail!("app.name must not be empty");
                 }
             }
+            if let Some(version) = &app.version {
+                if version.trim().is_empty() {
+                    anyhow::bail!("app.version must not be empty");
+                }
+            }
             if let Some(identifier) = &app.identifier {
                 if identifier.trim().is_empty() {
                     anyhow::bail!("app.identifier must not be empty");
@@ -29,12 +34,62 @@ impl AppConfig {
         }
         if let Some(host) = &self.host {
             if let Some(addr) = &host.addr {
-                validate_socket_addr(addr)?;
+                validate_socket_addr("host.addr", addr)?;
+            }
+        }
+        if let Some(desktop) = &self.desktop {
+            validate_nonempty_opt("desktop.path", desktop.path.as_deref())?;
+            validate_nonempty_opt("desktop.ui", desktop.ui.as_deref())?;
+            validate_nonempty_opt("desktop.output", desktop.output.as_deref())?;
+        }
+        if let Some(signing) = &self.signing {
+            validate_nonempty_opt("signing.key", signing.key.as_deref())?;
+            validate_nonempty_opt("signing.public_key", signing.public_key.as_deref())?;
+        }
+        if let Some(plugins) = &self.plugins {
+            for (name, plugin) in plugins {
+                if plugin.path.trim().is_empty() {
+                    anyhow::bail!("plugins.{}.path must not be empty", name);
+                }
+                for (i, fs) in plugin.fs.iter().enumerate() {
+                    if fs.trim().is_empty() {
+                        anyhow::bail!("plugins.{}.fs[{}] must not be empty", name, i);
+                    }
+                }
             }
         }
         if let Some(dev) = &self.dev {
             if let Some(addr) = &dev.ui_addr {
-                validate_socket_addr(addr)?;
+                validate_socket_addr("dev.ui_addr", addr)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_for_bundle(&self) -> anyhow::Result<()> {
+        self.validate()?;
+        if let Some(host) = &self.host {
+            if let Some(addr) = &host.addr {
+                let parsed: std::net::SocketAddr = addr
+                    .parse()
+                    .map_err(|e| anyhow::anyhow!("invalid address for host.addr {addr:?}: {e}"))?;
+                if parsed.port() == 0 {
+                    anyhow::bail!(
+                        "port 0 is not allowed for host.addr in bundle context: {addr:?}"
+                    );
+                }
+            }
+        }
+        if let Some(dev) = &self.dev {
+            if let Some(addr) = &dev.ui_addr {
+                let parsed: std::net::SocketAddr = addr.parse().map_err(|e| {
+                    anyhow::anyhow!("invalid address for dev.ui_addr {addr:?}: {e}")
+                })?;
+                if parsed.port() == 0 {
+                    anyhow::bail!(
+                        "port 0 is not allowed for dev.ui_addr in bundle context: {addr:?}"
+                    );
+                }
             }
         }
         Ok(())
@@ -187,9 +242,18 @@ fn default_plugin_type() -> String {
     "library".to_string()
 }
 
-fn validate_socket_addr(addr: &str) -> anyhow::Result<()> {
+fn validate_socket_addr(field: &str, addr: &str) -> anyhow::Result<()> {
     addr.parse::<std::net::SocketAddr>()
-        .map_err(|e| anyhow::anyhow!("invalid address {addr:?}: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("invalid address for {field} {addr:?}: {e}"))?;
+    Ok(())
+}
+
+fn validate_nonempty_opt(field: &str, value: Option<&str>) -> anyhow::Result<()> {
+    if let Some(v) = value {
+        if v.trim().is_empty() {
+            anyhow::bail!("{field} must not be empty");
+        }
+    }
     Ok(())
 }
 
@@ -296,5 +360,104 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("bogus_top"), "msg: {msg}");
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn host_addr_invalid_errors() {
+        let dir = std::env::temp_dir().join("owasidea-cfg-test-host-invalid");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("wasm-app.toml");
+        std::fs::write(&path, "[host]\naddr = \"not-an-addr\"\n").unwrap();
+        let err = read_app_config(&path).unwrap_err();
+        assert!(err.to_string().contains("invalid address"), "msg: {}", err);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn ui_addr_invalid_errors() {
+        let dir = std::env::temp_dir().join("owasidea-cfg-test-ui-invalid");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("wasm-app.toml");
+        std::fs::write(&path, "[dev]\nui_addr = \"nope\"\n").unwrap();
+        let err = read_app_config(&path).unwrap_err();
+        assert!(err.to_string().contains("invalid address"), "msg: {}", err);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn port_zero_accepted_normal() {
+        let dir = std::env::temp_dir().join("owasidea-cfg-test-port0-normal");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("wasm-app.toml");
+        std::fs::write(&path, "[host]\naddr = \"127.0.0.1:0\"\n").unwrap();
+        let cfg = read_app_config(&path).expect("port 0 allowed in normal validation");
+        cfg.validate().unwrap();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn port_zero_rejected_bundle() {
+        let dir = std::env::temp_dir().join("owasidea-cfg-test-port0-bundle");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("wasm-app.toml");
+        std::fs::write(&path, "[host]\naddr = \"127.0.0.1:0\"\n").unwrap();
+        let cfg = read_app_config(&path).expect("port 0 allowed in normal validation");
+        let err = cfg.validate_for_bundle().unwrap_err();
+        assert!(err.to_string().contains("port 0"), "msg: {}", err);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn empty_path_rejected() {
+        let dir = std::env::temp_dir().join("owasidea-cfg-test-empty-path");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("wasm-app.toml");
+        std::fs::write(&path, "[desktop]\npath = \"\"\n").unwrap();
+        let err = read_app_config(&path).unwrap_err();
+        assert!(err.to_string().contains("desktop.path"), "msg: {}", err);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn empty_plugin_path_rejected() {
+        let dir = std::env::temp_dir().join("owasidea-cfg-test-empty-plugin-path");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("wasm-app.toml");
+        std::fs::write(&path, "[plugins.demo]\npath = \"\"\nlanguage = \"rust\"\n").unwrap();
+        let err = read_app_config(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("plugins.demo.path"),
+            "msg: {}",
+            err
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn relative_path_resolved_test() {
+        let p = resolve_path(Path::new("/tmp/app/wasm-app.toml"), "plugins/notes");
+        assert_eq!(p, PathBuf::from("/tmp/app/plugins/notes"));
+    }
+
+    #[test]
+    fn app_version_empty_rejected() {
+        let dir = std::env::temp_dir().join("owasidea-cfg-test-empty-version");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("wasm-app.toml");
+        std::fs::write(&path, "[app]\nversion = \"\"\n").unwrap();
+        let err = read_app_config(&path).unwrap_err();
+        assert!(err.to_string().contains("app.version"), "msg: {}", err);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn shipyard_config_loads() {
+        let config =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/shipyard/wasm-app.toml");
+        if config.exists() {
+            let cfg = read_app_config(&config).expect("shipyard config should load");
+            let plugins = cfg.plugins.clone().unwrap_or_default();
+            assert!(!plugins.is_empty());
+        }
     }
 }

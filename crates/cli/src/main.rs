@@ -1426,6 +1426,7 @@ fn cmd_build(config: &Path, manifest_dir: &Path, sign: bool) -> anyhow::Result<(
     let root = app_root(config);
     let raw = std::fs::read_to_string(config)?;
     let cfg: AppConfig = toml::from_str(&raw)?;
+    cfg.validate()?;
     let plugins = cfg.plugins.clone().unwrap_or_default();
     if plugins.is_empty() {
         println!("no plugins declared in {}", config.display());
@@ -1974,6 +1975,7 @@ async fn cmd_dev(
     http_addr: &str,
     build: bool,
 ) -> anyhow::Result<()> {
+    let _ = read_app_config(config_path)?;
     let root = app_root(config_path);
     if build {
         cmd_build(config_path, manifest_dir, true)?;
@@ -2372,6 +2374,7 @@ fn cmd_validate(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
     let root = app_root(config);
     let raw = std::fs::read_to_string(config)?;
     let cfg: AppConfig = toml::from_str(&raw)?;
+    cfg.validate()?;
     let plugins = cfg.plugins.clone().unwrap_or_default();
     let manifest_dir = app_path(&root, manifest_dir);
     let mut errors = 0;
@@ -2950,7 +2953,8 @@ fn cmd_bundle(
     if build {
         cmd_build(config, manifest_dir, true)?;
     }
-    let cfg = read_app_config(config).unwrap_or_default();
+    let cfg = read_app_config(config)?;
+    cfg.validate_for_bundle()?;
     if !build {
         sign_all(&root, &app_path(&root, manifest_dir), cfg.signing.as_ref())?;
     }
