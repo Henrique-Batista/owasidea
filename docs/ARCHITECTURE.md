@@ -91,3 +91,14 @@ integrity checks.
 
 The reference flow is documented in
 [`examples/shipyard/README.md`](../examples/shipyard/README.md).
+
+## Module conventions
+
+- New CLI commands: `crates/cli/src/<area>.rs`, registered with
+  `mod <area>;` in `crates/cli/src/main.rs`. No global refactor.
+- New host features: `crates/host/src/<area>.rs`, registered with
+  `mod <area>;` in `crates/host/src/lib.rs`.
+- Prefer one item = one new module/file. Avoid growing `main.rs`/`lib.rs`.
+- Unit tests in the module; integration tests in `crates/*/tests/`.
+- Do not move existing code unless required by the item.
+- Examples: `crates/cli/src/config.rs`; host capability broker in `lib.rs`.
