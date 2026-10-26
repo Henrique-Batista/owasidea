@@ -286,3 +286,17 @@ Test requirements:
 - First service plugin to expose beyond tailcat (or tailcat only).
 - Whether `js-wasm` remains a supported plugin kind or a webview-only fallback.
 - Permission UX: file pickers vs manifest text vs both.
+
+## Module conventions (B0.7)
+
+- New CLI commands go in `crates/cli/src/<area>.rs` and are wired with
+  `mod <area>;` in `crates/cli/src/main.rs` without a global refactor.
+- New host features go in `crates/host/src/<area>.rs` and are registered with
+  `mod <area>;` in `crates/host/src/lib.rs`.
+- One item = one new module/file whenever possible. Do not append hundreds of
+  lines to `main.rs`/`lib.rs`.
+- Unit tests live in the module (`#[cfg(test)] mod tests`); integration tests
+  live under `crates/*/tests/`.
+- Do not move existing code unless the item requires it.
+- Real examples: `crates/cli/src/config.rs` (typed config loader, B0.5),
+  host `lib.rs` capability broker. New work follows the same split.
