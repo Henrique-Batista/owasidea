@@ -1,4 +1,6 @@
 use clap::{Parser, Subcommand};
+mod config;
+use config::*;
 use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -466,15 +468,6 @@ fn copy_dir_all(source: &Path, destination: &Path) -> anyhow::Result<()> {
         }
     }
     Ok(())
-}
-
-fn read_host_addr(config: &Path) -> Option<String> {
-    let raw = std::fs::read_to_string(config).ok()?;
-    let val: toml::Value = toml::from_str(&raw).ok()?;
-    val.get("host")?
-        .get("addr")?
-        .as_str()
-        .map(|s| s.to_string())
 }
 
 #[tokio::main]
@@ -1111,47 +1104,6 @@ fn cmd_plugin_new(
     Ok(())
 }
 
-#[derive(serde::Deserialize, Default, Clone)]
-struct PluginSection {
-    path: String,
-    language: String,
-    #[serde(rename = "type", default = "default_plugin_type")]
-    kind: String,
-    #[serde(default)]
-    version: Option<String>,
-    #[serde(default)]
-    fs: Vec<String>,
-    #[serde(default)]
-    kv: Option<String>,
-    #[serde(default)]
-    http_outbound: Vec<String>,
-    #[serde(default)]
-    network_outbound: Vec<String>,
-    #[serde(default)]
-    network_inbound: Vec<String>,
-    #[serde(default)]
-    persistent: bool,
-    #[serde(default)]
-    runtime: Option<String>,
-    #[serde(default)]
-    ui_entry: Option<String>,
-    #[serde(default)]
-    ui_build: Vec<String>,
-    /// Optional argv override for the native build step. Useful on Windows for
-    /// C/C++ plugins (for example `["mingw32-make"]` or a CMake build).
-    #[serde(default)]
-    build: Vec<String>,
-    /// Plugin names whose components should be composed into this one.
-    /// The plugin's own build output becomes a client component, then
-    /// `wasm-tools compose` resolves its imports at build time.
-    #[serde(default)]
-    compose_with: Vec<String>,
-}
-
-fn default_plugin_type() -> String {
-    "library".to_string()
-}
-
 fn ensure_plugin_config_available(config_path: &Path, name: &str) -> anyhow::Result<()> {
     if !config_path.exists() {
         return Ok(());
@@ -1199,138 +1151,23 @@ fn register_plugin_config(
     Ok(())
 }
 
-#[derive(serde::Deserialize, Default)]
-struct AppConfig {
-    app: Option<AppSection>,
-    desktop: Option<DesktopSection>,
-    signing: Option<SigningSection>,
-    test: Option<TestSection>,
-    smoke: Option<SmokeSection>,
-    plugins: Option<std::collections::BTreeMap<String, PluginSection>>,
-    dev: Option<DevSection>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct AppSection {
-    version: Option<String>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct DesktopSection {
-    /// Directory containing the Tauri crate (defaults to `desktop`, then
-    /// `crates/desktop` for the repository root app).
-    #[serde(default)]
-    path: Option<String>,
-    /// Frontend directory built by `owasidea bundle` (defaults to `ui`).
-    #[serde(default)]
-    ui: Option<String>,
-    /// Copy built bundle artifacts into this app-relative directory.
-    #[serde(default)]
-    output: Option<String>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct DevSection {
-    #[serde(default = "default_true")]
-    watch: bool,
-    #[serde(default = "default_true")]
-    hot_reload: bool,
-    /// Fixed UI dev address, for example "127.0.0.1:5180". When omitted the
-    /// CLI picks the first free port in 5173..=5273.
-    #[serde(default)]
-    ui_addr: Option<String>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct SigningSection {
-    #[serde(default)]
-    key: Option<String>,
-    #[serde(default)]
-    public_key: Option<String>,
-    #[serde(default)]
-    generate: bool,
-    #[serde(default)]
-    require: Option<bool>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct TestSection {
-    /// argv executed in the app root after API smoke checks, for example
-    /// ["npx", "playwright", "test", "--config", "playwright.config.ts"].
-    #[serde(default)]
-    ui: Vec<String>,
-}
-
-#[derive(serde::Deserialize, Default, Clone)]
-struct SmokeSection {
-    #[serde(default)]
-    calls: Vec<SmokeCall>,
-    #[serde(default)]
-    http: Vec<SmokeHttp>,
-    #[serde(default)]
-    services: Vec<SmokeService>,
-}
-
-#[derive(serde::Deserialize, Default, Clone)]
-struct SmokeCall {
-    plugin: String,
-    function: String,
-    #[serde(default)]
-    args: Vec<serde_json::Value>,
-    #[serde(default)]
-    expect_contains: Option<String>,
-    #[serde(default)]
-    expect_equals: Option<serde_json::Value>,
-    #[serde(default)]
-    min: Option<f64>,
-    #[serde(default)]
-    max: Option<f64>,
-}
-
-#[derive(serde::Deserialize, Default, Clone)]
-struct SmokeHttp {
-    path: String,
-    #[serde(default)]
-    method: Option<String>,
-    #[serde(default)]
-    body: Option<serde_json::Value>,
-    #[serde(default)]
-    expect_status: Option<u16>,
-    #[serde(default)]
-    expect_contains: Option<String>,
-}
-
-#[derive(serde::Deserialize, Default, Clone)]
-struct SmokeService {
-    plugin: String,
-}
-
-fn default_true() -> bool {
-    true
-}
-
 /// App root derived from the config path. Relative plugin paths, manifests and
 /// UI assets are always resolved against this directory, so `--config
 /// examples/app/wasm-app.toml` works from any working directory.
 fn app_root(config_path: &Path) -> PathBuf {
-    config_path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."))
+    config::config_dir(config_path)
 }
 
 fn app_path(root: &Path, path: impl AsRef<Path>) -> PathBuf {
+    // Resolve relative to an already-derived root. `root` is the config
+    // directory, so delegate to the shared helper with a synthetic config path
+    // is not needed; keep the historical semantics.
     let path = path.as_ref();
     if path.is_absolute() {
         path.to_path_buf()
     } else {
         root.join(path)
     }
-}
-
-fn read_app_config(config_path: &Path) -> anyhow::Result<AppConfig> {
-    Ok(toml::from_str(&std::fs::read_to_string(config_path)?)?)
 }
 
 fn display_app_path(root: &Path, path: &Path) -> String {
