@@ -37,8 +37,8 @@ Status permitidos: `todo`, `doing`, `review`, `done`, `blocked`.
 | RF-03 | done | wt-authoring | db75c0e (merge f55f6f8) | REV + SEC aprovaram | ADR-0003 Accepted: initialization script + runtime.json |
 | RF-04 | done | wt-ui | e726a4b (merge 95944f3) | fmt/clippy/test + Shipyard build/smoke + desktop check | runtime.json + initialization script; shell do exemplo; testes Playwright adicionados (não executados) |
 | RF-05 | todo | — | — | — | — |
-| RF-06 | todo | — | — | — | — |
-| RF-07 | todo | — | — | — | — |
+| RF-06 | done | wt-config | c7b0221 (merge 7edf0a7) | fmt/clippy/test + Shipyard build | porta UI com fallback; `tauri.dev.conf.json`; Playwright lê env |
+| RF-07 | done | wt-host | 3b8f10e + 118743a (merge 10e83b5) | fmt/clippy/test + build determinístico + runtime check | build_id em manifests/runtime//overview/UI; fallback manifest |
 | RF-08 | todo | — | — | — | — |
 | RF-09 | todo | — | — | — | — |
 | DL-01 | todo | — | — | — | — |
