@@ -140,6 +140,18 @@ Check generated manifests against `wasm-app.toml`:
 
 Exits non-zero on drift. Run after `build`, especially in CI.
 
+### `config render [--target runtime|tauri|playwright|all] [--check]`
+
+Render derived configuration artifacts from `wasm-app.toml` (single source of
+truth for host/port/CSP/dev URL):
+
+- `runtime` -> `<ui>/.owasidea/runtime.json`
+- `playwright` -> `<ui>/.owasidea/playwright.json`
+- `tauri` -> `<desktop>/tauri.generated.conf.json` (copies base `tauri.conf.json`,
+  overriding `build.devUrl` and ensuring the host origin is in `connect-src`)
+
+`--check` does not write; exits non-zero if files are missing or stale.
+
 ### `dev [--no-build]`
 
 Build first, then start the host, the Vite dev server (if
