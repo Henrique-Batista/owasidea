@@ -51,6 +51,39 @@ fn git_short_sha() -> Option<String> {
     }
 }
 
+/// Resolve the build id recorded in manifests (if any), without mutating env.
+pub fn resolve_from_manifests(manifest_dir: &std::path::Path) -> Option<String> {
+    if let Ok(entries) = std::fs::read_dir(manifest_dir) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.extension().and_then(|x| x.to_str()) != Some("json") {
+                continue;
+            }
+            if let Ok(raw) = std::fs::read_to_string(&p) {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    if let Some(s) = v["metadata"]["build_id"].as_str() {
+                        if !s.trim().is_empty() {
+                            return Some(s.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Read the build id from the generated UI runtime bundle, if present.
+pub fn read_runtime_build_id(root: &std::path::Path) -> Option<String> {
+    let p = root.join("ui").join(".owasidea").join("runtime.json");
+    let raw = std::fs::read_to_string(&p).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    v["build_id"]
+        .as_str()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// Try to populate `OWASIDEA_BUILD_ID` from manifests if not already set.
 pub fn ensure_env_from_manifests(manifest_dir: &std::path::Path) {
     if std::env::var("OWASIDEA_BUILD_ID")
