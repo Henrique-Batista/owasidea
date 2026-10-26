@@ -156,13 +156,16 @@ truth for host/port/CSP/dev URL):
 
 Build first, then start the host, the Vite dev server (if
 `<app-root>/ui/package.json` exists), and a recursive watcher. The UI port comes
-from `[dev].ui_addr` when set; otherwise the first free port in 5173..=5273. A
-busy configured port is an error, not a silent fallback. Prints:
+from `[dev].ui_addr` when set; otherwise the first free port in 5173..=5273.
+A busy configured port falls back to the next free port. `dev` also writes
+`<desktop>/tauri.dev.conf.json` (merged from the base `tauri.conf.json`, with
+`build.devUrl` set to the reserved UI URL) for `dev --desktop` (DL-01). Prints:
 
 - UI URL
 - host URL
 - loaded plugin names
 - watch roots
+- Tauri dev config path and devUrl
 
 The watcher hot-reloads stateless components by calling
 `POST /plugin/{name}/reload`. Stateful services require an explicit stop/reload;

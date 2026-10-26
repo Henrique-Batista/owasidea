@@ -2042,6 +2042,13 @@ async fn cmd_dev(
         None
     };
     if let Some(port) = ui_port {
+        let ui_url = format!("http://127.0.0.1:{port}");
+        match crate::config_render::write_tauri_dev_config(config_path, &ui_url) {
+            Ok(path) => println!("Tauri dev config: {} (devUrl {})", path.display(), ui_url),
+            Err(error) => eprintln!("warning: could not write tauri.dev.conf.json: {error}"),
+        }
+    }
+    if let Some(port) = ui_port {
         let mut origins = std::env::var("OWASIDEA_ALLOWED_ORIGINS")
             .unwrap_or_else(|_| "tauri://localhost,https://tauri.localhost".to_string());
         for origin in [
@@ -2190,9 +2197,18 @@ fn reserve_http_addr(addr: &str) -> anyhow::Result<String> {
 fn reserve_ui_addr(addr: Option<&str>) -> anyhow::Result<u16> {
     if let Some(addr) = addr {
         let requested: std::net::SocketAddr = addr.parse()?;
-        let listener = std::net::TcpListener::bind(requested)
-            .map_err(|error| anyhow::anyhow!("cannot bind UI dev address {addr}: {error}"))?;
-        return Ok(listener.local_addr()?.port());
+        let ip = requested.ip();
+        let start = requested.port();
+        if start == 0 {
+            let listener = std::net::TcpListener::bind((ip, 0))?;
+            return Ok(listener.local_addr()?.port());
+        }
+        for port in start..=u16::MAX {
+            if let Ok(listener) = std::net::TcpListener::bind((ip, port)) {
+                return Ok(listener.local_addr()?.port());
+            }
+        }
+        anyhow::bail!("no free UI dev port found starting at {start}")
     }
     reserve_ui_port()
 }
@@ -4883,5 +4899,46 @@ mod dev_tests {
     fn dev_reserves_concrete_host_and_ui_ports() {
         assert_ne!(reserve_http_addr("127.0.0.1:0").unwrap(), "127.0.0.1:0");
         assert!(reserve_ui_port().unwrap() >= 5173);
+    }
+
+    #[test]
+    fn reserve_ui_addr_falls_back_when_occupied() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let occupied = listener.local_addr().unwrap().port();
+        let reserved = reserve_ui_addr(Some(&format!("127.0.0.1:{occupied}"))).unwrap();
+        assert_ne!(reserved, occupied);
+        assert!(reserved > occupied);
+    }
+
+    #[test]
+    fn tauri_dev_config_preserves_base_and_sets_devurl() {
+        let root = std::env::temp_dir().join("owasidea-rf06-tauri-dev");
+        let _ = std::fs::remove_dir_all(&root);
+        let desktop = root.join("desktop");
+        std::fs::create_dir_all(&desktop).unwrap();
+        std::fs::write(
+            desktop.join("tauri.conf.json"),
+            r#"{"productName":"Demo","build":{"frontendDist":"../ui/dist","devUrl":"http://localhost:5173"},"app":{"security":{"csp":"default-src 'self'"}}}"#,
+        )
+        .unwrap();
+        let config_path = root.join("wasm-app.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "[app]\nname = \"Demo\"\n\n[desktop]\npath = \"{}\"\n",
+                desktop.display()
+            ),
+        )
+        .unwrap();
+        let path =
+            crate::config_render::write_tauri_dev_config(&config_path, "http://127.0.0.1:5199")
+                .unwrap();
+        assert_eq!(path, desktop.join("tauri.dev.conf.json"));
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value["build"]["devUrl"], "http://127.0.0.1:5199");
+        assert_eq!(value["productName"], "Demo");
+        assert_eq!(value["app"]["security"]["csp"], "default-src 'self'");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

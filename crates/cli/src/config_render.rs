@@ -186,6 +186,51 @@ fn tauri_content(root: &Path, cfg: &AppConfig) -> anyhow::Result<serde_json::Val
     Ok(value)
 }
 
+/// Merge-based content for `tauri.dev.conf.json`: clone the base `tauri.conf.json`
+/// and overwrite only `build.devUrl` with the reserved UI URL.
+pub fn tauri_dev_content(
+    root: &Path,
+    cfg: &AppConfig,
+    dev_url: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let dd = desktop_dir(root, cfg);
+    let base_path = dd.join("tauri.conf.json");
+    let raw = std::fs::read_to_string(&base_path)
+        .map_err(|e| anyhow::anyhow!("cannot read {}: {}", base_path.display(), e))?;
+    let mut value: serde_json::Value = serde_json::from_str(&raw)?;
+    if let Some(build) = value.get_mut("build").and_then(|v| v.as_object_mut()) {
+        build.insert(
+            "devUrl".to_string(),
+            serde_json::Value::String(dev_url.to_string()),
+        );
+    } else {
+        let mut build = serde_json::Map::new();
+        build.insert(
+            "devUrl".to_string(),
+            serde_json::Value::String(dev_url.to_string()),
+        );
+        value
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("tauri.conf.json root must be object"))?
+            .insert("build".to_string(), serde_json::Value::Object(build));
+    }
+    Ok(value)
+}
+
+pub fn write_tauri_dev_config(config_path: &Path, dev_url: &str) -> anyhow::Result<PathBuf> {
+    let cfg = read_app_config(config_path)?;
+    cfg.validate()?;
+    let root = config_dir(config_path);
+    let dd = desktop_dir(&root, &cfg);
+    let value = tauri_dev_content(&root, &cfg, dev_url)?;
+    let path = dd.join("tauri.dev.conf.json");
+    let bytes = serde_json::to_vec_pretty(&value)?;
+    let mut b = bytes;
+    b.push(b'\n');
+    atomic_write(&path, &b)?;
+    Ok(path)
+}
+
 pub fn render_targets(
     config_path: &Path,
     scope: RenderScope,
