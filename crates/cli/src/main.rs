@@ -1,6 +1,8 @@
 use clap::{Parser, Subcommand};
 mod config;
+mod config_render;
 use config::*;
+use config_render::*;
 use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -133,6 +135,12 @@ enum Commands {
     /// Validate manifests, checksums and capabilities against config.
     #[command(about = "Validate manifests, checksums and capabilities against config.")]
     Validate,
+    /// Render derived configuration artifacts (runtime/tauri/playwright).
+    #[command(about = "Render derived configuration artifacts (runtime/tauri/playwright).")]
+    Config {
+        #[command(subcommand)]
+        cmd: ConfigCmd,
+    },
     /// Search or install plugins from a remote HTTPS registry.
     #[command(about = "Search or install plugins from a remote HTTPS registry.")]
     Registry {
@@ -160,6 +168,20 @@ enum RegistryCmd {
         public_key: PathBuf,
         #[arg(long)]
         force: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigCmd {
+    /// Render configuration artifacts.
+    #[command(about = "Render configuration artifacts.")]
+    Render {
+        /// Target: runtime, tauri, playwright, or all.
+        #[arg(long, default_value = "all")]
+        target: String,
+        /// Check mode: do not write; fail if stale/missing.
+        #[arg(long)]
+        check: bool,
     },
 }
 
@@ -549,6 +571,9 @@ async fn main() -> anyhow::Result<()> {
             WitCmd::Generate { path } => cmd_wit_generate(&path, cli.json),
         },
         Commands::Validate => cmd_validate(&cli.config, &cli.manifest_dir),
+        Commands::Config { cmd } => match cmd {
+            ConfigCmd::Render { target, check } => cmd_config_render(&cli.config, &target, check),
+        },
         Commands::Registry { cmd } => match cmd {
             RegistryCmd::Search { query, url } => cmd_registry_search(&query, &url, cli.json).await,
             RegistryCmd::Install {
