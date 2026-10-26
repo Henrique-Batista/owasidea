@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 mod config;
 mod config_render;
+mod type_parser;
 mod wit_types;
 use config::*;
 use config_render::*;
@@ -1327,6 +1328,30 @@ fn generate_manifest(
     }
 
     let exports = wit_types::extract_exports(&doc);
+
+    // CT-02: validate structured type grammar for every export param/result.
+    for (i, ex) in exports.iter().enumerate() {
+        if let Some(params) = ex.get("params").and_then(|v| v.as_array()) {
+            for (j, p) in params.iter().enumerate() {
+                let ty = p.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                if let Err(e) =
+                    type_parser::validate_type(&format!("exports[{}].params[{}].type", i, j), ty)
+                {
+                    anyhow::bail!("plugin {}: {}", name, e);
+                }
+            }
+        }
+        if let Some(results) = ex.get("results").and_then(|v| v.as_array()) {
+            for (j, r) in results.iter().enumerate() {
+                let ty = r.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                if let Err(e) =
+                    type_parser::validate_type(&format!("exports[{}].results[{}].type", i, j), ty)
+                {
+                    anyhow::bail!("plugin {}: {}", name, e);
+                }
+            }
+        }
+    }
 
     // abi
     let abi = if wasi.iter().any(|w| w.contains("@0.3.")) {
