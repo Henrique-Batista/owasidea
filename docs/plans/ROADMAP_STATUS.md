@@ -27,8 +27,8 @@ Status permitidos: `todo`, `doing`, `review`, `done`, `blocked`.
 | --- | --- | --- | --- | --- | --- |
 | B0.1 | done | — | 0ee8461 | fmt/clippy/test verdes | baseline git + exemplo versionado |
 | B0.2 | done | — | c68e1dc (merge fc86770) | YAML válido + fmt; CI remoto não executado | CI Linux + Windows |
-| B0.3 | done | wt-authoring | c27ef88 | docs | tracker + blocker template |
-| B0.4 | doing | wt-audit | — | — | auditoria v0–v1.0 |
+| B0.3 | done | main (release/1.0) | 99db2ae | docs | tracker + blocker template |
+| B0.4 | done | wt-audit | 19c0a7e (merge 63591ca) | cargo test + Shipyard build/smoke PASS; 1 FAIL (validate --json) | auditoria em `AUDIT_V1.md`; 6 FIX abertos |
 | B0.5 | done | — | 150fac8 (merge 2af19d0) | fmt/clippy/test verdes | seam de configuração |
 | B0.6 | todo | — | — | — | — |
 | B0.7 | todo | — | — | — | — |
@@ -87,3 +87,14 @@ Status permitidos: `todo`, `doing`, `review`, `done`, `blocked`.
 | G3 | todo | — | — | — | — |
 | G4 | todo | — | — | — | — |
 | G5 | todo | — | — | — | — |
+
+## FIX — gaps da auditoria v1.0 (B0.4)
+
+| ID | Status | Worktree | Commit | Gates | Notas |
+| --- | --- | --- | --- | --- | --- |
+| FIX-01 | todo | — | — | — | P1: testes de estouro de `max_fuel`/`timeout_ms`/`max_memory_mb`/`max_instances` (mapear em PX-07) |
+| FIX-02 | todo | — | — | — | P1: `owasidea validate --json` deve emitir JSON estável |
+| FIX-03 | todo | — | — | — | P1: compilar templates Rust/Go/TS nos testes (mapear em AX-03) |
+| FIX-04 | todo | — | — | — | P2: teste e2e de hot reload/409 e SSE (mapear em DL-05/PX-06) |
+| FIX-05 | todo | — | — | — | P2: verificar bundle Tauri deb/rpm/AppImage no CI (mapear em RL/CI) |
+| FIX-06 | todo | — | — | — | P2: documentar toolchains opcionais ausentes (mapear em AX-06) |
