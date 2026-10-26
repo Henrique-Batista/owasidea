@@ -378,3 +378,8 @@ line/column. All supported fields:
   absolute paths are used unchanged (`resolve_path`).
 - `[app].name`, `[app].identifier`, and `[app].version` (when present) must be
   non-empty (whitespace-only counts as empty).
+
+
+## Build id (RF-07)
+
+`owasidea build` computes a deterministic `build_id` and records it in every manifest (`metadata.build_id`), `owasidea.runtime.json`, and exposes it via `OWASIDEA_BUILD_ID`. Override with `OWASIDEA_BUILD_ID`; for reproducible builds set `SOURCE_DATE_EPOCH`. Format: `<git-short-sha>-<epoch>`.

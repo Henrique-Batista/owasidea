@@ -9,6 +9,9 @@ fn main() {
             let resource_dir = app.path().resource_dir().ok();
             let resolved = resolve(resource_dir);
 
+            if let Some(bid) = &resolved.build_id {
+                std::env::set_var("OWASIDEA_BUILD_ID", bid);
+            }
             let manifests = resolved
                 .manifests_dir
                 .clone()

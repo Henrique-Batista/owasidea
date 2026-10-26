@@ -64,11 +64,13 @@ async function renderOverview() {
   let health = 'unreachable';
   try { health = await fetch(`${HOST}/health`).then(r => r.text()); } catch {}
   const ov = await fetch(`${HOST}/overview`).then(r => r.json()).catch(() => ({}));
+  const buildId = OWASIDEA_BUILD_ID ?? ov.build_id ?? null;
   view.innerHTML = `<h1>Overview</h1>
     <div class="card">
       <p>host: ${health}</p>
       <p>plugins: ${ov.plugins ?? 0} (libraries: ${ov.libraries ?? 0}, executables: ${ov.executables ?? 0}, services: ${ov.services ?? 0})</p>
       <p>runtimes: ${(ov.runtimes || []).map(escapeHtml).join(', ')}</p>
+      <p>build_id: ${escapeHtml(buildId ?? 'n/a')}</p>
     </div>`;
 }
 

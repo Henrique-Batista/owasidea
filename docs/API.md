@@ -74,7 +74,7 @@ explicit per-plugin allowlist; do not add `Origin: null` to CORS.
 ## Health
 
 - `GET /health` → `"ok"`
-- `GET /overview` → plugin counts and runtime kinds.
+- `GET /overview` → plugin counts, runtime kinds, and `build_id` (string or null).
 - `GET /dev/status` → dev-mode flag, watched paths, and most recent reload
   result by plugin (for example `{"active":true,"hot_reload":true,...}`).
 
