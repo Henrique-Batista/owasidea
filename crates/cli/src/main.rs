@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+mod build_id;
 mod config;
 mod config_render;
 mod type_parser;
@@ -1219,6 +1220,7 @@ fn generate_manifest(
     network_outbound: &[String],
     network_inbound: &[String],
     persistent: bool,
+    build_id: &str,
 ) -> anyhow::Result<()> {
     use serde_json::json;
     use sha2::{Digest, Sha256};
@@ -1432,7 +1434,7 @@ fn generate_manifest(
         "state": {"persistent": persistent, "storage": storage,
                   "root": if storage == "wasi-filesystem" { format!("./data/{}", name) } else { String::new() }},
         "composition": {"strategy": "build-time", "entry": kind == "executable"},
-        "metadata": {"author": "", "license": "MIT", "description": "", "sha256": sha}
+        "metadata": {"author": "", "license": "MIT", "description": "", "sha256": sha, "build_id": build_id}
     });
 
     let manifest_dir = out.parent().unwrap_or_else(|| std::path::Path::new("."));
@@ -1477,6 +1479,9 @@ fn cmd_build(config: &Path, manifest_dir: &Path, sign: bool) -> anyhow::Result<(
         .and_then(|a| a.version.clone())
         .unwrap_or_else(|| "0.1.0".to_string());
 
+    let build_id = build_id::compute_build_id();
+    std::env::set_var("OWASIDEA_BUILD_ID", &build_id);
+
     // Build ordinary plugins first so composed clients can resolve their
     // dependency components in the same invocation.
     let mut ordered: Vec<(&String, &PluginSection)> = plugins.iter().collect();
@@ -1486,7 +1491,7 @@ fn cmd_build(config: &Path, manifest_dir: &Path, sign: bool) -> anyhow::Result<(
     for (name, p) in ordered {
         println!("==> Building {} ({})", name, p.language);
         if p.runtime.as_deref() == Some("js-wasm") {
-            let manifest = build_ui_plugin(&root, name, p, &app_version, &manifest_dir)?;
+            let manifest = build_ui_plugin(&root, name, p, &app_version, &manifest_dir, &build_id)?;
             ui_index.push(ui_index_entry(name, &manifest));
             continue;
         }
@@ -1733,6 +1738,7 @@ fn cmd_build(config: &Path, manifest_dir: &Path, sign: bool) -> anyhow::Result<(
             &p.network_outbound,
             &p.network_inbound,
             p.persistent,
+            &build_id,
         )?;
         println!("    manifest: {}", manifest.display());
     }
@@ -1763,6 +1769,7 @@ fn build_ui_plugin(
     plugin: &PluginSection,
     app_version: &str,
     manifest_dir: &Path,
+    build_id: &str,
 ) -> anyhow::Result<serde_json::Value> {
     validate_plugin_name(name)?;
     if plugin.kind != "ui" {
@@ -1821,6 +1828,7 @@ fn build_ui_plugin(
         "state": {"persistent": false, "storage": "none", "root": null},
         "composition": {"strategy": "webview", "entry": false},
         "metadata": {
+            "build_id": build_id,
             "ui": {"entry": entry, "sha256": digest, "files": files},
             "description": "Webview-only UI plugin"
         }
@@ -2018,6 +2026,7 @@ async fn cmd_dev(
         cmd_build(config_path, manifest_dir, true)?;
     }
     let manifest_dir = app_path(&root, manifest_dir);
+    build_id::ensure_env_from_manifests(&manifest_dir);
     if !build {
         if let Ok(cfg) = read_app_config(config_path) {
             sign_all(&root, &manifest_dir, cfg.signing.as_ref())?;
@@ -2365,6 +2374,7 @@ fn plugin_changed_by_path(path: &Path, manifest_dir: &Path) -> Option<String> {
 }
 
 async fn cmd_run(manifest_dir: &Path, http_addr: &str) -> anyhow::Result<()> {
+    build_id::ensure_env_from_manifests(manifest_dir);
     owasidea_host::run(manifest_dir.to_path_buf(), http_addr.to_string()).await
 }
 

@@ -1024,6 +1024,7 @@ struct OverviewRes {
     executables: usize,
     services: usize,
     runtimes: Vec<String>,
+    build_id: Option<String>,
 }
 
 async fn metrics(State(state): State<AppState>) -> String {
@@ -1072,6 +1073,9 @@ async fn overview(State(state): State<AppState>) -> Json<OverviewRes> {
         executables,
         services,
         runtimes: runtimes.into_iter().collect(),
+        build_id: std::env::var("OWASIDEA_BUILD_ID")
+            .ok()
+            .filter(|s| !s.trim().is_empty()),
     })
 }
 

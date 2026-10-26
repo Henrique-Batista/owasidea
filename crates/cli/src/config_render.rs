@@ -129,11 +129,14 @@ fn atomic_write(path: &Path, content: &[u8]) -> anyhow::Result<()> {
 }
 
 fn runtime_content(cfg: &AppConfig) -> serde_json::Value {
+    let build_id = std::env::var("OWASIDEA_BUILD_ID")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
     serde_json::json!({
         "host": host_url(cfg),
         "app": app_name(cfg),
         "version": app_version(cfg),
-        "build_id": null,
+        "build_id": build_id,
         "manifests_dir": "manifests",
     })
 }
