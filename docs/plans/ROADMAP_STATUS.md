@@ -30,8 +30,8 @@ Status permitidos: `todo`, `doing`, `review`, `done`, `blocked`.
 | B0.3 | done | main (release/1.0) | 99db2ae | docs | tracker + blocker template |
 | B0.4 | done | wt-audit | 19c0a7e (merge 63591ca) | cargo test + Shipyard build/smoke PASS; 1 FAIL (validate --json) | auditoria em `AUDIT_V1.md`; 6 FIX abertos |
 | B0.5 | done | — | 150fac8 (merge 2af19d0) | fmt/clippy/test verdes | seam de configuração |
-| B0.6 | todo | — | — | — | — |
-| B0.7 | todo | — | — | — | — |
+| B0.6 | done | wt-config | 408731e (merge 50583c1) | fmt/clippy/test verdes | schema v1 + `deny_unknown_fields` + docs/CLI.md |
+| B0.7 | done | wt-authoring | cadc41e (merge e6e85a8) | fmt/check verdes | convenções de módulos em AGENTS.md/ARCHITECTURE.md |
 | RF-01 | todo | — | — | — | — |
 | RF-02 | todo | — | — | — | — |
 | RF-03 | todo | — | — | — | — |
