@@ -128,10 +128,40 @@ fn atomic_write(path: &Path, content: &[u8]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn runtime_content(cfg: &AppConfig) -> serde_json::Value {
-    let build_id = std::env::var("OWASIDEA_BUILD_ID")
-        .ok()
-        .filter(|s| !s.trim().is_empty());
+fn resolve_build_id(root: &Path) -> Option<String> {
+    if let Ok(v) = std::env::var("OWASIDEA_BUILD_ID") {
+        let v = v.trim();
+        if !v.is_empty() {
+            return Some(v.to_string());
+        }
+    }
+    let dir = root.join("manifests");
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.extension().and_then(|x| x.to_str()) != Some("json") {
+                continue;
+            }
+            if let Ok(raw) = std::fs::read_to_string(&p) {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    if let Some(s) = v["metadata"]["build_id"].as_str() {
+                        if !s.trim().is_empty() {
+                            return Some(s.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn runtime_content(cfg: &AppConfig, build_id: Option<String>) -> serde_json::Value {
+    let build_id = build_id.or_else(|| {
+        std::env::var("OWASIDEA_BUILD_ID")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+    });
     serde_json::json!({
         "host": host_url(cfg),
         "app": app_name(cfg),
@@ -259,7 +289,8 @@ pub fn render_targets(
         let (path, content_bytes) = match t {
             RenderTarget::Runtime => {
                 let p = ui_dir(&root, &cfg).join(".owasidea").join("runtime.json");
-                let bytes = serde_json::to_vec_pretty(&runtime_content(&cfg))?;
+                let build_id = resolve_build_id(&root);
+                let bytes = serde_json::to_vec_pretty(&runtime_content(&cfg, build_id))?;
                 let mut b = bytes;
                 b.push(b'\n');
                 (p, b)
@@ -313,4 +344,67 @@ pub fn cmd_config_render(config_path: &Path, target: &str, check: bool) -> anyho
     let scope = parse_target(target)?;
     render_targets(config_path, scope, check)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn temp_root() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "owasidea-config-render-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("manifests")).unwrap();
+        dir
+    }
+
+    #[test]
+    fn resolve_build_id_from_manifest() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("OWASIDEA_BUILD_ID");
+        let root = temp_root();
+        std::fs::write(
+            root.join("manifests").join("core.manifest.json"),
+            r#"{"metadata":{"build_id":"abc-123"}}"#,
+        )
+        .unwrap();
+        assert_eq!(resolve_build_id(&root), Some("abc-123".to_string()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolve_build_id_env_precedence() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::set_var("OWASIDEA_BUILD_ID", "env-id");
+        let root = temp_root();
+        std::fs::write(
+            root.join("manifests").join("core.manifest.json"),
+            r#"{"metadata":{"build_id":"abc-123"}}"#,
+        )
+        .unwrap();
+        assert_eq!(resolve_build_id(&root), Some("env-id".to_string()));
+        std::env::remove_var("OWASIDEA_BUILD_ID");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn runtime_content_uses_manifest_id() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("OWASIDEA_BUILD_ID");
+        let root = temp_root();
+        std::fs::write(
+            root.join("manifests").join("core.manifest.json"),
+            r#"{"metadata":{"build_id":"abc-123"}}"#,
+        )
+        .unwrap();
+        let cfg = AppConfig::default();
+        let v = runtime_content(&cfg, resolve_build_id(&root));
+        assert_eq!(v["build_id"], "abc-123");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
