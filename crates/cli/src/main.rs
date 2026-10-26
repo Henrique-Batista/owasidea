@@ -1723,6 +1723,11 @@ fn cmd_build(config: &Path, manifest_dir: &Path, sign: bool) -> anyhow::Result<(
     if sign {
         sign_all(&root, &manifest_dir, cfg.signing.as_ref())?;
     }
+    let _ = config_render::render_targets(
+        config,
+        config_render::RenderScope::Single(config_render::RenderTarget::Runtime),
+        false,
+    );
     println!("Build complete.");
     Ok(())
 }
@@ -3101,6 +3106,10 @@ fn copy_runtime_resources(
     let manifests = root.join("manifests");
     if manifests.is_dir() {
         copy_dir_all(&manifests, &destination.join("manifests"))?;
+    }
+    let runtime_src = root.join("ui").join(".owasidea").join("runtime.json");
+    if runtime_src.is_file() {
+        std::fs::copy(&runtime_src, destination.join("owasidea.runtime.json"))?;
     }
     let plugins = root.join("plugins");
     if plugins.is_dir() {

@@ -1,23 +1,47 @@
-use owasidea_host;
+mod runtime;
+
+use runtime::resolve;
 use tauri::Manager;
 
 fn main() {
-    // Start the embedded host in the background.
-    tauri::async_runtime::spawn(async {
-        let manifests = std::env::var("OWASIDEA_MANIFESTS")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| std::path::PathBuf::from("../manifests"));
-        let addr = std::env::var("HOST_ADDR").unwrap_or_else(|_| "127.0.0.1:8787".to_string());
-        if let Err(e) = owasidea_host::run(manifests, addr).await {
-            eprintln!("host error: {e}");
-        }
-    });
-
     tauri::Builder::default()
         .setup(|app| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window;
-            }
+            let resource_dir = app.path().resource_dir().ok();
+            let resolved = resolve(resource_dir);
+
+            let manifests = resolved
+                .manifests_dir
+                .clone()
+                .unwrap_or_else(|| std::path::PathBuf::from("../manifests"));
+            let addr = resolved.bind_addr.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = owasidea_host::run(manifests, addr).await {
+                    eprintln!("host error: {e}");
+                }
+            });
+
+            let script_json = serde_json::json!({
+                "host": resolved.host_url,
+                "app": resolved.app,
+                "version": resolved.version,
+                "build_id": resolved.build_id,
+            });
+            let script_payload = serde_json::to_string(&script_json).unwrap_or_else(|_| "{}".to_string());
+            let script = format!(
+                "if (window.location.origin === 'tauri://localhost' || window.location.origin === 'https://tauri.localhost' || window.location.origin.startsWith('http://localhost') || window.location.origin.startsWith('http://127.0.0.1')) {{ window.__OWASIDEA__ = {}; }}",
+                script_payload
+            );
+
+            let window = tauri::WebviewWindowBuilder::new(
+                app,
+                "main",
+                tauri::WebviewUrl::App("index.html".into()),
+            )
+            .title("Owasidea")
+            .inner_size(1024.0, 768.0)
+            .initialization_script(script)
+            .build()?;
+            let _ = window;
             Ok(())
         })
         .run(tauri::generate_context!())

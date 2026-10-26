@@ -60,13 +60,6 @@ fn app_version(cfg: &AppConfig) -> String {
         .unwrap_or_else(|| "0.1.0".to_string())
 }
 
-fn app_identifier(cfg: &AppConfig) -> String {
-    cfg.app
-        .as_ref()
-        .and_then(|a| a.identifier.clone())
-        .unwrap_or_else(|| "dev.owasidea.app".to_string())
-}
-
 fn ui_dir(root: &Path, cfg: &AppConfig) -> PathBuf {
     let ui = cfg
         .desktop
@@ -138,13 +131,10 @@ fn atomic_write(path: &Path, content: &[u8]) -> anyhow::Result<()> {
 fn runtime_content(cfg: &AppConfig) -> serde_json::Value {
     serde_json::json!({
         "host": host_url(cfg),
-        "app": {
-            "name": app_name(cfg),
-            "version": app_version(cfg),
-            "identifier": app_identifier(cfg),
-        },
+        "app": app_name(cfg),
         "version": app_version(cfg),
         "build_id": null,
+        "manifests_dir": "manifests",
     })
 }
 
