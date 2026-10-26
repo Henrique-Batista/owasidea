@@ -1,8 +1,8 @@
 # ADR 0003 — Runtime host discovery
 
-- Status: Proposed (RF-03; pending REV/SEC approval)
+- Status: Accepted (REV/SEC reviewed)
 - Date: 2026-10-26
-- Related: RF-03, RF-04, RF-05, RF-09, ADR 0001, ADR 0002
+- Related: RF-03, RF-04, RF-05, RF-09, RF-07, ADR 0001, ADR 0002
 
 ## Context
 
@@ -25,9 +25,15 @@ require the UI to prefer the runtime value, falling back to the build-time
 mechanism by which the runtime value reaches the webview, so RF-04/RF-05/RF-09
 can be implemented without inventing a transport.
 
+Additional constraint found during review: the current `tauri.conf.json` declares
+the main window declaratively (`app.windows[0]`). Tauri only applies
+`initialization_script` to windows created through
+`WebviewWindowBuilder`, so a declarative window cannot receive the script. The
+desktop shell must create the window programmatically (see Decision).
+
 ## Validated Tauri 2 API
 
-Installed version: `tauri = "2.12.5"` (`crates/desktop/Cargo.lock`;
+Installed version: `tauri = "2.12.5"` (workspace root `Cargo.lock`;
 registry `~/.cargo/registry/src/.../tauri-2.12.5`).
 
 - `WebviewWindowBuilder::initialization_script(script: impl Into<String>)`
@@ -47,6 +53,9 @@ registry `~/.cargo/registry/src/.../tauri-2.12.5`).
   webview; the current code passes `OWASIDEA_HOST` only to Vite at build time
   (`crates/cli/src/main.rs` ~2083/~2998). Runtime env must be read in Rust and
   forwarded via one of the mechanisms above.
+- Resources: `tauri::path::PathResolver::resource_dir()` resolves to the
+  packaged resource directory on desktop (`src/path/desktop.rs` ~220-235), which
+  the CLI already populates through `copy_runtime_resources`.
 
 Conclusion: `initialization_script` is the lowest-friction, earliest-running,
 documented mechanism for injecting `window.__OWASIDEA__` before app code runs.
@@ -75,26 +84,51 @@ build-time `__OWASIDEA_HOST__` as fallback**.
 
 Concretely:
 
-1. The desktop shell (`crates/desktop/src/main.rs`) reads `HOST_ADDR` (and app
-   metadata: name, version, build_id) and builds a JSON object:
+1. Runtime metadata source: a generated file `owasidea.runtime.json` (shape:
+   `{ "host", "app", "version", "build_id", "manifests_dir" }`).
+   - In `dev`, the CLI writes it to a temporary path and points the desktop at
+     it through `OWASIDEA_RUNTIME`; env vars `HOST_ADDR`, `OWASIDEA_APP_NAME`,
+     `OWASIDEA_APP_VERSION`, `OWASIDEA_BUILD_ID`, and `OWASIDEA_MANIFESTS`
+     override individual fields for quick debugging.
+   - In `bundle`, the CLI generates it from `[app]` and `[host].addr` (RF-01)
+     and copies it into the Tauri resource directory via `copy_runtime_resources`
+     (already used for manifests and signing keys), so the installed app needs no
+     environment variables.
+   - `version` and `build_id` come from the same build inputs RF-07 will use
+     (app version from `[app].version`, `build_id` from git sha + timestamp or
+     `SOURCE_DATE_EPOCH`); the CLI computes them once per build and writes them
+     to both `owasidea.runtime.json` and manifests, avoiding skew.
+2. Host address transport to the installed binary: `owasidea.runtime.json` in the
+   resource directory is the authoritative source; `HOST_ADDR` remains a runtime
+   override for dev/debug. The binary never depends on a compile-time env var.
+3. The desktop shell (`crates/desktop/src/main.rs`) resolves metadata in this
+   order: `OWASIDEA_RUNTIME` file if present, otherwise
+   `app.path().resource_dir().join("owasidea.runtime.json")`, with env overrides
+   applied on top. It then starts the embedded host using the resolved host
+   address and builds a JSON object
    `{ "host": "http://127.0.0.1:<port>", "app": "<name>", "version": "<ver>",
       "build_id": "<id>" }`.
-   It passes this to `WebviewWindowBuilder::initialization_script` as a script
-   that does `window.__OWASIDEA__ = <JSON>;` — the value is produced with a
-   JSON serializer (e.g. `serde_json::to_string`), **never** via string
+   The value is produced with `serde_json::to_string` (or equivalent) and
+   embedded as `window.__OWASIDEA__ = <JSON>;` — **never** via string
    interpolation, so host/app/version cannot inject JS.
-2. The script is guarded by an origin check on `window.location` (per Tauri's
-   own documentation for `initialization_script`), so it only sets the global on
-   the app origin; subframes/UI-plugin iframes do not receive it.
-3. The UI reads `window.__OWASIDEA__?.host` first and falls back to the
-   build-time `__OWASIDEA_HOST__` (RF-09 makes the latter mandatory in dev and
-   optional-with-warning in bundle). If neither is present, fail loudly with an
-   actionable error instead of silently using a default.
-4. `HOST_ADDR` / `[host].addr` is the single source of truth for the host
+4. Window creation: remove the declarative `app.windows` entry from
+   `tauri.conf.json` (`"windows": []`) and create the main window in `setup`
+   with `tauri::WebviewWindowBuilder::new(app, "main",
+   tauri::WebviewUrl::App("index.html".into()))
+   .initialization_script(script).build()?`. This is the only way to attach the
+   script. `WebviewUrl::App` still honors `build.devUrl` in dev mode.
+5. The script is attached with the main-frame `initialization_script` (not
+   `initialization_script_for_all_frames`), so it runs only on the top-level app
+   document and is **not** injected into UI-plugin iframes. It is also guarded by
+   a `window.location.origin` check per Tauri's documented guidance.
+6. The UI reads `window.__OWASIDEA__?.host` first and falls back to the
+   build-time `__OWASIDEA_HOST__` (RF-09). If neither is present, fail loudly
+   with an actionable error instead of silently using a default.
+7. `HOST_ADDR` / `[host].addr` is the single source of truth for the host
    origin; the CLI's bundle path generates the desktop config/env from it
    (RF-02 `config render`), and `warn_csp_mismatch` becomes a hard error in
    bundle mode (RF-05).
-5. The host origin injected is validated before use by the UI: must be an
+8. The host origin injected is validated before use by the UI: must be an
    `http://127.0.0.1:<port>` or `http://localhost:<port>` URL matching the
    configured `[host].addr`; arbitrary origins and `null`/wildcard are rejected.
    No unvalidated origin is ever stored in `window.__OWASIDEA__`.
@@ -110,7 +144,8 @@ Concretely:
   `*`, no `null`, no wildcard schemes.
 - The UI validates the runtime host against an allow-list derived from config
   before issuing requests; a mismatched/tampered value is ignored and the
-  build-time fallback (or an error) is used.
+  build-time fallback (or an error) is used. A tampered `owasidea.runtime.json`
+  cannot bypass CSP.
 - Initialization script payload size is bounded (host URL + small metadata);
   no plugin data or secrets are injected.
 - UI-plugin iframes keep their opaque origin and `sandbox="allow-scripts
@@ -118,14 +153,18 @@ Concretely:
 
 ## Migration
 
-- Apps built without the initialization script keep working: the UI falls back to
-  `__OWASIDEA_HOST__` (RF-09). No hard break for existing bundles.
+- Apps built without `owasidea.runtime.json` keep working: the desktop falls
+  back to env vars and defaults, and the UI falls back to `__OWASIDEA_HOST__`
+  (RF-09). No hard break for existing bundles.
 - `dev`/Vite continues to set `OWASIDEA_HOST` so direct `npm run dev` works;
   RF-09 only makes a missing value a hard error outside the CLI.
-- Bundles use the config-generated host value and CSP; `config render --check`
-  (RF-02) detects drift.
+- Bundles use the config-generated host value and CSP; `config render --target
+  tauri --check` (RF-02) detects drift.
 - `HOST_ADDR` keeps its current meaning (host bind address); the webview origin
   is derived from it, not the reverse.
+- Removing the declarative window requires moving creation into `setup`; existing
+  `tauri.conf.json` files with `app.windows` should be migrated by the CLI
+  (RF-02 target `tauri`) or documented in the upgrade guide.
 
 ## Test criteria (RF-04 / RF-05 / RF-09)
 
@@ -134,22 +173,25 @@ Concretely:
   (no `OWASIDEA_HOST` change).
 - Playwright smoke: with `HOST_ADDR=127.0.0.1:8899`, the dashboard's host label
   equals the runtime value and `/overview` succeeds.
-- `owasidea config render --check` fails when `tauri.conf.json` CSP is stale
-  relative to `[host].addr`.
+- `owasidea config render --target tauri --check` fails when `tauri.conf.json`
+  CSP is stale relative to `[host].addr`.
 - CSP blocks a request to an origin not declared in config (Playwright network
   assertion).
 - Direct `npm run build` without `OWASIDEA_HOST` (outside CLI) fails with an
   actionable error (RF-09).
 - Negative: a tampered `window.__OWASIDEA__` (e.g. `host: "http://evil.example"`)
   is rejected by the UI validation and does not result in a request.
+- Negative: `window.__OWASIDEA__` is `undefined` inside a UI-plugin iframe.
 
 ## Consequences
 
 - Positive: non-default `[host].addr` works in bundled apps without hand-editing
   CSP or rebuilding UI; single source of truth for host origin; earliest
   possible injection (pre-parse) avoids flash/FOUC of wrong host.
-- Negative: desktop shell must serialize metadata and build the script at
-  startup; bundle CSP must be regenerated (RF-05) rather than static.
+- Negative: desktop shell must resolve `owasidea.runtime.json`, serialize
+  metadata and create the window in `setup`; bundle CSP must be regenerated
+  (RF-05) rather than static; declarative window configuration is no longer
+  used.
 - Risk: Tauri's `initialization_script` runs on all top-level navigations; the
   origin guard is mandatory to avoid re-injection on unexpected origins. Android
   remote-URL caveat (uses `onPageStarted`, not guaranteed pre-parse) is accepted
@@ -171,9 +213,11 @@ Concretely:
 ## References
 
 - Tauri 2.12.5 source:
+  workspace root `Cargo.lock` (tauri 2.12.5);
   `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tauri-2.12.5/src/webview/webview_window.rs`
   (`initialization_script`, `eval`, `initialization_script_for_all_frames`);
-  `src/app.rs` (`register_uri_scheme_protocol`).
+  `src/webview/mod.rs`; `src/app.rs` (`register_uri_scheme_protocol`);
+  `src/path/desktop.rs` (`resource_dir`).
 - Repo: `crates/desktop/src/main.rs`, `crates/desktop/tauri.conf.json`,
   `ui/vite.config.ts`, `crates/cli/src/main.rs` (`warn_csp_mismatch`,
-  bundle `OWASIDEA_HOST`), `examples/shipyard/ui/src/main.ts`.
+  `copy_runtime_resources`, bundle `OWASIDEA_HOST`), `examples/shipyard/ui/src/main.ts`.
