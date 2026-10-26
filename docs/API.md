@@ -27,7 +27,34 @@ uses `name: "result"`). Supported type spellings: primitives (`bool`, `u8`..`u64
 (`_` for a void side, bare `result` when both are void), `tuple<...>`, `record <name>`,
 `enum <name>`, `flags <name>`, `variant <name>`, `resource`, and `handle`.
 The host converts each JSON value to the WIT type and rejects arity/type
-mismatches with HTTP 400. The response is `{ "result": ... }` for a single
+mismatches with HTTP 400.
+
+
+### Type grammar (CT-02)
+
+```
+type := primitive
+     | "list<" type ">"
+     | "option<" type ">"
+     | "result"
+     | "result<" side "," side ">"
+     | "tuple<" type ("," type)+ ">"
+     | "record" (" " | "<") name (">")?
+     | "enum" (" " | "<") name (">")?
+     | "flags" (" " | "<") name (">")?
+     | "variant" (" " | "<") name (">")?
+     | "resource"
+     | "handle"
+side := "_" | type
+primitive := bool | u8 | u16 | u32 | u64 | s8 | s16 | s32 | s64 | f32 | f64 | char | string | void
+```
+
+Examples: `u32`, `list<string>`, `option<u32>`, `result<string,string>`,
+`result<_,string>`, `result<u32,_>`, `result`, `tuple<u32,string>`,
+`record point`, `enum color`, `flags perms`, `variant shape`, `resource`, `handle`.
+Invalid spellings rejected by `owasidea build` with a path such as
+`plugin notes: invalid type at exports[0].params[1].type: ...`.
+ The response is `{ "result": ... }` for a single
 return value or `{ "results": [...] }` for multiple values; `result`/`results`
 wrappers such as `ok`/`err` are preserved.
 
