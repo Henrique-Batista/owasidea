@@ -1,0 +1,319 @@
+# CI policy (B0.2):
+# - Fast job runs on every PR and push.
+# - Full matrix (build+smoke+Playwright+bundle) runs only on push to
+#   release/1.0 and tags, at most 2x per day to avoid burning CI quota.
+# - No cron schedules are defined; avoid unbounded matrix runs.
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  fast:
+    name: Fast (fmt, clippy, tests, doctor)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.1"
+          cache: true
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Cache cargo registry/git
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-reg-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-reg-
+
+      - name: Cache cargo target
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-target-
+
+      - name: Install cargo-component and wasm-tools
+        run: |
+          cargo install cargo-component --locked
+          cargo install wasm-tools --locked
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test host/cli
+        run: cargo test -p owasidea-host -p owasidea-cli
+
+      - name: Build owasidea CLI
+        run: cargo build -p owasidea-cli
+
+      - name: Put owasidea on PATH
+        run: echo "$PWD/target/debug" >> "$GITHUB_PATH"
+
+      - name: owasidea doctor --json
+        run: owasidea doctor --json
+
+  full:
+    name: Full (Shipyard build, smoke, Playwright, deb bundle)
+    needs: fast
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/release/1.0' || startsWith(github.ref, 'refs/tags/'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.1"
+          cache: true
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: |
+            package-lock.json
+            examples/shipyard/ui/package-lock.json
+            examples/shipyard/plugins/board-svelte/package-lock.json
+            examples/shipyard/plugins/map-react/package-lock.json
+
+      - name: Install system deps (Tauri)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libappindicator3-dev \
+            librsvg2-dev patchelf libsoup-3.0-dev build-essential \
+            pkg-config libssl-dev
+
+      - name: Cache cargo registry/git
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-reg-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-reg-
+
+      - name: Cache cargo target
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-target-
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('examples/shipyard/playwright.config.ts') }}
+          restore-keys: ${{ runner.os }}-playwright-
+
+      - name: Install cargo-component and wasm-tools
+        run: |
+          cargo install cargo-component --locked
+          cargo install wasm-tools --locked
+
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Build owasidea CLI
+        run: cargo build -p owasidea-cli
+
+      - name: Put owasidea on PATH
+        run: echo "$PWD/target/debug" >> "$GITHUB_PATH"
+
+      - name: npm ci (root Playwright)
+        run: npm ci
+
+      - name: Shipyard build
+        working-directory: examples/shipyard
+        run: owasidea build
+
+      - name: Shipyard smoke
+        working-directory: examples/shipyard
+        run: owasidea smoke
+
+      - name: Install Playwright Chromium
+        working-directory: examples/shipyard
+        run: npx playwright install --with-deps chromium
+
+      - name: Playwright tests
+        working-directory: examples/shipyard
+        run: npx playwright test --config playwright.config.ts
+
+      - name: Bundle deb
+        working-directory: examples/shipyard
+        run: owasidea bundle --no-build --bundles deb
+
+  appimage:
+    name: AppImage (optional, isolate host libs)
+    needs: full
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/release/1.0' || startsWith(github.ref, 'refs/tags/'))
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.1"
+          cache: true
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install system deps (Tauri)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libappindicator3-dev \
+            librsvg2-dev patchelf libsoup-3.0-dev build-essential \
+            pkg-config libssl-dev
+
+      - name: Cache cargo registry/git
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-reg-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-reg-
+
+      - name: Cache cargo target
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-target-
+
+      - name: Install cargo-component and wasm-tools
+        run: |
+          cargo install cargo-component --locked
+          cargo install wasm-tools --locked
+
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Build owasidea CLI
+        run: cargo build -p owasidea-cli
+
+      - name: Put owasidea on PATH
+        run: echo "$PWD/target/debug" >> "$GITHUB_PATH"
+
+      - name: Shipyard build
+        working-directory: examples/shipyard
+        run: owasidea build
+
+      - name: Bundle AppImage
+        working-directory: examples/shipyard
+        run: owasidea bundle --no-build --bundles appimage --isolate-host-libs
+
+  windows:
+    name: Windows (host/cli, plugins, NSIS)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.1"
+          cache: true
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Cache cargo registry/git
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-reg-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-reg-
+
+      - name: Cache cargo target
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-target-
+
+      - name: Install cargo-component and wasm-tools
+        run: |
+          cargo install cargo-component --locked
+          cargo install wasm-tools --locked
+
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Build host and CLI
+        run: cargo build -p owasidea-host -p owasidea-cli
+
+      - name: Put owasidea on PATH
+        shell: bash
+        run: echo "$PWD/target/debug" >> "$GITHUB_PATH"
+
+      - name: owasidea doctor --json (optional toolchains)
+        continue-on-error: true
+        run: owasidea doctor --json
+
+      - name: Shipyard build (Rust/Go/TS; C#/C/C++ optional/continue-on-error)
+        working-directory: examples/shipyard
+        continue-on-error: true
+        run: owasidea build
+
+      - name: Bundle NSIS
+        working-directory: examples/shipyard
+        continue-on-error: true
+        run: owasidea bundle --no-build --bundles nsis
