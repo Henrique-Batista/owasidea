@@ -1,7 +1,7 @@
 # Roadmap 1.0 — Plano de implementação
 
-Status: **planejado, não iniciado**
-Última atualização: 2026-10-25
+Status: **em execução**
+Última atualização: 2026-10-26
 Fonte de escopo: [`docs/ROADMAP.md`](../ROADMAP.md), seção
 "Backlog de DX e hardening para 1.0", mais a revalidação dos itens marcados
 como concluídos em v0–v1.0.
