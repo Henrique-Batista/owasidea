@@ -205,6 +205,10 @@ shell must include the public key as a Tauri resource and set
 `bundle.resources` in `tauri.conf.json` must include the generated manifests and
 component `.wasm` files; see `examples/shipyard/desktop`.
 
+Direct UI builds outside the CLI (`npm run build` / `vite`) now fail with an
+actionable error if `OWASIDEA_HOST` is not set. Use `owasidea build`/`owasidea dev`
+or export `OWASIDEA_HOST=http://127.0.0.1:8787` before building.
+
 By default the Tauri config decides the targets. Shipyard uses `"all"`:
 
 ```toml
