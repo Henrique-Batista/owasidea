@@ -35,7 +35,7 @@ Status permitidos: `todo`, `doing`, `review`, `done`, `blocked`.
 | RF-01 | done | wt-host | 244042b (merge 818e197) | fmt/clippy/test + Shipyard build | valida addr/ui_addr/paths; porta 0 só bloqueada no bundle |
 | RF-02 | done | wt-config | 0d238a2 (merge 0f13255) | fmt/clippy/test + render/--check no Shipyard | `config render` runtime/tauri/playwright |
 | RF-03 | done | wt-authoring | db75c0e (merge f55f6f8) | REV + SEC aprovaram | ADR-0003 Accepted: initialization script + runtime.json |
-| RF-04 | todo | — | — | — | — |
+| RF-04 | done | wt-ui | e726a4b (merge 95944f3) | fmt/clippy/test + Shipyard build/smoke + desktop check | runtime.json + initialization script; shell do exemplo; testes Playwright adicionados (não executados) |
 | RF-05 | todo | — | — | — | — |
 | RF-06 | todo | — | — | — | — |
 | RF-07 | todo | — | — | — | — |
@@ -50,7 +50,7 @@ Status permitidos: `todo`, `doing`, `review`, `done`, `blocked`.
 | DL-07 | todo | — | — | — | — |
 | DL-08 | todo | — | — | — | — |
 | CT-01 | done | wt-contracts | 06bd591 (merge ed25c20) | fmt/clippy/test isolado + Shipyard build | `params`/`results` estruturados; interface exports preservados |
-| CT-02 | todo | — | — | — | — |
+| CT-02 | done | wt-contracts | b7c0d48 (merge 1c7dc55) | fmt/clippy/test + Shipyard build | parser/validador de tipos com proptest; build valida params/results |
 | CT-03 | todo | — | — | — | — |
 | CT-04 | todo | — | — | — | — |
 | CT-05 | todo | — | — | — | — |
