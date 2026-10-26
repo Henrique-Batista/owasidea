@@ -1,6 +1,31 @@
 import { test, expect } from '@playwright/test';
 import { createHash } from 'node:crypto';
 
+test('runtime host injection is preferred over build-time host', async ({ page }) => {
+  await page.addInitScript(() => {
+    (window as any).__OWASIDEA__ = { host: 'http://127.0.0.1:8790', app: 'Test', version: '1', build_id: 'bid' };
+  });
+  await page.route('http://127.0.0.1:8790/health', route => route.fulfill({ status: 200, body: 'ok' }));
+  await page.route('http://127.0.0.1:8790/plugins', route => route.fulfill({ status: 200, contentType: 'application/json', body: '[]' }));
+  await page.route('http://127.0.0.1:8790/overview', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ plugins: 0, libraries: 0, executables: 0, services: 0, runtimes: [] }) }));
+  await page.goto('/');
+  await page.waitForTimeout(200);
+  // host label should reflect runtime host
+  await expect(page.locator('body')).toContainText('127.0.0.1:8790');
+});
+
+test('non-loopback runtime host is rejected and no request is made', async ({ page }) => {
+  const requests: string[] = [];
+  page.on('request', req => requests.push(req.url()));
+  await page.addInitScript(() => {
+    (window as any).__OWASIDEA__ = { host: 'http://evil.example', app: 'Test', version: '1', build_id: null };
+  });
+  await page.route('http://127.0.0.1:8787/health', route => route.fulfill({ status: 200, body: 'ok' }));
+  await page.goto('/');
+  await page.waitForTimeout(200);
+  expect(requests.some(url => url.includes('evil.example'))).toBeFalsy();
+});
+
 test('plugin list renders', async ({ page }) => {
   await page.route('http://127.0.0.1:8787/plugins', route => route.fulfill({
     status: 200,

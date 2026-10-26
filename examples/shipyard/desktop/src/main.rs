@@ -1,3 +1,6 @@
+mod runtime;
+
+use runtime::resolve;
 use std::path::{Path, PathBuf};
 
 use tauri::Manager;
@@ -76,6 +79,8 @@ fn main() {
     tauri::Builder::default()
         .setup(|app| {
             let handle = app.handle().clone();
+            let resource_dir = handle.path().resource_dir().ok();
+            let resolved = resolve(resource_dir);
 
             let manifests = manifests_dir(&handle);
             let data_dir = handle.path().app_data_dir()?;
@@ -101,12 +106,35 @@ fn main() {
             eprintln!("shipyard manifests: {}", manifests.display());
             eprintln!("shipyard data: {}", data_dir.display());
 
-            let addr = std::env::var("HOST_ADDR").unwrap_or_else(|_| "127.0.0.1:8790".to_string());
+            let script_json = serde_json::json!({
+                "host": resolved.host_url,
+                "app": resolved.app,
+                "version": resolved.version,
+                "build_id": resolved.build_id,
+            });
+            let script_payload = serde_json::to_string(&script_json).unwrap_or_else(|_| "{}".to_string());
+            let script = format!(
+                "if (window.location.origin === 'tauri://localhost' || window.location.origin === 'https://tauri.localhost' || window.location.origin.startsWith('http://localhost') || window.location.origin.startsWith('http://127.0.0.1')) {{ window.__OWASIDEA__ = {}; }}",
+                script_payload
+            );
+
+            let addr = resolved.bind_addr.clone();
             tauri::async_runtime::spawn(async move {
                 if let Err(error) = owasidea_host::run(manifests, addr).await {
                     eprintln!("shipyard host error: {error}");
                 }
             });
+            let window = tauri::WebviewWindowBuilder::new(
+                app,
+                "main",
+                tauri::WebviewUrl::App("index.html".into()),
+            )
+            .title("Shipyard — polyglot release cockpit")
+            .inner_size(1280.0, 900.0)
+            .min_inner_size(960.0, 680.0)
+            .initialization_script(script)
+            .build()?;
+            let _ = window;
             Ok(())
         })
         .run(tauri::generate_context!())

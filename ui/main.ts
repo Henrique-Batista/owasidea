@@ -1,5 +1,37 @@
-declare const __OWASIDEA_HOST__: string;
-const HOST = __OWASIDEA_HOST__;
+interface OwasideaRuntime {
+  host?: string;
+  app?: string;
+  version?: string;
+  build_id?: string | null;
+}
+declare global {
+  interface Window {
+    __OWASIDEA__?: OwasideaRuntime;
+  }
+}
+declare const __OWASIDEA_HOST__: string | undefined;
+
+function isLoopbackHost(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' && (url.hostname === '127.0.0.1' || url.hostname === 'localhost');
+  } catch {
+    return false;
+  }
+}
+
+const runtimeHost = window.__OWASIDEA__?.host;
+let resolvedHost = '';
+if (runtimeHost && isLoopbackHost(runtimeHost)) {
+  resolvedHost = runtimeHost;
+} else if (typeof __OWASIDEA_HOST__ === 'string' && __OWASIDEA_HOST__ && isLoopbackHost(__OWASIDEA_HOST__)) {
+  resolvedHost = __OWASIDEA_HOST__;
+}
+if (!resolvedHost) {
+  throw new Error('Owasidea host is not configured. Run via `owasidea dev`/`owasidea run`, or set OWASIDEA_HOST at build time.');
+}
+const HOST = resolvedHost;
+const OWASIDEA_BUILD_ID = window.__OWASIDEA__?.build_id ?? null;
 const view = document.getElementById('view')!;
 
 function escapeHtml(value: unknown): string {
