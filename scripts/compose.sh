@@ -12,6 +12,7 @@ wasm-tools compose plugins/notes-client/notes-client.component.wasm \
 python3 scripts/gen-manifest.py \
   --component plugins/composed/composed.component.wasm \
   --name composed --version 0.1.0 --language rust --type library \
+  --kv composed:read-write \
   --out manifests/composed.manifest.json \
   --description "Composed notes client (build-time composition)"
 

@@ -5,8 +5,20 @@
 node_modules
 ui/dist
 ui/.vite
+ui/public/plugins/
+ui/public/ui-plugins.json
+ui/.owasidea/
 manifests/*.manifest.json
-# keep generated? no, generated
 data/
 test-results/
 .DS_Store
+keys/
+reports/
+bin/
+obj/
+gen/
+**/src/bindings.rs
+dist/
+
+crates/desktop/gen/
+desktop/gen/

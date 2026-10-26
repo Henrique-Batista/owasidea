@@ -8,6 +8,7 @@ the manifest against the component at load time.
 
 import argparse
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -88,6 +89,8 @@ def parse_fs(values):
             path, access = v.rsplit(":", 1)
         else:
             path, access = v, "read-write"
+        if not path or access not in ("read", "read-write"):
+            raise SystemExit(f"invalid filesystem permission: {v}")
         out.append({"path": path, "access": access, "preopen": True})
     return out
 
@@ -103,7 +106,7 @@ def main():
     ap.add_argument("--runtime", default="wasi-component",
                     choices=["wasi-component", "js-wasm"])
     ap.add_argument("--type", dest="kind", default="library",
-                    choices=["library", "executable", "hybrid"])
+                    choices=["library", "executable", "hybrid", "service"])
     ap.add_argument("--out", required=True)
     ap.add_argument("--description", default="")
     ap.add_argument("--fs", action="append", default=[],
@@ -112,6 +115,10 @@ def main():
                     help="host KV permission as namespace:access")
     ap.add_argument("--http-outbound", action="append", default=[],
                     help="allowed outbound host (repeatable)")
+    ap.add_argument("--network-outbound", action="append", default=[],
+                    help="allowed wasi:sockets destination hostname or IP (repeatable)")
+    ap.add_argument("--network-inbound", action="append", default=[],
+                    help="local IP address the component may bind/listen on (repeatable)")
     ap.add_argument("--persistent", action="store_true")
     ap.add_argument("--storage", default=None,
                     choices=["wasi-filesystem", "host-kv", "none"])
@@ -122,6 +129,9 @@ def main():
     doc = wit_json(component)
     wasi, host = collect_imports(doc)
     exports = collect_exports(component)
+    imports_host_kv = any(item.startswith("poc:host/host-kv") for item in host)
+    if imports_host_kv != bool(args.kv):
+        raise SystemExit("component host-kv import and --kv permission must both be present")
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -130,7 +140,27 @@ def main():
     kv = None
     if args.kv:
         ns, access = (args.kv.rsplit(":", 1) if ":" in args.kv else (args.kv, "read-write"))
+        if not ns or not re.fullmatch(r"[A-Za-z0-9_-]+", ns) or access not in ("read", "read-write"):
+            raise SystemExit(f"invalid KV permission: {args.kv}")
         kv = {"namespace": ns, "access": access}
+
+    for http_host in args.http_outbound:
+        try:
+            ipaddress.ip_address(http_host)
+        except ValueError:
+            if not http_host or any(char in http_host for char in ":/*"):
+                raise SystemExit(f"invalid outbound HTTP host: {http_host}")
+    for network_host in args.network_outbound:
+        try:
+            ipaddress.ip_address(network_host)
+        except ValueError:
+            if not network_host or any(char in network_host for char in ":/*"):
+                raise SystemExit(f"invalid outbound network host: {network_host}")
+    for address in args.network_inbound:
+        try:
+            ipaddress.ip_address(address)
+        except ValueError:
+            raise SystemExit(f"inbound network permission must be an IP address: {address}")
 
     storage = args.storage
     if storage is None:
@@ -152,6 +182,10 @@ def main():
             "http": {
                 "outbound": args.http_outbound,
                 "inbound": args.kind in ("executable", "hybrid"),
+            },
+            "network": {
+                "outbound": args.network_outbound,
+                "inbound": args.network_inbound,
             },
             "kv": kv,
             "resources": {"max_memory_mb": 64, "max_fuel": 1000000000,

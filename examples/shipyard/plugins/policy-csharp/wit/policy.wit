@@ -1,0 +1,13 @@
+package shipyard:policy@0.1.0;
+
+interface api {
+    classify: func(score: s32) -> string;
+    next-version: func(current: string, bump: string) -> string;
+    summarize: func(version: string, score: s32) -> string;
+}
+
+world policy {
+    import poc:host/host-log@0.1.0;
+
+    export api;
+}

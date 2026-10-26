@@ -1,0 +1,9 @@
+package shipyard:metrics@0.1.0;
+
+interface api {
+    analyze: func(text: string) -> string;
+}
+
+world metrics {
+    export api;
+}

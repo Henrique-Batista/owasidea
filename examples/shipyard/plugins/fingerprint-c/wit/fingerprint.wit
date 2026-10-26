@@ -1,0 +1,10 @@
+package shipyard:fingerprint@0.1.0;
+
+interface api {
+    fingerprint: func(input: string) -> string;
+    verify: func(input: string, expected: string) -> bool;
+}
+
+world fingerprint {
+    export api;
+}

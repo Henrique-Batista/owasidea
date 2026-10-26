@@ -4,6 +4,23 @@ This is a **new** POC for the framework/CLI/UI. The feasibility POC lives at
 `/home/pablitux/Projetos/extism-poc` and is the reference implementation.
 Read this file before writing code. Do not re-litigate the transport choice.
 
+## Reference application
+
+`examples/shipyard` is the canonical end-to-end example. It exercises every
+supported language runtime, build-time composition, isolated UI frameworks, host
+KV/filesystem, a stateful service, an executable `wasi:http` plugin, and Tauri
+packaging. Read `examples/shipyard/AGENTS.md` before changing it and use
+`docs/GET_STARTED.md` / `docs/AI_AGENTS.md` for human and agent workflows.
+
+Verification:
+
+```bash
+cd examples/shipyard
+owasidea build
+owasidea smoke
+owasidea test
+```
+
 ## Read first
 
 - `/home/pablitux/Projetos/extism-poc/README.md` — validated capabilities, commands, known gaps.

@@ -1,0 +1,12 @@
+{
+  "name": "shipyard-changelog-ts",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "jco componentize src/index.ts --wit wit --world-name changelog -o changelog-ts.component.wasm"
+  },
+  "devDependencies": {
+    "@bytecodealliance/componentize-js": "0.23.0",
+    "@bytecodealliance/jco": "1.39.0"
+  }
+}

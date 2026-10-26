@@ -1,0 +1,179 @@
+[app]
+name = "shipyard"
+version = "0.1.0"
+identifier = "dev.owasidea.shipyard"
+
+[host]
+addr = "127.0.0.1:8790"
+
+[desktop]
+path = "desktop"
+ui = "ui"
+output = "dist"
+
+[signing]
+key = "keys/owasidea.key"
+public_key = "keys/owasidea.pub"
+generate = true
+require = true
+
+[test]
+ui = ["npx", "playwright", "test", "--config", "playwright.config.ts"]
+
+[plugins.core-rust]
+path = "plugins/core-rust"
+language = "rust"
+type = "library"
+kv = "shipyard-core:read-write"
+fs = ["reports:read-write"]
+persistent = true
+
+[plugins.audit-go]
+path = "plugins/audit-go"
+language = "go"
+type = "library"
+
+[plugins.changelog-ts]
+path = "plugins/changelog-ts"
+language = "typescript"
+type = "library"
+
+[plugins.policy-csharp]
+path = "plugins/policy-csharp"
+language = "csharp"
+type = "library"
+
+[plugins.fingerprint-c]
+path = "plugins/fingerprint-c"
+language = "c"
+type = "library"
+
+[plugins.metrics-cpp]
+path = "plugins/metrics-cpp"
+language = "cpp"
+type = "library"
+
+[plugins.pipeline-go]
+path = "plugins/pipeline-go"
+language = "go"
+type = "library"
+kv = "shipyard-pipeline:read-write"
+fs = ["reports:read-write"]
+persistent = true
+compose_with = ["core-rust"]
+
+[plugins.webhook-go]
+path = "plugins/webhook-go"
+language = "go"
+type = "executable"
+
+[plugins.watchtower-rust]
+path = "plugins/watchtower-rust"
+language = "rust"
+type = "service"
+
+[plugins.board-svelte]
+path = "plugins/board-svelte"
+language = "svelte"
+type = "ui"
+runtime = "js-wasm"
+ui_entry = "index.html"
+ui_build = ["npm", "run", "build"]
+
+[plugins.map-react]
+path = "plugins/map-react"
+language = "react"
+type = "ui"
+runtime = "js-wasm"
+ui_entry = "index.html"
+ui_build = ["npm", "run", "build"]
+
+[dev]
+watch = true
+hot_reload = true
+ui_addr = "127.0.0.1:5180"
+
+[[smoke.calls]]
+plugin = "core-rust"
+function = "ping"
+expect_contains = "online"
+
+[[smoke.calls]]
+plugin = "core-rust"
+function = "score"
+args = [["feat: add", "fix: bug"], 9, 10]
+min = 0
+max = 100
+
+[[smoke.calls]]
+plugin = "core-rust"
+function = "verdict"
+args = [90]
+expect_contains = "ship"
+
+[[smoke.calls]]
+plugin = "pipeline-go"
+function = "run"
+args = ["v1.0.0", ["feat: add"], 9, 10]
+expect_contains = "composed"
+
+[[smoke.calls]]
+plugin = "audit-go"
+function = "scan"
+args = [["go-audit@0.9.0-beta.2"]]
+expect_contains = "audited"
+
+[[smoke.calls]]
+plugin = "changelog-ts"
+function = "render"
+args = ["v1.0.0", ["feat: add"]]
+expect_contains = "release notes"
+
+[[smoke.calls]]
+plugin = "policy-csharp"
+function = "classify"
+args = [90]
+expect_contains = "ship"
+
+[[smoke.calls]]
+plugin = "policy-csharp"
+function = "next-version"
+args = ["v1.2.3", "minor"]
+expect_equals = "v1.3.0"
+
+[[smoke.calls]]
+plugin = "fingerprint-c"
+function = "fingerprint"
+args = ["release"]
+expect_contains = "fnv1a-"
+
+[[smoke.calls]]
+plugin = "metrics-cpp"
+function = "analyze"
+args = ["one two\nthree"]
+expect_contains = "\"words\":3"
+
+[[smoke.calls]]
+plugin = "core-rust"
+function = "save-report"
+args = ["smoke", "# report"]
+expect_contains = "reports/"
+
+[[smoke.calls]]
+plugin = "core-rust"
+function = "load-report"
+args = ["smoke"]
+expect_contains = "report"
+
+[[smoke.http]]
+path = "/app/webhook-go/health"
+expect_contains = "shipyard-webhook"
+
+[[smoke.http]]
+path = "/app/webhook-go/events"
+method = "POST"
+body = { type = "release.observed", component = "smoke", payload = { version = "v1.0.0" } }
+expect_contains = "accepted"
+
+[[smoke.services]]
+plugin = "watchtower-rust"

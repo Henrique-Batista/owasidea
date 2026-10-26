@@ -1,0 +1,21 @@
+[package]
+name = "shipyard-desktop"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Shipyard Tauri desktop shell"
+
+[workspace]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+anyhow = "1"
+owasidea-host = { path = "../../../crates/host" }
+tauri = { version = "2", features = [] }
+tokio = { version = "1", features = ["full"] }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

@@ -4,12 +4,13 @@ version = "0.1.0"
 identifier = "dev.owasidea.app"
 
 [host]
-addr = "127.0.0.1:0"
+addr = "127.0.0.1:8787"
 
 [plugins.notes]
 path = "plugins/notes"
 language = "rust"
 type = "library"
+kv = "notes:read-write"
 
 [plugins.chat-go]
 path = "plugins/chat-go"
@@ -43,7 +44,11 @@ kv = "attr-go:read-write"
 path = "plugins/tester"
 language = "csharp"
 type = "library"
-kv = "tester:read-write"
+
+[plugins.heartbeat]
+path = "plugins/heartbeat"
+language = "rust"
+type = "service"
 
 [dev]
 watch = true

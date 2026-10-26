@@ -1,0 +1,42 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Shipyard",
+  "version": "0.1.0",
+  "identifier": "dev.owasidea.shipyard",
+  "build": {
+    "frontendDist": "../ui/dist",
+    "devUrl": "http://127.0.0.1:5180"
+  },
+  "app": {
+    "security": {
+      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost data:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:8790; frame-src 'self'; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'"
+    },
+    "windows": [
+      {
+        "title": "Shipyard — polyglot release cockpit",
+        "width": 1280,
+        "height": 900,
+        "minWidth": 960,
+        "minHeight": 680
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": ["icons/icon.png"],
+    "resources": {
+      "../manifests/": "manifests/",
+      "../plugins/core-rust/core-rust.component.wasm": "plugins/core-rust/core-rust.component.wasm",
+      "../plugins/audit-go/audit-go.component.wasm": "plugins/audit-go/audit-go.component.wasm",
+      "../plugins/changelog-ts/changelog-ts.component.wasm": "plugins/changelog-ts/changelog-ts.component.wasm",
+      "../plugins/policy-csharp/policy-csharp.component.wasm": "plugins/policy-csharp/policy-csharp.component.wasm",
+      "../plugins/fingerprint-c/fingerprint-c.component.wasm": "plugins/fingerprint-c/fingerprint-c.component.wasm",
+      "../plugins/metrics-cpp/metrics-cpp.component.wasm": "plugins/metrics-cpp/metrics-cpp.component.wasm",
+      "../plugins/pipeline-go/pipeline-go.component.wasm": "plugins/pipeline-go/pipeline-go.component.wasm",
+      "../plugins/webhook-go/webhook-go.component.wasm": "plugins/webhook-go/webhook-go.component.wasm",
+      "../plugins/watchtower-rust/watchtower-rust.component.wasm": "plugins/watchtower-rust/watchtower-rust.component.wasm",
+      "../keys/owasidea.pub": "trust/owasidea.pub"
+    }
+  }
+}

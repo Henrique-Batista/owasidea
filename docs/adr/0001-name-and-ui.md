@@ -1,8 +1,14 @@
 # ADR 0001 — Project name and UI approach
 
-- Name: Owasidea (CLI binary `owasidea`, crates `owasidea-host`/`owasidea-cli`).
-- UI v0: vanilla TypeScript + Vite default, host exposes generic HTTP API.
-  Framework-agnostic goal retained: future UIs may compile to WASM (Yew, Blazor, Uno)
-  and ship as `js-wasm` webview plugins; host does not impose a framework.
-- Config file: `wasm-app.toml`.
-- Service plugins in v0: none beyond optional tailcat; lifecycle tested via notes/chat-go.
+- Product and CLI name: Owasidea (`owasidea`, crates `owasidea-host` and
+  `owasidea-cli`).
+- App configuration: `wasm-app.toml`.
+- Default UI: vanilla TypeScript + Vite. UI plugins use static browser bundles;
+  Yew, Blazor, Uno, and JS/WASM run in sandboxed webview iframes only. The host
+  never embeds a JS runtime.
+- First generic stateful service example: Rust `heartbeat`; lifecycle contract
+  is `start-service`, optional `service-status`, and host drop on stop.
+- Permission UX: manifests remain the source of truth. UI shows generated
+  effective permissions; no runtime file picker or capability escalation UI.
+- Remote registry: static HTTPS index, immutable versioned packages, Ed25519
+  publisher trust pinned out-of-band. CI publishing; no hosted account service.

@@ -1,0 +1,16 @@
+package shipyard:core@0.1.0;
+
+interface readiness {
+    score: func(changes: list<string>, checks-passed: u32, checks-total: u32) -> s32;
+    verdict: func(score: s32) -> string;
+    save-report: func(key: string, content: string) -> result<string, string>;
+    load-report: func(key: string) -> option<string>;
+}
+
+world core {
+    import poc:host/host-kv@0.1.0;
+    import poc:host/host-log@0.1.0;
+
+    export ping: func() -> string;
+    export readiness;
+}

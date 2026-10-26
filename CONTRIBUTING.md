@@ -14,6 +14,8 @@ See docs/USAGE.md. Run `owasidea doctor` to verify toolchain.
    cargo fmt --check
    cargo clippy --all-targets -- -D warnings
    cargo test
+   owasidea --config examples/shipyard/wasm-app.toml smoke
+   owasidea --config examples/shipyard/wasm-app.toml test
    ```
 5. Update docs (USAGE/API/CLI) for behavior changes.
 6. Open PR with description and test evidence.
@@ -24,6 +26,13 @@ See docs/USAGE.md. Run `owasidea doctor` to verify toolchain.
 - Manifests are generated; never commit hand-edited manifests (they are gitignored).
 - Do not commit large `.wasm` artifacts unless explicitly requested.
 - Record non-obvious decisions in docs/adr/.
+
+## Reference app
+
+`examples/shipyard` is the canonical end-to-end example. Any framework change
+that affects manifests, build paths, composition, UI plugins, or Tauri packaging
+should be verified against it. See `docs/GET_STARTED.md` and
+`docs/AI_AGENTS.md`.
 
 ## Scope
 

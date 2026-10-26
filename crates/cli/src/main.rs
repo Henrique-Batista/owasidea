@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
@@ -34,21 +35,53 @@ enum Commands {
     },
     /// Check required and optional toolchain dependencies.
     #[command(about = "Check required and optional toolchain dependencies.")]
-    Doctor,
+    Doctor {
+        /// Download and install wasi-sdk + the reactor adapter when missing.
+        #[arg(long)]
+        install_wasi_sdk: bool,
+    },
     /// Manage plugins (create new plugins).
     #[command(about = "Manage plugins (create new plugins).")]
     Plugin {
         #[command(subcommand)]
         cmd: PluginCmd,
     },
-    /// Build all plugins, regenerate manifests and copy .wasm artifacts.
-    #[command(about = "Build all plugins, regenerate manifests and copy .wasm artifacts.")]
-    Build,
-    /// Run the app in development mode (host + UI dev server).
-    #[command(about = "Run the app in development mode (host + UI dev server).")]
-    Dev,
-    /// Run the bundled app without file watching.
-    #[command(about = "Run the bundled app without file watching.")]
+    /// Build all plugins, regenerate manifests, sign, and copy artifacts.
+    #[command(about = "Build all plugins, regenerate manifests, sign, and copy artifacts.")]
+    Build {
+        /// Do not sign manifests even if [signing] is configured.
+        #[arg(long)]
+        no_sign: bool,
+    },
+    /// Build, start a temporary host, run smoke checks, then UI tests.
+    #[command(about = "Build, start a temporary host, run smoke checks, then UI tests.")]
+    Test {
+        /// Reuse the current build instead of running `owasidea build`.
+        #[arg(long)]
+        no_build: bool,
+        /// Skip declarative API smoke checks.
+        #[arg(long)]
+        no_smoke: bool,
+        /// Skip the configured UI test command.
+        #[arg(long)]
+        no_ui: bool,
+    },
+    /// Build and run the configured API smoke checks.
+    #[command(about = "Build and run the configured API smoke checks.")]
+    Smoke {
+        /// Reuse the current build instead of running `owasidea build`.
+        #[arg(long)]
+        no_build: bool,
+    },
+    /// Build, then run the app with the UI dev server and hot reload.
+    #[command(about = "Build, then run the app with the UI dev server and hot reload.")]
+    Dev {
+        /// Reuse the current build instead of running `owasidea build`.
+        #[arg(long)]
+        no_build: bool,
+    },
+    /// Run the current build without file watching.
+    #[command(about = "Run the current build without file watching.")]
     Run,
     /// Inspect a plugin manifest (WIT imports/exports, permissions).
     #[command(about = "Inspect a plugin manifest (WIT imports/exports, permissions).")]
@@ -57,9 +90,25 @@ enum Commands {
         #[arg(help = "Plugin name.")]
         plugin: String,
     },
-    /// Build the desktop bundle (Tauri).
-    #[command(about = "Build the desktop bundle (Tauri).")]
-    Bundle,
+    /// Build and package the desktop app with Tauri.
+    #[command(about = "Build and package the desktop app with Tauri.")]
+    Bundle {
+        /// Reuse the current build instead of running `owasidea build`.
+        #[arg(long)]
+        no_build: bool,
+        /// Bundle targets, comma separated (for example deb,rpm,appimage or nsis,msi).
+        /// Defaults to the app/tauri config, which uses "all" for Shipyard.
+        #[arg(long, value_delimiter = ',')]
+        bundles: Vec<String>,
+        /// Hide host-private library directories from the bundler (Linux only).
+        /// Uses bubblewrap (bwrap) to mask vendor directories such as
+        /// /usr/lib/vmware, which linuxdeploy would otherwise scan recursively.
+        #[arg(long)]
+        isolate_host_libs: bool,
+        /// Extra directory to hide when `--isolate-host-libs` is used.
+        #[arg(long = "mask-path", value_name = "PATH")]
+        mask_paths: Vec<PathBuf>,
+    },
     /// Generate an Ed25519 keypair for signing plugins.
     #[command(about = "Generate an Ed25519 keypair for signing plugins.")]
     Keygen {
@@ -82,6 +131,34 @@ enum Commands {
     /// Validate manifests, checksums and capabilities against config.
     #[command(about = "Validate manifests, checksums and capabilities against config.")]
     Validate,
+    /// Search or install plugins from a remote HTTPS registry.
+    #[command(about = "Search or install plugins from a remote HTTPS registry.")]
+    Registry {
+        #[command(subcommand)]
+        cmd: RegistryCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum RegistryCmd {
+    /// Search a static registry index.
+    Search {
+        query: String,
+        #[arg(long)]
+        url: String,
+    },
+    /// Install a signed plugin artifact from a registry.
+    Install {
+        name: String,
+        #[arg(long)]
+        version: String,
+        #[arg(long)]
+        url: String,
+        #[arg(long)]
+        public_key: PathBuf,
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -94,6 +171,8 @@ enum PluginCmd {
         lang: Option<String>,
         #[arg(long, name = "type")]
         r#type: Option<String>,
+        #[arg(long)]
+        runtime: Option<String>,
     },
 }
 
@@ -108,24 +187,92 @@ enum WitCmd {
     },
 }
 
+fn home_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("USERPROFILE")
+            .or_else(|| std::env::var_os("HOME"))
+            .map(PathBuf::from)
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var_os("HOME").map(PathBuf::from)
+    }
+}
+
+/// npm/npx are .cmd shims on Windows and cannot be launched directly by
+/// CreateProcess. Route shims through cmd.exe; native executables are unchanged.
+fn external_command(program: &str) -> std::process::Command {
+    #[cfg(windows)]
+    {
+        let lower = program.to_ascii_lowercase();
+        if matches!(lower.as_str(), "npm" | "npx" | "pnpm" | "yarn")
+            || lower.ends_with(".cmd")
+            || lower.ends_with(".bat")
+        {
+            let mut command = std::process::Command::new("cmd");
+            command.args(["/C", program]);
+            return command;
+        }
+    }
+    std::process::Command::new(program)
+}
+
+fn external_command_path(path: &Path) -> std::process::Command {
+    #[cfg(windows)]
+    {
+        if path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                matches!(extension.to_ascii_lowercase().as_str(), "cmd" | "bat")
+            })
+        {
+            let mut command = std::process::Command::new("cmd");
+            command.arg("/C").arg(path);
+            return command;
+        }
+    }
+    std::process::Command::new(path)
+}
+
+fn sdk_has_clang(path: &Path) -> bool {
+    path.join("bin/clang").is_file() || path.join("bin/clang.exe").is_file()
+}
+
 fn tool_path(name: &str) -> Option<std::path::PathBuf> {
-    // PATH
-    if let Ok(path) = std::process::Command::new("which").arg(name).output() {
-        if path.status.success() {
-            let p = String::from_utf8_lossy(&path.stdout).trim().to_string();
-            if !p.is_empty() {
-                return Some(std::path::PathBuf::from(p));
+    let finder = if cfg!(windows) { "where" } else { "which" };
+    if let Ok(output) = std::process::Command::new(finder).arg(name).output() {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let lines = stdout
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<_>>();
+            let selected = lines
+                .iter()
+                .copied()
+                .find(|line| {
+                    let lower = line.to_ascii_lowercase();
+                    lower.ends_with(".exe") || lower.ends_with(".cmd") || lower.ends_with(".bat")
+                })
+                .or_else(|| lines.first().copied());
+            if let Some(path) = selected {
+                return Some(std::path::PathBuf::from(path));
             }
         }
     }
     let candidates = match name {
         "dotnet" => vec![
             "/usr/share/dotnet/dotnet",
-            "/root/.dotnet/dotnet",
-            "/home/pablitux/.dotnet/dotnet",
+            r"C:\Program Files\dotnet\dotnet.exe",
         ],
-        "clang" => vec!["/usr/bin/clang", "/opt/wasi-sdk/bin/clang"],
-        "jco" => vec!["/home/pablitux/.npm-global/bin/jco"],
+        "clang" => vec![
+            "/usr/bin/clang",
+            "/opt/wasi-sdk/bin/clang",
+            r"C:\Program Files\LLVM\bin\clang.exe",
+        ],
         _ => vec![],
     };
     for c in candidates {
@@ -135,6 +282,190 @@ fn tool_path(name: &str) -> Option<std::path::PathBuf> {
         }
     }
     None
+}
+
+fn find_wasi_sdk() -> Option<PathBuf> {
+    for key in ["WASI_SDK_PATH", "WASI_SDK_DIR"] {
+        if let Ok(path) = std::env::var(key) {
+            let path = PathBuf::from(path);
+            if sdk_has_clang(&path) {
+                return Some(path);
+            }
+        }
+    }
+    let mut candidates = vec![PathBuf::from("/opt/wasi-sdk")];
+    if let Some(home) = home_dir() {
+        candidates.push(home.join(".local/wasi-sdk"));
+        candidates.push(home.join("wasi-sdk"));
+    }
+    candidates.into_iter().find(|path| sdk_has_clang(path))
+}
+
+fn find_wasi_adapter(sdk: Option<&Path>) -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("WASI_PREVIEW1_ADAPTER") {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    if let Some(sdk) = sdk {
+        let bundled = sdk.join("share/wasi_snapshot_preview1.reactor.wasm");
+        if bundled.is_file() {
+            return Some(bundled);
+        }
+    }
+    let cargo_home = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| home_dir().map(|home| home.join(".cargo")))?;
+    let registry = cargo_home.join("registry/src");
+    let mut best: Option<(Vec<u64>, PathBuf)> = None;
+    for index in std::fs::read_dir(registry).ok()?.flatten() {
+        let index = index.path();
+        if !index.is_dir() {
+            continue;
+        }
+        for package in std::fs::read_dir(index).ok()?.flatten() {
+            let path = package.path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let Some(version) = name.strip_prefix("wasi-preview1-component-adapter-provider-")
+            else {
+                continue;
+            };
+            let adapter = path.join("artefacts/wasi_snapshot_preview1.reactor.wasm");
+            if !adapter.is_file() {
+                continue;
+            }
+            let parsed = version
+                .trim_start_matches('v')
+                .split('.')
+                .map(|part| part.parse::<u64>().unwrap_or(0))
+                .collect::<Vec<_>>();
+            if best.as_ref().is_none_or(|(current, _)| parsed > *current) {
+                best = Some((parsed, adapter));
+            }
+        }
+    }
+    best.map(|(_, path)| path)
+}
+
+fn wasi_toolchain() -> (Option<PathBuf>, Option<PathBuf>) {
+    let sdk = find_wasi_sdk();
+    let adapter = find_wasi_adapter(sdk.as_deref());
+    (sdk, adapter)
+}
+
+async fn install_wasi_sdk() -> anyhow::Result<PathBuf> {
+    let dest = std::env::var_os("WASI_SDK_DIR")
+        .map(PathBuf::from)
+        .or_else(|| home_dir().map(|home| home.join(".local/wasi-sdk")))
+        .ok_or_else(|| anyhow::anyhow!("cannot determine install directory; set WASI_SDK_DIR"))?;
+    if sdk_has_clang(&dest) {
+        if let Some(adapter) = find_wasi_adapter(Some(&dest)) {
+            let bundled = dest.join("share/wasi_snapshot_preview1.reactor.wasm");
+            if adapter != bundled && !bundled.is_file() {
+                if let Some(parent) = bundled.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::copy(&adapter, &bundled)?;
+            }
+        }
+        println!("wasi-sdk already installed at {}", dest.display());
+        return Ok(dest);
+    }
+    let version = std::env::var("WASI_SDK_VERSION").unwrap_or_else(|_| "34.0".to_string());
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "x86_64",
+        "aarch64" => "arm64",
+        other => anyhow::bail!("wasi-sdk download is not configured for architecture {other}"),
+    };
+    let release = version.split('.').next().unwrap_or("34");
+    let platform = if cfg!(windows) { "windows" } else { "linux" };
+    let url = format!(
+        "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-{release}/wasi-sdk-{version}-{arch}-{platform}.tar.gz"
+    );
+    println!("downloading {}", url);
+    let response = reqwest::get(&url).await?.error_for_status()?;
+    let bytes = response.bytes().await?;
+    let temp = std::env::temp_dir().join(format!("owasidea-wasi-sdk-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp);
+    std::fs::create_dir_all(&temp)?;
+    let archive = temp.join("wasi-sdk.tar.gz");
+    std::fs::write(&archive, &bytes)?;
+    let status = std::process::Command::new("tar")
+        .arg("xzf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&temp)
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("failed to extract wasi-sdk archive");
+    }
+    let extracted = std::fs::read_dir(&temp)?
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.is_dir()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("wasi-sdk-"))
+        })
+        .ok_or_else(|| anyhow::anyhow!("wasi-sdk archive did not contain a wasi-sdk directory"))?;
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if dest.exists() {
+        anyhow::bail!(
+            "{} already exists but is not a wasi-sdk install",
+            dest.display()
+        );
+    }
+    // /tmp and $HOME are commonly different filesystems (tmpfs vs disk), so
+    // rename can fail with EXDEV. Fall back to a copy staged on the target
+    // filesystem, then rename the staged tree into place.
+    if std::fs::rename(&extracted, &dest).is_err() {
+        let staging = dest.with_file_name(format!(".wasi-sdk-install-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&staging);
+        copy_dir_all(&extracted, &staging)?;
+        if let Err(error) = std::fs::rename(&staging, &dest) {
+            let _ = std::fs::remove_dir_all(&staging);
+            let _ = std::fs::remove_dir_all(&temp);
+            return Err(error.into());
+        }
+    }
+    if let Some(adapter) = find_wasi_adapter(Some(&dest)) {
+        let bundled = dest.join("share/wasi_snapshot_preview1.reactor.wasm");
+        if adapter != bundled {
+            std::fs::copy(&adapter, &bundled)?;
+        }
+    }
+    let _ = std::fs::remove_dir_all(&temp);
+    println!("installed wasi-sdk at {}", dest.display());
+    Ok(dest)
+}
+
+fn copy_dir_all(source: &Path, destination: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(destination)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let path = entry.path();
+        let target = destination.join(entry.file_name());
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            copy_dir_all(&path, &target)?;
+        } else if file_type.is_symlink() {
+            let link = std::fs::read_link(&path)?;
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&link, &target)?;
+            #[cfg(not(unix))]
+            std::fs::copy(&path, &target)?;
+        } else if file_type.is_file() {
+            std::fs::copy(&path, &target)?;
+        }
+    }
+    Ok(())
 }
 
 fn read_host_addr(config: &Path) -> Option<String> {
@@ -149,20 +480,52 @@ fn read_host_addr(config: &Path) -> Option<String> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let manifest_dir = app_path(&app_root(&cli.config), &cli.manifest_dir);
     match cli.cmd {
         Commands::Init { dir } => cmd_init(dir, cli.json),
-        Commands::Doctor => cmd_doctor(cli.json),
+        Commands::Doctor { install_wasi_sdk } => cmd_doctor(cli.json, install_wasi_sdk).await,
         Commands::Plugin { cmd } => match cmd {
-            PluginCmd::New { name, lang, r#type } => cmd_plugin_new(name, lang, r#type, cli.json),
+            PluginCmd::New {
+                name,
+                lang,
+                r#type,
+                runtime,
+            } => cmd_plugin_new(name, lang, r#type, runtime, &cli.config, cli.json),
         },
-        Commands::Build => cmd_build(&cli.config, &cli.manifest_dir),
-        Commands::Dev => {
+        Commands::Build { no_sign } => cmd_build(&cli.config, &cli.manifest_dir, !no_sign),
+        Commands::Test {
+            no_build,
+            no_smoke,
+            no_ui,
+        } => {
+            cmd_test(
+                &cli.config,
+                &cli.manifest_dir,
+                !no_build,
+                !no_smoke,
+                !no_ui,
+                cli.json,
+            )
+            .await
+        }
+        Commands::Smoke { no_build } => {
+            cmd_test(
+                &cli.config,
+                &cli.manifest_dir,
+                !no_build,
+                true,
+                false,
+                cli.json,
+            )
+            .await
+        }
+        Commands::Dev { no_build } => {
             let addr = cli
                 .http_addr
                 .clone()
                 .or_else(|| read_host_addr(&cli.config))
                 .unwrap_or_else(|| "127.0.0.1:0".to_string());
-            cmd_dev(&cli.manifest_dir, &addr).await
+            cmd_dev(&cli.config, &cli.manifest_dir, &addr, !no_build).await
         }
         Commands::Run => {
             let addr = cli
@@ -170,16 +533,50 @@ async fn main() -> anyhow::Result<()> {
                 .clone()
                 .or_else(|| read_host_addr(&cli.config))
                 .unwrap_or_else(|| "127.0.0.1:0".to_string());
-            cmd_run(&cli.manifest_dir, &addr).await
+            apply_signing_env(&cli.config);
+            cmd_run(&manifest_dir, &addr).await
         }
-        Commands::Inspect { plugin } => cmd_inspect(&cli.manifest_dir, &plugin, cli.json),
-        Commands::Bundle => cmd_bundle(),
+        Commands::Inspect { plugin } => cmd_inspect(&manifest_dir, &plugin, cli.json),
+        Commands::Bundle {
+            no_build,
+            bundles,
+            isolate_host_libs,
+            mask_paths,
+        } => cmd_bundle(
+            &cli.config,
+            &cli.manifest_dir,
+            !no_build,
+            &bundles,
+            isolate_host_libs,
+            &mask_paths,
+        ),
         Commands::Keygen { out } => cmd_keygen(&out),
-        Commands::Sign { plugin, key } => cmd_sign(&cli.manifest_dir, &plugin, &key),
+        Commands::Sign { plugin, key } => cmd_sign(&manifest_dir, &plugin, &key),
         Commands::Wit { cmd } => match cmd {
             WitCmd::Generate { path } => cmd_wit_generate(&path, cli.json),
         },
         Commands::Validate => cmd_validate(&cli.config, &cli.manifest_dir),
+        Commands::Registry { cmd } => match cmd {
+            RegistryCmd::Search { query, url } => cmd_registry_search(&query, &url, cli.json).await,
+            RegistryCmd::Install {
+                name,
+                version,
+                url,
+                public_key,
+                force,
+            } => {
+                cmd_registry_install(
+                    &name,
+                    &version,
+                    &url,
+                    &public_key,
+                    &manifest_dir,
+                    force,
+                    cli.json,
+                )
+                .await
+            }
+        },
     }
 }
 
@@ -218,7 +615,7 @@ version = "0.1.0"
 identifier = "dev.example.{app_name}"
 
 [host]
-addr = "127.0.0.1:0"
+addr = "127.0.0.1:8787"
 
 [dev]
 watch = true
@@ -230,12 +627,31 @@ hot_reload = true
     for sub in ["plugins", "manifests", "ui", "docs"] {
         std::fs::create_dir_all(target_dir.join(sub))?;
     }
+    for (relative, contents) in [
+        ("package.json", include_str!("../../../ui/package.json")),
+        ("index.html", include_str!("../../../ui/index.html")),
+        ("main.ts", include_str!("../../../ui/main.ts")),
+        ("vite.config.ts", include_str!("../../../ui/vite.config.ts")),
+        ("tsconfig.json", include_str!("../../../ui/tsconfig.json")),
+    ] {
+        let path = target_dir.join("ui").join(relative);
+        if !path.exists() {
+            std::fs::write(path, contents)?;
+        }
+    }
     println!("scaffolded {}", target_dir.display());
     Ok(())
 }
 
-fn cmd_doctor(json: bool) -> anyhow::Result<()> {
-    use std::process::Command;
+async fn cmd_doctor(json: bool, install_wasi_sdk_requested: bool) -> anyhow::Result<()> {
+    if install_wasi_sdk_requested {
+        let sdk = install_wasi_sdk().await?;
+        if find_wasi_adapter(Some(&sdk)).is_none() {
+            eprintln!(
+                "warning: reactor adapter not found; run a Rust/Wasmtime build or set WASI_PREVIEW1_ADAPTER"
+            );
+        }
+    }
     let checks = [
         ("rustc", "rustc --version"),
         ("cargo", "cargo --version"),
@@ -243,19 +659,21 @@ fn cmd_doctor(json: bool) -> anyhow::Result<()> {
         ("wasm-tools", "wasm-tools --version"),
         ("go", "go version"),
         ("node", "node --version"),
-        ("pnpm", "pnpm --version"),
+        ("npm", "npm --version"),
     ];
     let optional = [
         ("clang (C/C++)", "clang --version"),
         ("dotnet (C#)", "dotnet --version"),
         ("jco (JS/TS)", "jco --version"),
         ("componentize-dotnet (C#)", "componentize-dotnet --version"),
+        ("trunk (Yew UI)", "trunk --version"),
         ("python3 (optional)", "python3 --version"),
     ];
+    let (wasi_sdk, wasi_adapter) = wasi_toolchain();
     let mut results: Vec<(&str, bool, bool)> = Vec::new();
     for (name, cmd) in checks {
         let parts: Vec<&str> = cmd.split_whitespace().collect();
-        let ok = Command::new(parts[0])
+        let ok = external_command(parts[0])
             .args(&parts[1..])
             .output()
             .map(|o| o.status.success())
@@ -264,9 +682,11 @@ fn cmd_doctor(json: bool) -> anyhow::Result<()> {
     }
     for (name, cmd) in optional {
         let tool = cmd.split_whitespace().next().unwrap_or("");
-        let resolved = tool_path(tool).unwrap_or_else(|| std::path::PathBuf::from(tool));
         let parts: Vec<&str> = cmd.split_whitespace().collect();
-        let ok = Command::new(&resolved)
+        let mut command = tool_path(tool)
+            .map(|path| external_command_path(&path))
+            .unwrap_or_else(|| external_command(tool));
+        let ok = command
             .args(&parts[1..])
             .output()
             .map(|o| o.status.success())
@@ -274,10 +694,12 @@ fn cmd_doctor(json: bool) -> anyhow::Result<()> {
         results.push((name, ok, true));
     }
     if json {
-        let v: Vec<_> = results
+        let mut v: Vec<_> = results
             .iter()
             .map(|(n, ok, opt)| serde_json::json!({"tool": n, "ok": ok, "optional": opt}))
             .collect();
+        v.push(serde_json::json!({"tool": "wasi-sdk", "ok": wasi_sdk.is_some(), "optional": true, "path": wasi_sdk}));
+        v.push(serde_json::json!({"tool": "wasi reactor adapter", "ok": wasi_adapter.is_some(), "optional": true, "path": wasi_adapter}));
         println!("{}", serde_json::to_string_pretty(&v)?);
     } else {
         for (name, ok, opt) in &results {
@@ -288,6 +710,16 @@ fn cmd_doctor(json: bool) -> anyhow::Result<()> {
                 console::style("MISSING").red().to_string()
             };
             println!("{:20} {}{}", name, status, tag);
+        }
+        for (name, path) in [
+            ("wasi-sdk", &wasi_sdk),
+            ("wasi reactor adapter", &wasi_adapter),
+        ] {
+            let label = path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "MISSING (needed for C/C++)".to_string());
+            println!("{:20} {}", name, label);
         }
     }
     if results.iter().any(|(_, ok, opt)| !ok && !*opt) {
@@ -301,6 +733,8 @@ fn cmd_plugin_new(
     name: Option<String>,
     lang: Option<String>,
     kind: Option<String>,
+    runtime: Option<String>,
+    config_path: &Path,
     json: bool,
 ) -> anyhow::Result<()> {
     let interactive = !json && std::io::stdin().is_terminal();
@@ -320,7 +754,19 @@ fn cmd_plugin_new(
         Some(l) => l,
         None => {
             if interactive {
-                let items = ["rust", "go", "typescript", "csharp", "c", "cpp"];
+                let items = [
+                    "rust",
+                    "go",
+                    "typescript",
+                    "csharp",
+                    "c",
+                    "cpp",
+                    "yew",
+                    "blazor",
+                    "uno",
+                    "svelte",
+                    "react",
+                ];
                 let sel =
                     dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
                         .with_prompt("Language")
@@ -337,7 +783,7 @@ fn cmd_plugin_new(
         Some(k) => k,
         None => {
             if interactive {
-                let items = ["library", "executable"];
+                let items = ["library", "executable", "service", "ui"];
                 let sel =
                     dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
                         .with_prompt("Type")
@@ -351,12 +797,101 @@ fn cmd_plugin_new(
         }
     };
 
-    let dir = std::path::Path::new("plugins").join(&name);
+    validate_plugin_name(&name)?;
+    if ![
+        "rust",
+        "go",
+        "typescript",
+        "javascript",
+        "csharp",
+        "c",
+        "cpp",
+        "yew",
+        "blazor",
+        "uno",
+        "svelte",
+        "react",
+    ]
+    .contains(&lang.as_str())
+    {
+        anyhow::bail!("unsupported plugin language: {lang}");
+    }
+    if !["library", "executable", "service", "ui"].contains(&kind.as_str()) {
+        anyhow::bail!("unsupported plugin type: {kind}");
+    }
+    if ["yew", "blazor", "uno", "svelte", "react"].contains(&lang.as_str()) && kind != "ui" {
+        anyhow::bail!("{lang} is supported as a webview UI plugin; use --type ui");
+    }
+    ensure_plugin_config_available(config_path, &name)?;
+    let root = app_root(config_path);
+    let dir = root.join("plugins").join(&name);
+    if dir.exists() {
+        anyhow::bail!("plugin directory already exists: {}", dir.display());
+    }
+    let runtime = runtime.unwrap_or_else(|| {
+        if kind == "ui" {
+            "js-wasm".to_string()
+        } else {
+            "wasi-component".to_string()
+        }
+    });
+    if runtime == "js-wasm" {
+        if kind != "ui" {
+            anyhow::bail!("js-wasm runtime is webview-only; use --type ui");
+        }
+        if ![
+            "typescript",
+            "javascript",
+            "yew",
+            "blazor",
+            "uno",
+            "svelte",
+            "react",
+        ]
+        .contains(&lang.as_str())
+        {
+            anyhow::bail!(
+                "UI plugins support typescript, javascript, yew, blazor, uno, svelte, or react"
+            );
+        }
+        let dist = dir.join("dist");
+        std::fs::create_dir_all(&dist)?;
+        std::fs::write(
+            dist.join("index.html"),
+            "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"></head><body><main id=\"app\">UI plugin scaffold</main></body></html>\n",
+        )?;
+        std::fs::write(
+            dir.join("README.md"),
+            format!("# {name} UI plugin\n\nLanguage/framework: {lang}\nRuntime: js-wasm (webview-only)\n\nBuild a static browser bundle into `dist/` with an `index.html` entry, then configure this plugin in `wasm-app.toml` with `type = \\\"ui\\\"`, `runtime = \\\"js-wasm\\\"`, and an optional `ui_build = [...]` command. The framework loads it in a sandboxed iframe.\n"),
+        )?;
+        register_plugin_config(config_path, &name, &lang, &kind, &runtime)?;
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({"created": name, "language": lang, "type": kind, "runtime": runtime})
+            );
+        } else {
+            println!("created webview UI plugin scaffold at {}", dir.display());
+        }
+        return Ok(());
+    }
+    if runtime != "wasi-component" {
+        anyhow::bail!("unsupported plugin runtime: {runtime}");
+    }
+    if kind == "ui" {
+        anyhow::bail!("UI plugins must use --runtime js-wasm");
+    }
+    if kind == "service" && lang != "rust" {
+        anyhow::bail!("service scaffolding currently supports Rust; other languages can use the documented WIT lifecycle contract");
+    }
+
     std::fs::create_dir_all(dir.join("wit"))?;
     std::fs::create_dir_all(dir.join("src"))?;
-    let wit = format!(
-        "package poc:{name}@0.1.0;\n\nworld {name} {{\n    export greet: func(name: string) -> string;\n}}\n"
-    );
+    let wit = if kind == "service" {
+        format!("package poc:{name}@0.1.0;\n\nworld {name} {{\n    export start-service: func() -> result<string, string>;\n    export service-status: func() -> bool;\n}}\n")
+    } else {
+        format!("package poc:{name}@0.1.0;\n\nworld {name} {{\n    export greet: func(name: string) -> string;\n}}\n")
+    };
     std::fs::write(dir.join("wit").join(format!("{name}.wit")), wit)?;
     match lang.as_str() {
         "rust" => {
@@ -366,17 +901,17 @@ fn cmd_plugin_new(
                     "[workspace]\n\n[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n\n[dependencies]\nwit-bindgen = \"0.41\"\n\n[package.metadata.component]\npackage = \"poc:{name}\"\n[package.metadata.component.target]\npath = \"wit\"\nworld = \"{name}\"\n"
                 ),
             )?;
-            std::fs::write(
-                dir.join("src").join("lib.rs"),
-                format!(
-                    "wit_bindgen::generate!({{ world: \"{name}\", path: \"wit\", generate_all }});\n\nstruct Component;\nimpl Guest for Component {{\n    fn greet(name: String) -> String {{\n        format!(\"Hello, {{}}! (from Rust)\", name)\n    }}\n}}\nexport!(Component);\n"
-                ),
-            )?;
+            let source = if kind == "service" {
+                format!("wit_bindgen::generate!({{ world: \"{name}\", path: \"wit\" }});\n\nuse std::sync::atomic::{{AtomicBool, Ordering}};\nstatic RUNNING: AtomicBool = AtomicBool::new(false);\n\nstruct Component;\nimpl Guest for Component {{\n    fn start_service() -> Result<String, String> {{\n        RUNNING.store(true, Ordering::SeqCst);\n        Ok(\"service started\".to_string())\n    }}\n    fn service_status() -> bool {{\n        RUNNING.load(Ordering::SeqCst)\n    }}\n}}\nexport!(Component);\n")
+            } else {
+                format!("wit_bindgen::generate!({{ world: \"{name}\", path: \"wit\", generate_all }});\n\nstruct Component;\nimpl Guest for Component {{\n    fn greet(name: String) -> String {{\n        format!(\"Hello, {{}}! (from Rust)\", name)\n    }}\n}}\nexport!(Component);\n")
+            };
+            std::fs::write(dir.join("src").join("lib.rs"), source)?;
         }
         "go" => {
             std::fs::write(
                 dir.join("go.mod"),
-                format!("module poc/{name}\n\ngo 1.27.1\n"),
+                format!("module owasidea/{name}\n\ngo 1.27.1\n\nrequire github.com/bytecodealliance/componentize-go v0.5.1\n\ntool github.com/bytecodealliance/componentize-go\n"),
             )?;
             std::fs::write(
                 dir.join("main.go"),
@@ -387,7 +922,7 @@ fn cmd_plugin_new(
             std::fs::write(
                 dir.join("package.json"),
                 format!(
-                    "{{\n  \"name\": \"{name}\",\n  \"private\": true,\n  \"type\": \"module\",\n  \"scripts\": {{\n    \"build\": \"jco componentize src/index.ts --wit wit --world-name {name} -o {name}.component.wasm\"\n  }},\n  \"devDependencies\": {{\n    \"@bytecodealliance/jco\": \"latest\",\n    \"@bytecodealliance/componentize-js\": \"latest\"\n  }}\n}}\n"
+                    "{{\n  \"name\": \"{name}\",\n  \"private\": true,\n  \"type\": \"module\",\n  \"scripts\": {{\n    \"build\": \"jco componentize src/index.ts --wit wit --world-name {name} -o {name}.component.wasm\"\n  }},\n  \"devDependencies\": {{\n    \"@bytecodealliance/jco\": \"1.39.0\",\n    \"@bytecodealliance/componentize-js\": \"0.23.0\"\n  }}\n}}\n"
                 ),
             )?;
             std::fs::write(
@@ -443,7 +978,8 @@ fn cmd_plugin_new(
 
   <ItemGroup>
     <PackageReference Include="BytecodeAlliance.Componentize.DotNet.Wasm.SDK" Version="0.8.0-preview*" />
-    <PackageReference Include="runtime.linux-x64.microsoft.dotnet.ilcompiler.llvm" Version="10.0.0-rc.1.26306.1" />
+    <PackageReference Include="runtime.linux-x64.microsoft.dotnet.ilcompiler.llvm" Version="10.0.0-rc.1.26306.1" Condition="$([MSBuild]::IsOSPlatform('Linux'))" />
+    <PackageReference Include="runtime.win-x64.microsoft.dotnet.ilcompiler.llvm" Version="10.0.0-rc.1.26306.1" Condition="$([MSBuild]::IsOSPlatform('Windows'))" />
   </ItemGroup>
 
   <ItemGroup>
@@ -530,10 +1066,11 @@ fn cmd_plugin_new(
             std::fs::write(
                 dir.join("Makefile"),
                 format!(
-                    "WASI_SDK ?= /home/pablitux/wasi-sdk/wasi-sdk-25.0-x86_64-linux\nADAPTER ?= /home/pablitux/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wasi-preview1-component-adapter-provider-48.0.7/artefacts/wasi_snapshot_preview1.reactor.wasm\nCC = $(WASI_SDK)/bin/{compiler}\n\nall:\n\twit-bindgen {lang} wit/{name}.wit --out-dir src\n\t$(CC) --target=wasm32-wasip1 {stdflag} -O2 -c src/{name}.c -o src/{name}.o 2>/dev/null || $(CC) --target=wasm32-wasip1 {stdflag} -O2 -c src/{name}.cpp -o src/{name}.o\n\t$(CC) --target=wasm32-wasip1 {stdflag} -O2 -c src/impl.{ext} -o src/impl.o\n\t$(CC) --target=wasm32-wasip1 {stdflag} -O2 src/{name}_component_type.o src/{name}.o src/impl.o -o {name}.wasm -mexec-model=reactor\n\twasm-tools component new {name}.wasm --adapt $(ADAPTER) -o {name}.component.wasm\n",
+                    "WASI_SDK ?= $(WASI_SDK_PATH)\nADAPTER ?= $(WASI_PREVIEW1_ADAPTER)\nifeq ($(OS),Windows_NT)\nEXE := .exe\nelse\nEXE :=\nendif\nifndef WASI_SDK\n$(error Set WASI_SDK or WASI_SDK_PATH)\nendif\nifndef ADAPTER\n$(error Set WASI_PREVIEW1_ADAPTER to the reactor adapter wasm)\nendif\nCC = $(WASI_SDK)/bin/{compiler}$(EXE)\n\nall:\n\twit-bindgen {lang} wit/{name}.wit --out-dir src\n\t$(CC) --target=wasm32-wasip1 {stdflag} -O2 -c {source} -o src/{name}.o\n\t$(CC) --target=wasm32-wasip1 {stdflag} -O2 -c src/impl.{ext} -o src/impl.o\n\t$(CC) --target=wasm32-wasip1 {stdflag} -O2 src/{name}_component_type.o src/{name}.o src/impl.o -o {name}.wasm -mexec-model=reactor\n\twasm-tools component new {name}.wasm --adapt $(ADAPTER) -o {name}.component.wasm\n",
                     lang = if lang == "c" { "c" } else { "cpp" },
                     compiler = compiler,
                     stdflag = stdflag,
+                    source = if lang == "c" { format!("src/{name}.c") } else { format!("src/{name}.cpp") },
                     name = name,
                     ext = ext,
                 ),
@@ -557,12 +1094,20 @@ fn cmd_plugin_new(
         dir.join("README.md"),
         format!("# {name}\n\nLanguage: {lang}\nType: {kind}\n"),
     )?;
-    println!(
-        "created plugin scaffold at {} (lang={}, type={})",
-        dir.display(),
-        lang,
-        kind
-    );
+    register_plugin_config(config_path, &name, &lang, &kind, &runtime)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"created": name, "language": lang, "type": kind, "runtime": runtime})
+        );
+    } else {
+        println!(
+            "created plugin scaffold at {} (lang={}, type={})",
+            dir.display(),
+            lang,
+            kind
+        );
+    }
     Ok(())
 }
 
@@ -581,22 +1126,219 @@ struct PluginSection {
     #[serde(default)]
     http_outbound: Vec<String>,
     #[serde(default)]
+    network_outbound: Vec<String>,
+    #[serde(default)]
+    network_inbound: Vec<String>,
+    #[serde(default)]
     persistent: bool,
+    #[serde(default)]
+    runtime: Option<String>,
+    #[serde(default)]
+    ui_entry: Option<String>,
+    #[serde(default)]
+    ui_build: Vec<String>,
+    /// Optional argv override for the native build step. Useful on Windows for
+    /// C/C++ plugins (for example `["mingw32-make"]` or a CMake build).
+    #[serde(default)]
+    build: Vec<String>,
+    /// Plugin names whose components should be composed into this one.
+    /// The plugin's own build output becomes a client component, then
+    /// `wasm-tools compose` resolves its imports at build time.
+    #[serde(default)]
+    compose_with: Vec<String>,
 }
 
 fn default_plugin_type() -> String {
     "library".to_string()
 }
 
+fn ensure_plugin_config_available(config_path: &Path, name: &str) -> anyhow::Result<()> {
+    if !config_path.exists() {
+        return Ok(());
+    }
+    let raw = std::fs::read_to_string(config_path)?;
+    let config: toml::Value = toml::from_str(&raw)?;
+    if config
+        .get("plugins")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|plugins| plugins.contains_key(name))
+    {
+        anyhow::bail!(
+            "plugin {name} is already configured in {}",
+            config_path.display()
+        );
+    }
+    Ok(())
+}
+
+fn register_plugin_config(
+    config_path: &Path,
+    name: &str,
+    language: &str,
+    kind: &str,
+    runtime: &str,
+) -> anyhow::Result<()> {
+    let mut config = if config_path.exists() {
+        std::fs::read_to_string(config_path)?
+    } else {
+        "[app]\nname = \"my-app\"\nversion = \"0.1.0\"\nidentifier = \"dev.example.myapp\"\n\n[host]\naddr = \"127.0.0.1:8787\"\n\n[dev]\nwatch = true\nhot_reload = true\n".to_string()
+    };
+    if !config.ends_with('\n') {
+        config.push('\n');
+    }
+    config.push_str(&format!(
+        "\n[plugins.\"{name}\"]\npath = \"plugins/{name}\"\nlanguage = \"{language}\"\ntype = \"{kind}\"\nruntime = \"{runtime}\"\n"
+    ));
+    if kind == "ui" {
+        config.push_str("ui_entry = \"index.html\"\n");
+    }
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(config_path, config)?;
+    Ok(())
+}
+
 #[derive(serde::Deserialize, Default)]
 struct AppConfig {
     app: Option<AppSection>,
+    desktop: Option<DesktopSection>,
+    signing: Option<SigningSection>,
+    test: Option<TestSection>,
+    smoke: Option<SmokeSection>,
     plugins: Option<std::collections::BTreeMap<String, PluginSection>>,
+    dev: Option<DevSection>,
 }
 
 #[derive(serde::Deserialize, Default)]
 struct AppSection {
     version: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct DesktopSection {
+    /// Directory containing the Tauri crate (defaults to `desktop`, then
+    /// `crates/desktop` for the repository root app).
+    #[serde(default)]
+    path: Option<String>,
+    /// Frontend directory built by `owasidea bundle` (defaults to `ui`).
+    #[serde(default)]
+    ui: Option<String>,
+    /// Copy built bundle artifacts into this app-relative directory.
+    #[serde(default)]
+    output: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct DevSection {
+    #[serde(default = "default_true")]
+    watch: bool,
+    #[serde(default = "default_true")]
+    hot_reload: bool,
+    /// Fixed UI dev address, for example "127.0.0.1:5180". When omitted the
+    /// CLI picks the first free port in 5173..=5273.
+    #[serde(default)]
+    ui_addr: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct SigningSection {
+    #[serde(default)]
+    key: Option<String>,
+    #[serde(default)]
+    public_key: Option<String>,
+    #[serde(default)]
+    generate: bool,
+    #[serde(default)]
+    require: Option<bool>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct TestSection {
+    /// argv executed in the app root after API smoke checks, for example
+    /// ["npx", "playwright", "test", "--config", "playwright.config.ts"].
+    #[serde(default)]
+    ui: Vec<String>,
+}
+
+#[derive(serde::Deserialize, Default, Clone)]
+struct SmokeSection {
+    #[serde(default)]
+    calls: Vec<SmokeCall>,
+    #[serde(default)]
+    http: Vec<SmokeHttp>,
+    #[serde(default)]
+    services: Vec<SmokeService>,
+}
+
+#[derive(serde::Deserialize, Default, Clone)]
+struct SmokeCall {
+    plugin: String,
+    function: String,
+    #[serde(default)]
+    args: Vec<serde_json::Value>,
+    #[serde(default)]
+    expect_contains: Option<String>,
+    #[serde(default)]
+    expect_equals: Option<serde_json::Value>,
+    #[serde(default)]
+    min: Option<f64>,
+    #[serde(default)]
+    max: Option<f64>,
+}
+
+#[derive(serde::Deserialize, Default, Clone)]
+struct SmokeHttp {
+    path: String,
+    #[serde(default)]
+    method: Option<String>,
+    #[serde(default)]
+    body: Option<serde_json::Value>,
+    #[serde(default)]
+    expect_status: Option<u16>,
+    #[serde(default)]
+    expect_contains: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default, Clone)]
+struct SmokeService {
+    plugin: String,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// App root derived from the config path. Relative plugin paths, manifests and
+/// UI assets are always resolved against this directory, so `--config
+/// examples/app/wasm-app.toml` works from any working directory.
+fn app_root(config_path: &Path) -> PathBuf {
+    config_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn app_path(root: &Path, path: impl AsRef<Path>) -> PathBuf {
+    let path = path.as_ref();
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    }
+}
+
+fn read_app_config(config_path: &Path) -> anyhow::Result<AppConfig> {
+    Ok(toml::from_str(&std::fs::read_to_string(config_path)?)?)
+}
+
+fn display_app_path(root: &Path, path: &Path) -> String {
+    pathdiff::diff_paths(path, root)
+        .filter(|relative| !relative.as_os_str().is_empty())
+        .unwrap_or_else(|| path.to_path_buf())
+        .display()
+        .to_string()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -610,6 +1352,8 @@ fn generate_manifest(
     fs: &[String],
     kv: Option<&str>,
     http_outbound: &[String],
+    network_outbound: &[String],
+    network_inbound: &[String],
     persistent: bool,
 ) -> anyhow::Result<()> {
     use regex::Regex;
@@ -690,6 +1434,35 @@ fn generate_manifest(
     }
     let wasi: Vec<String> = wasi_set.into_iter().collect();
     let host: Vec<String> = host_set.into_iter().collect();
+    let imports_host_kv = host.iter().any(|name| name.starts_with("poc:host/host-kv"));
+    if imports_host_kv != kv.is_some() {
+        anyhow::bail!(
+            "plugin {name}: host-kv WIT import and configured kv permission must both be present"
+        );
+    }
+    for host in http_outbound {
+        if host == "*"
+            || host.is_empty()
+            || host.contains('/')
+            || (host.contains(':') && host.parse::<std::net::IpAddr>().is_err())
+        {
+            anyhow::bail!("invalid outbound HTTP host {host:?} for {name}");
+        }
+    }
+    for host in network_outbound {
+        if host == "*"
+            || host.contains('/')
+            || (host.contains(':') && host.parse::<std::net::IpAddr>().is_err())
+            || host.is_empty()
+        {
+            anyhow::bail!("invalid outbound network host {host:?} for {name}");
+        }
+    }
+    for address in network_inbound {
+        if address.parse::<std::net::IpAddr>().is_err() {
+            anyhow::bail!("inbound network permission must be an IP address: {address}");
+        }
+    }
 
     // exports via text
     let text_out = std::process::Command::new("wasm-tools")
@@ -726,18 +1499,31 @@ fn generate_manifest(
         } else {
             (v.clone(), "read-write".to_string())
         };
+        if path.is_empty() || !matches!(access.as_str(), "read" | "read-write") {
+            anyhow::bail!("invalid filesystem permission {v:?}");
+        }
         fs_perms.push(json!({"path": path, "access": access, "preopen": true}));
     }
 
     // kv
-    let kv = kv.map(|k| {
+    let kv = if let Some(k) = kv {
         let (ns, access) = if let Some((n, a)) = k.rsplit_once(':') {
             (n.to_string(), a.to_string())
         } else {
             (k.to_string(), "read-write".to_string())
         };
-        json!({"namespace": ns, "access": access})
-    });
+        if ns.is_empty()
+            || !ns
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+            || !matches!(access.as_str(), "read" | "read-write")
+        {
+            anyhow::bail!("invalid KV permission {k:?}");
+        }
+        Some(json!({"namespace": ns, "access": access}))
+    } else {
+        None
+    };
 
     let storage = if persistent {
         if !fs.is_empty() {
@@ -770,6 +1556,7 @@ fn generate_manifest(
         "permissions": {
             "filesystem": fs_perms,
             "http": {"outbound": http_outbound, "inbound": kind == "executable" || kind == "hybrid"},
+            "network": {"outbound": network_outbound, "inbound": network_inbound},
             "kv": kv,
             "resources": {"max_memory_mb": 64, "max_fuel": 1000000000, "timeout_ms": 30000, "max_instances": 1}
         },
@@ -797,8 +1584,9 @@ fn generate_manifest(
     Ok(())
 }
 
-#[allow(clippy::regex_creation_in_loops)]
-fn cmd_build(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
+#[allow(clippy::regex_creation_in_loops, clippy::too_many_lines)]
+fn cmd_build(config: &Path, manifest_dir: &Path, sign: bool) -> anyhow::Result<()> {
+    let root = app_root(config);
     let raw = std::fs::read_to_string(config)?;
     let cfg: AppConfig = toml::from_str(&raw)?;
     let plugins = cfg.plugins.clone().unwrap_or_default();
@@ -806,7 +1594,12 @@ fn cmd_build(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
         println!("no plugins declared in {}", config.display());
         return Ok(());
     }
-    std::fs::create_dir_all(manifest_dir)?;
+    let manifest_dir = app_path(&root, manifest_dir);
+    std::fs::create_dir_all(&manifest_dir)?;
+    let ui_dir = root.join("ui");
+    if ui_dir.join("package.json").is_file() {
+        ensure_npm_dependencies(&ui_dir)?;
+    }
 
     let app_version = cfg
         .app
@@ -814,23 +1607,35 @@ fn cmd_build(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
         .and_then(|a| a.version.clone())
         .unwrap_or_else(|| "0.1.0".to_string());
 
-    for (name, p) in &plugins {
+    // Build ordinary plugins first so composed clients can resolve their
+    // dependency components in the same invocation.
+    let mut ordered: Vec<(&String, &PluginSection)> = plugins.iter().collect();
+    ordered.sort_by_key(|(name, plugin)| (!plugin.compose_with.is_empty(), (*name).clone()));
+
+    let mut ui_index = Vec::new();
+    for (name, p) in ordered {
         println!("==> Building {} ({})", name, p.language);
+        if p.runtime.as_deref() == Some("js-wasm") {
+            let manifest = build_ui_plugin(&root, name, p, &app_version, &manifest_dir)?;
+            ui_index.push(ui_index_entry(name, &manifest));
+            continue;
+        }
+        let plugin_dir = app_path(&root, &p.path);
         let lang = p.language.as_str();
         match lang {
             "rust" => {
                 // Generate WIT from Rust attributes if present.
-                let _ = generate_wit(std::path::Path::new(&p.path));
+                let _ = generate_wit(&plugin_dir);
                 let status = std::process::Command::new("cargo")
                     .args(["component", "build", "--release"])
-                    .current_dir(&p.path)
+                    .current_dir(&plugin_dir)
                     .status()?;
                 if !status.success() {
                     anyhow::bail!("rust build failed for {}", name);
                 }
                 let out = std::process::Command::new("cargo")
                     .args(["metadata", "--format-version", "1", "--no-deps"])
-                    .current_dir(&p.path)
+                    .current_dir(&plugin_dir)
                     .output()?;
                 let meta: serde_json::Value = serde_json::from_slice(&out.stdout)?;
                 let td = meta["target_directory"].as_str().unwrap_or("");
@@ -838,12 +1643,12 @@ fn cmd_build(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
                 let src = std::path::Path::new(td)
                     .join("wasm32-wasip1/release")
                     .join(format!("{}.wasm", artifact_name));
-                let dst = std::path::Path::new(&p.path).join(format!("{}.component.wasm", name));
+                let dst = plugin_dir.join(format!("{}.component.wasm", name));
                 std::fs::copy(&src, &dst)?;
             }
             "go" => {
-                let _ = generate_wit(std::path::Path::new(&p.path));
-                let wit_dir = std::path::Path::new(&p.path).join("wit");
+                let _ = generate_wit(&plugin_dir);
+                let wit_dir = plugin_dir.join("wit");
                 let status = if wit_dir.exists() {
                     // derive world arg from generated WIT
                     let mut world_arg: Option<String> = None;
@@ -867,7 +1672,7 @@ fn cmd_build(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
                         }
                     }
                     let mut cmd = std::process::Command::new("go");
-                    cmd.current_dir(&p.path);
+                    cmd.current_dir(&plugin_dir);
                     if let Some(wa) = &world_arg {
                         cmd.args([
                             "tool",
@@ -887,26 +1692,31 @@ fn cmd_build(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
                 } else {
                     std::process::Command::new("go")
                         .args(["tool", "componentize-go", "build"])
-                        .current_dir(&p.path)
+                        .current_dir(&plugin_dir)
                         .status()?
                 };
                 if !status.success() {
                     anyhow::bail!("go build failed for {}", name);
                 }
-                let src = std::path::Path::new(&p.path).join("main.wasm");
-                let dst = std::path::Path::new(&p.path).join(format!("{}.component.wasm", name));
+                let src = plugin_dir.join("main.wasm");
+                let dst = plugin_dir.join(format!("{}.component.wasm", name));
                 std::fs::copy(&src, &dst)?;
             }
             "typescript" | "javascript" => {
-                let _ = generate_wit(std::path::Path::new(&p.path));
-                let status = std::process::Command::new("npm")
+                let _ = generate_wit(&plugin_dir);
+                ensure_npm_dependencies(&plugin_dir)?;
+                let status = external_command("npm")
                     .args(["run", "build"])
-                    .current_dir(&p.path)
+                    .current_dir(&plugin_dir)
                     .status()?;
                 if !status.success() {
-                    anyhow::bail!("npm build failed for {}", name);
+                    anyhow::bail!(
+                        "npm build failed for {} (run `npm install` in {})",
+                        name,
+                        plugin_dir.display()
+                    );
                 }
-                let produced = std::fs::read_dir(&p.path)?
+                let produced = std::fs::read_dir(&plugin_dir)?
                     .filter_map(|e| e.ok())
                     .map(|e| e.path())
                     .find(|pp| {
@@ -916,33 +1726,47 @@ fn cmd_build(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
                             .unwrap_or(false)
                     });
                 if let Some(src) = produced {
-                    let dst =
-                        std::path::Path::new(&p.path).join(format!("{}.component.wasm", name));
+                    let dst = plugin_dir.join(format!("{}.component.wasm", name));
                     if src != dst {
                         std::fs::copy(&src, &dst)?;
                     }
                 }
             }
             "c" | "cpp" | "c++" => {
-                let _ = generate_wit(std::path::Path::new(&p.path));
-                let status = std::process::Command::new("make")
-                    .current_dir(&p.path)
+                let _ = generate_wit(&plugin_dir);
+                let (wasi_sdk, adapter) = wasi_toolchain();
+                let (Some(wasi_sdk), Some(adapter)) = (wasi_sdk, adapter) else {
+                    anyhow::bail!(
+                        "C/C++ build for {name} needs wasi-sdk and the reactor adapter; run `owasidea doctor --install-wasi-sdk` or set WASI_SDK_PATH and WASI_PREVIEW1_ADAPTER"
+                    );
+                };
+                let mut make = if let Some((program, args)) = p.build.split_first() {
+                    let mut command = external_command(program);
+                    command.args(args);
+                    command
+                } else {
+                    external_command("make")
+                };
+                let sdk_env = wasi_sdk.display().to_string().replace('\\', "/");
+                let adapter_env = adapter.display().to_string().replace('\\', "/");
+                let status = make
+                    .env("WASI_SDK_PATH", sdk_env)
+                    .env("WASI_PREVIEW1_ADAPTER", adapter_env)
+                    .current_dir(&plugin_dir)
                     .status()?;
                 if !status.success() {
                     anyhow::bail!("make failed for {}", name);
                 }
             }
             "csharp" => {
-                let _ = generate_wit(std::path::Path::new(&p.path));
+                let _ = generate_wit(&plugin_dir);
                 let dotnet =
                     tool_path("dotnet").unwrap_or_else(|| std::path::PathBuf::from("dotnet"));
                 let mut cmd = std::process::Command::new(&dotnet);
                 cmd.args(["build", "-c", "Release", "--source", ""])
-                    .current_dir(&p.path);
-                let wasi =
-                    std::path::PathBuf::from("/home/pablitux/wasi-sdk/wasi-sdk-25.0-x86_64-linux");
-                if wasi.exists() {
-                    cmd.env("WASI_SDK_PATH", wasi);
+                    .current_dir(&plugin_dir);
+                if let Some(wasi_sdk) = std::env::var_os("WASI_SDK_PATH") {
+                    cmd.env("WASI_SDK_PATH", wasi_sdk);
                 }
                 let status = cmd.status()?;
                 if !status.success() {
@@ -951,12 +1775,11 @@ fn cmd_build(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
                 // componentize-dotnet produces <name>.wasm in publish/.
                 let mut found = None;
                 for candidate in [
-                    std::path::Path::new(&p.path).join(format!(
+                    plugin_dir.join(format!(
                         "bin/Release/net10.0/wasi-wasm/publish/{}.wasm",
                         name
                     )),
-                    std::path::Path::new(&p.path)
-                        .join(format!("bin/Release/net10.0/wasi-wasm/{}.wasm", name)),
+                    plugin_dir.join(format!("bin/Release/net10.0/wasi-wasm/{}.wasm", name)),
                 ] {
                     if candidate.exists() {
                         found = Some(candidate);
@@ -964,7 +1787,7 @@ fn cmd_build(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
                     }
                 }
                 if found.is_none() {
-                    for entry in walkdir(std::path::Path::new(&p.path).join("bin")) {
+                    for entry in walkdir(plugin_dir.join("bin")) {
                         if entry.extension().and_then(|s| s.to_str()) == Some("wasm")
                             && !entry.to_string_lossy().contains("component")
                         {
@@ -974,8 +1797,7 @@ fn cmd_build(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
                     }
                 }
                 if let Some(src) = found {
-                    let dst =
-                        std::path::Path::new(&p.path).join(format!("{}.component.wasm", name));
+                    let dst = plugin_dir.join(format!("{}.component.wasm", name));
                     std::fs::copy(&src, &dst)?;
                 } else {
                     anyhow::bail!("dotnet.wasm not found after build");
@@ -984,10 +1806,49 @@ fn cmd_build(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
             other => anyhow::bail!("unsupported language: {}", other),
         }
 
-        let component = std::path::Path::new(&p.path).join(format!("{}.component.wasm", name));
+        let component = plugin_dir.join(format!("{}.component.wasm", name));
         if !component.exists() {
             anyhow::bail!("component not found after build: {}", component.display());
         }
+
+        // Build-time composition: turn this plugin's output into a client and
+        // link the configured provider components into a self-contained one.
+        if !p.compose_with.is_empty() {
+            let client = plugin_dir.join(format!("{}.client.wasm", name));
+            std::fs::rename(&component, &client)?;
+            // wasm-tools derives a package name from each definition path and
+            // rejects multi-dot file names such as `core-rust.component.wasm`.
+            // Stage definitions under simple single-dot names.
+            let compose_stage =
+                std::env::temp_dir().join(format!("owasidea-compose-{}", std::process::id()));
+            std::fs::create_dir_all(&compose_stage)?;
+            let mut cmd = std::process::Command::new("wasm-tools");
+            cmd.arg("compose").arg(&client);
+            for dependency in &p.compose_with {
+                let Some(dep) = plugins.get(dependency) else {
+                    anyhow::bail!("plugin {name} composes with unknown plugin {dependency:?}");
+                };
+                let dep_dir = app_path(&root, &dep.path);
+                let dep_component = dep_dir.join(format!("{}.component.wasm", dependency));
+                if !dep_component.exists() {
+                    anyhow::bail!(
+                        "compose dependency {dependency} is not built at {}",
+                        dep_component.display()
+                    );
+                }
+                let staged = compose_stage.join(format!("{dependency}.wasm"));
+                std::fs::copy(&dep_component, &staged)?;
+                cmd.arg("-d").arg(&staged);
+            }
+            cmd.arg("-o").arg(&component);
+            let status = cmd.status()?;
+            let _ = std::fs::remove_dir_all(&compose_stage);
+            if !status.success() {
+                anyhow::bail!("wasm-tools compose failed for {name}");
+            }
+            println!("    composed with: {}", p.compose_with.join(", "));
+        }
+
         let manifest = manifest_dir.join(format!("{}.manifest.json", name));
         generate_manifest(
             &component,
@@ -999,12 +1860,260 @@ fn cmd_build(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
             &p.fs,
             p.kv.as_deref(),
             &p.http_outbound,
+            &p.network_outbound,
+            &p.network_inbound,
             p.persistent,
         )?;
         println!("    manifest: {}", manifest.display());
     }
+    if ui_dir.join("public").is_dir() {
+        // Digests must travel with the assets they describe. The dashboard
+        // verifies the bundle it actually loaded, even when the running
+        // desktop binary and the manifests on disk were built at different
+        // times.
+        let index_path = ui_dir.join("public/ui-plugins.json");
+        std::fs::write(&index_path, serde_json::to_string_pretty(&ui_index)? + "\n")?;
+        println!("    UI index: {}", index_path.display());
+    }
+    if sign {
+        sign_all(&root, &manifest_dir, cfg.signing.as_ref())?;
+    }
     println!("Build complete.");
     Ok(())
+}
+
+fn build_ui_plugin(
+    root: &Path,
+    name: &str,
+    plugin: &PluginSection,
+    app_version: &str,
+    manifest_dir: &Path,
+) -> anyhow::Result<serde_json::Value> {
+    validate_plugin_name(name)?;
+    if plugin.kind != "ui" {
+        anyhow::bail!("js-wasm plugin {name} must declare type = \"ui\"");
+    }
+    let plugin_dir = app_path(root, &plugin.path);
+    if !plugin.ui_build.is_empty() {
+        ensure_npm_dependencies(&plugin_dir)?;
+        let (program, args) = plugin
+            .ui_build
+            .split_first()
+            .ok_or_else(|| anyhow::anyhow!("empty UI build command"))?;
+        let status = external_command(program)
+            .args(args)
+            .current_dir(&plugin_dir)
+            .status()?;
+        if !status.success() {
+            anyhow::bail!(
+                "UI build command failed for {name} (run `npm install` in {} first)",
+                plugin_dir.display()
+            );
+        }
+    }
+
+    let source = plugin_dir.join("dist");
+    if !source.is_dir() {
+        anyhow::bail!("UI plugin build output not found: {}", source.display());
+    }
+    let entry = plugin.ui_entry.as_deref().unwrap_or("index.html");
+    validate_ui_entry(entry)?;
+    if !source.join(entry).is_file() {
+        anyhow::bail!("UI entry file not found: {}", source.join(entry).display());
+    }
+
+    let destination = root.join("ui/public/plugins").join(name);
+    let marker = root.join("ui/.owasidea/ui-plugins").join(name);
+    let destination = sync_static_tree(root, &source, &destination, &marker)?;
+    let (digest, files) = hash_static_tree(&destination)?;
+    let manifest = serde_json::json!({
+        "name": name,
+        "version": plugin.version.as_deref().unwrap_or(app_version),
+        "language": plugin.language,
+        "abi": "webview-v1",
+        "runtime": "js-wasm",
+        "type": "ui",
+        "component": "",
+        "exports": [],
+        "imports": {"wasi": [], "host": [], "plugins": []},
+        "permissions": {
+            "filesystem": [],
+            "http": {"outbound": [], "inbound": false},
+            "network": {"outbound": [], "inbound": []},
+            "kv": null,
+            "resources": {"max_memory_mb": null, "max_fuel": null, "timeout_ms": null, "max_instances": 1}
+        },
+        "state": {"persistent": false, "storage": "none", "root": null},
+        "composition": {"strategy": "webview", "entry": false},
+        "metadata": {
+            "ui": {"entry": entry, "sha256": digest, "files": files},
+            "description": "Webview-only UI plugin"
+        }
+    });
+    std::fs::create_dir_all(manifest_dir)?;
+    std::fs::write(
+        manifest_dir.join(format!("{name}.manifest.json")),
+        serde_json::to_string_pretty(&manifest)? + "\n",
+    )?;
+    println!("    UI assets: {}", destination.display());
+    Ok(manifest)
+}
+
+fn ui_index_entry(name: &str, manifest: &serde_json::Value) -> serde_json::Value {
+    let ui = &manifest["metadata"]["ui"];
+    serde_json::json!({
+        "name": manifest["name"],
+        "version": manifest["version"],
+        "language": manifest["language"],
+        "entry": format!(
+            "plugins/{name}/{}",
+            ui["entry"].as_str().unwrap_or("index.html")
+        ),
+        "sha256": ui["sha256"],
+        "files": ui["files"],
+    })
+}
+
+fn validate_plugin_name(name: &str) -> anyhow::Result<()> {
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        anyhow::bail!("invalid plugin name {name:?}");
+    }
+    Ok(())
+}
+
+fn validate_ui_entry(entry: &str) -> anyhow::Result<()> {
+    let path = Path::new(entry);
+    if entry.is_empty()
+        || path.is_absolute()
+        || !entry
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-/".contains(&byte))
+        || path
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+    {
+        anyhow::bail!("UI entry must be a safe relative path: {entry:?}");
+    }
+    Ok(())
+}
+
+fn copy_static_tree(source: &Path, destination: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(destination)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let target_path = destination.join(entry.file_name());
+        let metadata = std::fs::symlink_metadata(&source_path)?;
+        if metadata.file_type().is_symlink() {
+            anyhow::bail!(
+                "symlinks are not allowed in UI bundles: {}",
+                source_path.display()
+            );
+        } else if metadata.is_dir() {
+            copy_static_tree(&source_path, &target_path)?;
+        } else if metadata.is_file() {
+            std::fs::copy(&source_path, &target_path)?;
+        }
+    }
+    Ok(())
+}
+
+fn sync_static_tree(
+    project_root: &Path,
+    source: &Path,
+    destination: &Path,
+    marker: &Path,
+) -> anyhow::Result<PathBuf> {
+    let project_root = std::fs::canonicalize(project_root)?;
+    let destination_parent = destination
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("UI destination has no parent directory"))?;
+    std::fs::create_dir_all(destination_parent)?;
+    let destination_parent = std::fs::canonicalize(destination_parent)?;
+    if !destination_parent.starts_with(&project_root) {
+        anyhow::bail!("UI output parent resolves outside the project directory");
+    }
+    let destination = destination_parent.join(
+        destination
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("UI destination has no filename"))?,
+    );
+    let marker_parent = marker
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("UI ownership marker has no parent"))?;
+    std::fs::create_dir_all(marker_parent)?;
+    let marker_parent = std::fs::canonicalize(marker_parent)?;
+    if !marker_parent.starts_with(&project_root) {
+        anyhow::bail!("UI marker parent resolves outside the project directory");
+    }
+    let marker = marker_parent.join(
+        marker
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("UI ownership marker has no filename"))?,
+    );
+    if std::fs::symlink_metadata(&marker).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        anyhow::bail!("UI output ownership marker must not be a symlink");
+    }
+    if std::fs::symlink_metadata(&destination)
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        anyhow::bail!("UI output directory must not be a symlink");
+    }
+    if destination.exists() && !marker.is_file() {
+        anyhow::bail!(
+            "refusing to overwrite unowned UI output {}; move it or remove it manually",
+            destination.display()
+        );
+    }
+    if destination.exists() {
+        clear_static_tree(&destination)?;
+    } else {
+        std::fs::create_dir_all(&destination)?;
+    }
+    copy_static_tree(source, &destination)?;
+    std::fs::write(marker, b"managed by owasidea build\n")?;
+    Ok(destination)
+}
+
+fn clear_static_tree(root: &Path) -> anyhow::Result<()> {
+    for entry in std::fs::read_dir(root)? {
+        let path = entry?.path();
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() {
+            anyhow::bail!(
+                "refusing to clear symlink from generated UI output: {}",
+                path.display()
+            );
+        }
+        if metadata.is_dir() {
+            clear_static_tree(&path)?;
+            std::fs::remove_dir(&path)?;
+        } else if metadata.is_file() {
+            std::fs::remove_file(&path)?;
+        }
+    }
+    Ok(())
+}
+
+fn hash_static_tree(
+    root: &Path,
+) -> anyhow::Result<(String, std::collections::BTreeMap<String, String>)> {
+    use sha2::{Digest, Sha256};
+    let mut files = walkdir(root.to_path_buf());
+    files.sort();
+    let mut file_hashes = std::collections::BTreeMap::new();
+    for file in files {
+        let relative = file.strip_prefix(root)?;
+        let relative = relative.to_string_lossy().replace('\\', "/");
+        validate_ui_entry(&relative)?;
+        let digest = format!("{:x}", Sha256::digest(std::fs::read(file)?));
+        file_hashes.insert(relative, digest);
+    }
+    Ok((digest_ui_file_list(&file_hashes), file_hashes))
 }
 
 fn walkdir(dir: std::path::PathBuf) -> Vec<std::path::PathBuf> {
@@ -1022,69 +2131,361 @@ fn walkdir(dir: std::path::PathBuf) -> Vec<std::path::PathBuf> {
     out
 }
 
-async fn cmd_dev(manifest_dir: &Path, http_addr: &str) -> anyhow::Result<()> {
-    println!("UI URL:    http://localhost:5173");
-    println!("Host URL:  (assigned by host, see below)");
-    println!("Manifests: {}", manifest_dir.display());
-
-    // Start Vite dev server if a UI project is present.
-    let mut children: Vec<std::process::Child> = Vec::new();
-    if std::path::Path::new("ui/package.json").exists() {
-        let child = std::process::Command::new("npm")
-            .args(["run", "dev"])
-            .current_dir("ui")
-            .spawn();
-        match child {
-            Ok(c) => children.push(c),
-            Err(e) => eprintln!("failed to start UI dev server: {e}"),
+async fn cmd_dev(
+    config_path: &Path,
+    manifest_dir: &Path,
+    http_addr: &str,
+    build: bool,
+) -> anyhow::Result<()> {
+    let root = app_root(config_path);
+    if build {
+        cmd_build(config_path, manifest_dir, true)?;
+    }
+    let manifest_dir = app_path(&root, manifest_dir);
+    if !build {
+        if let Ok(cfg) = read_app_config(config_path) {
+            sign_all(&root, &manifest_dir, cfg.signing.as_ref())?;
         }
     }
+    apply_signing_env(config_path);
+    let dev = std::fs::read_to_string(config_path)
+        .ok()
+        .and_then(|raw| toml::from_str::<AppConfig>(&raw).ok())
+        .and_then(|config| config.dev)
+        .unwrap_or_default();
+    let http_addr = reserve_http_addr(http_addr)?;
+    let host_url = format!("http://{http_addr}");
+    let ui_dir = root.join("ui");
+    let ui_present = ui_dir.join("package.json").is_file();
+    if ui_present {
+        ensure_npm_dependencies(&ui_dir)?;
+    }
+    let ui_port = if ui_present {
+        Some(reserve_ui_addr(dev.ui_addr.as_deref())?)
+    } else {
+        None
+    };
+    if let Some(port) = ui_port {
+        let mut origins = std::env::var("OWASIDEA_ALLOWED_ORIGINS")
+            .unwrap_or_else(|_| "tauri://localhost,https://tauri.localhost".to_string());
+        for origin in [
+            format!("http://localhost:{port}"),
+            format!("http://127.0.0.1:{port}"),
+        ] {
+            if !origins.split(',').any(|item| item.trim() == origin) {
+                if !origins.is_empty() {
+                    origins.push(',');
+                }
+                origins.push_str(&origin);
+            }
+        }
+        std::env::set_var("OWASIDEA_ALLOWED_ORIGINS", origins);
+    }
+    let plugins_dir = root.join("plugins");
+    let mut watch_paths = vec![plugins_dir.clone(), manifest_dir.clone()];
+    watch_paths.retain(|path| path.exists());
+    let mut displayed_watch_paths: Vec<String> = watch_paths
+        .iter()
+        .map(|path| display_app_path(&root, path))
+        .collect();
+    if ui_present {
+        displayed_watch_paths.push("ui (Vite HMR)".to_string());
+    }
+    let reported_watch_paths = if dev.watch {
+        displayed_watch_paths.clone()
+    } else {
+        Vec::new()
+    };
+    std::env::set_var("OWASIDEA_DEV_MODE", "true");
+    std::env::set_var("OWASIDEA_DEV_HOT_RELOAD", dev.hot_reload.to_string());
+    std::env::set_var(
+        "OWASIDEA_DEV_WATCH_PATHS",
+        serde_json::to_string(&reported_watch_paths)?,
+    );
+    println!(
+        "UI URL:         {}",
+        ui_port
+            .map(|port| format!("http://127.0.0.1:{port}"))
+            .unwrap_or_else(|| "disabled (no ui/package.json)".to_string())
+    );
+    println!("Host URL:       {host_url}");
+    println!(
+        "Loaded plugins: {}",
+        loaded_plugin_names(&manifest_dir).join(", ")
+    );
+    println!(
+        "Watch paths:    {}",
+        if dev.watch {
+            displayed_watch_paths.join(", ")
+        } else {
+            "disabled by [dev].watch".to_string()
+        }
+    );
 
-    // File watcher for hot reload (best-effort)
-    let base = format!("http://{}", http_addr);
-    std::thread::spawn(move || {
-        use inotify::{Inotify, WatchMask};
-        let mut inotify = match Inotify::init() {
-            Ok(i) => i,
-            Err(_) => return,
-        };
-        // watch plugins dir
-        let plugins_dir = std::path::Path::new("plugins");
-        if plugins_dir.exists() {
-            let _ = inotify.watches().add(
-                plugins_dir,
-                WatchMask::MODIFY | WatchMask::CLOSE_WRITE | WatchMask::CREATE,
+    let mut children: Vec<std::process::Child> = Vec::new();
+    if ui_present {
+        let vite = ui_dir.join("node_modules/vite/bin/vite.js");
+        if !vite.is_file() {
+            anyhow::bail!(
+                "Vite is not installed; run `npm install` in {}",
+                ui_dir.display()
             );
         }
-        let mut buffer = [0u8; 4096];
+        let ui_port = ui_port.unwrap().to_string();
+        let child = std::process::Command::new("node")
+            .args([
+                "node_modules/vite/bin/vite.js",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                ui_port.as_str(),
+                "--strictPort",
+            ])
+            .env("OWASIDEA_HOST", &host_url)
+            .current_dir(&ui_dir)
+            .spawn()?;
+        children.push(child);
+        println!(
+            "[dev] UI ready at http://127.0.0.1:{ui_port} — press Ctrl+C to stop Vite and the host"
+        );
+    }
+    if dev.watch {
+        start_dev_watcher(
+            watch_paths,
+            plugins_dir,
+            manifest_dir.to_path_buf(),
+            host_url,
+            dev.hot_reload,
+        );
+    }
+
+    let mut host_task =
+        tokio::spawn(async move { owasidea_host::run(manifest_dir, http_addr).await });
+    let result = tokio::select! {
+        joined = &mut host_task => match joined {
+            Ok(result) => result,
+            Err(error) => Err(anyhow::anyhow!("host task failed: {error}")),
+        },
+        _ = wait_for_shutdown() => {
+            println!("[dev] shutting down; stopping UI and host");
+            host_task.abort();
+            let _ = host_task.await;
+            Ok(())
+        }
+    };
+    for mut child in children {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    result
+}
+
+async fn wait_for_shutdown() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut terminate = match signal(SignalKind::terminate()) {
+            Ok(signal) => signal,
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+fn reserve_http_addr(addr: &str) -> anyhow::Result<String> {
+    let requested: std::net::SocketAddr = addr.parse()?;
+    if requested.port() != 0 {
+        return Ok(requested.to_string());
+    }
+    let listener = std::net::TcpListener::bind(requested)?;
+    Ok(listener.local_addr()?.to_string())
+}
+
+fn reserve_ui_addr(addr: Option<&str>) -> anyhow::Result<u16> {
+    if let Some(addr) = addr {
+        let requested: std::net::SocketAddr = addr.parse()?;
+        let listener = std::net::TcpListener::bind(requested)
+            .map_err(|error| anyhow::anyhow!("cannot bind UI dev address {addr}: {error}"))?;
+        return Ok(listener.local_addr()?.port());
+    }
+    reserve_ui_port()
+}
+
+fn reserve_ui_port() -> anyhow::Result<u16> {
+    for port in 5173..=5273 {
+        if let Ok(listener) = std::net::TcpListener::bind(("127.0.0.1", port)) {
+            return Ok(listener.local_addr()?.port());
+        }
+    }
+    anyhow::bail!("no free UI dev port found in 5173-5273")
+}
+
+fn loaded_plugin_names(manifest_dir: &Path) -> Vec<String> {
+    let mut names = std::fs::read_dir(manifest_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !path
+                .file_name()?
+                .to_string_lossy()
+                .ends_with(".manifest.json")
+            {
+                return None;
+            }
+            let value: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+            value["name"].as_str().map(str::to_string)
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    names
+}
+
+fn start_dev_watcher(
+    paths: Vec<PathBuf>,
+    plugins_dir: PathBuf,
+    manifest_dir: PathBuf,
+    host_url: String,
+    hot_reload: bool,
+) {
+    std::thread::spawn(move || {
+        let mut previous = snapshot_watch_paths(&paths);
         loop {
-            if let Ok(events) = inotify.read_events_blocking(&mut buffer) {
-                for ev in events {
-                    if let Some(name) = ev.name {
-                        let n = name.to_string_lossy();
-                        if n.ends_with(".component.wasm") {
-                            // derive plugin name from parent dir
-                            // plugins/<plugin>/<name>.component.wasm
-                            let plugin = n.trim_end_matches(".component.wasm").to_string();
-                            println!("[dev] detected change: {} -> reloading {}", n, plugin);
-                            let url = format!("{}/plugin/{}/reload", base, plugin);
-                            let _ = reqwest::blocking::Client::new().post(&url).send();
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            let current = snapshot_watch_paths(&paths);
+            let mut reload_plugins = std::collections::BTreeSet::new();
+            for (changed, state) in &current {
+                if previous.get(changed) == Some(state) {
+                    continue;
+                }
+                if let Some(plugin) = plugin_changed_by_path(changed, &manifest_dir) {
+                    println!(
+                        "[dev] changed {}; validating/reloading {plugin}",
+                        changed.display()
+                    );
+                    if hot_reload {
+                        reload_plugins.insert(plugin.to_string());
+                    }
+                } else if changed.starts_with(&plugins_dir)
+                    && matches!(
+                        changed.extension().and_then(|extension| extension.to_str()),
+                        Some(
+                            "rs" | "go"
+                                | "wit"
+                                | "toml"
+                                | "cs"
+                                | "ts"
+                                | "tsx"
+                                | "js"
+                                | "jsx"
+                                | "svelte"
+                                | "vue"
+                                | "c"
+                                | "cpp"
+                                | "h"
+                                | "hpp"
+                                | "html"
+                                | "css"
+                        )
+                    )
+                {
+                    println!(
+                        "[dev] source changed: {}; run `owasidea build` to compile",
+                        changed.display()
+                    );
+                }
+            }
+            if !reload_plugins.is_empty() {
+                for plugin in reload_plugins {
+                    let url = format!("{host_url}/plugin/{plugin}/reload");
+                    match reqwest::blocking::Client::new().post(url).send() {
+                        Ok(response) if response.status().is_success() => {
+                            println!("[dev] reloaded {plugin}");
                         }
+                        Ok(response) => {
+                            eprintln!("[dev] reload {plugin} failed: {}", response.status())
+                        }
+                        Err(error) => eprintln!("[dev] reload {plugin} failed: {error}"),
                     }
                 }
             }
+            previous = current;
         }
     });
+}
 
-    let manifests = manifest_dir.to_path_buf();
-    let addr = http_addr.to_string();
-    let res = owasidea_host::run(manifests, addr).await;
-
-    for mut c in children {
-        let _ = c.kill();
-        let _ = c.wait();
+fn snapshot_watch_paths(paths: &[PathBuf]) -> HashMap<PathBuf, (std::time::SystemTime, u64)> {
+    fn visit(root: &Path, files: &mut HashMap<PathBuf, (std::time::SystemTime, u64)>) {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.is_dir() {
+                if !matches!(
+                    path.file_name().and_then(|name| name.to_str()),
+                    Some("target" | "node_modules" | "vendor" | ".git" | ".owasidea")
+                ) {
+                    visit(&path, files);
+                }
+            } else if metadata.is_file() {
+                let modified = metadata.modified().unwrap_or(std::time::UNIX_EPOCH);
+                files.insert(path, (modified, metadata.len()));
+            }
+        }
     }
-    res
+
+    let mut files = HashMap::new();
+    for path in paths {
+        if path.is_dir() {
+            visit(path, &mut files);
+        }
+    }
+    files
+}
+
+fn plugin_changed_by_path(path: &Path, manifest_dir: &Path) -> Option<String> {
+    let file_name = path.file_name()?.to_str()?;
+    if let Some(name) = file_name.strip_suffix(".component.wasm") {
+        let manifest_path = manifest_dir.join(format!("{name}.manifest.json"));
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(manifest_path).ok()?).ok()?;
+        if manifest["name"].as_str() != Some(name)
+            || manifest["runtime"].as_str() == Some("js-wasm")
+        {
+            return None;
+        }
+        return Some(name.to_string());
+    }
+    if let Some(name) = file_name.strip_suffix(".manifest.json") {
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+        if manifest["name"].as_str() != Some(name)
+            || manifest["runtime"].as_str() == Some("js-wasm")
+        {
+            return None;
+        }
+        return Some(name.to_string());
+    }
+    None
 }
 
 async fn cmd_run(manifest_dir: &Path, http_addr: &str) -> anyhow::Result<()> {
@@ -1131,9 +2532,11 @@ fn cmd_inspect(manifest_dir: &Path, plugin: &str, json: bool) -> anyhow::Result<
 
 fn cmd_validate(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
     use sha2::{Digest, Sha256};
+    let root = app_root(config);
     let raw = std::fs::read_to_string(config)?;
     let cfg: AppConfig = toml::from_str(&raw)?;
     let plugins = cfg.plugins.clone().unwrap_or_default();
+    let manifest_dir = app_path(&root, manifest_dir);
     let mut errors = 0;
     for (name, p) in &plugins {
         let manifest_path = manifest_dir.join(format!("{}.manifest.json", name));
@@ -1144,8 +2547,19 @@ fn cmd_validate(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
         }
         let mraw = std::fs::read_to_string(&manifest_path)?;
         let manifest: serde_json::Value = serde_json::from_str(&mraw)?;
+        if p.runtime.as_deref() == Some("js-wasm") {
+            if manifest["runtime"].as_str() != Some("js-wasm")
+                || manifest["type"].as_str() != Some("ui")
+            {
+                println!("{}: UI manifest runtime/type mismatch", name);
+                errors += 1;
+            } else {
+                println!("{}: UI manifest ok", name);
+            }
+            continue;
+        }
         // checksum
-        let comp = std::path::Path::new(&p.path).join(format!("{}.component.wasm", name));
+        let comp = app_path(&root, &p.path).join(format!("{}.component.wasm", name));
         if comp.exists() {
             let bytes = std::fs::read(&comp)?;
             let mut h = Sha256::new();
@@ -1201,63 +2615,1072 @@ fn cmd_validate(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_bundle() -> anyhow::Result<()> {
-    println!("Building UI...");
-    let status = std::process::Command::new("npm")
-        .args(["run", "build"])
-        .current_dir("ui")
-        .status()?;
-    if !status.success() {
-        anyhow::bail!("ui build failed");
+#[derive(serde::Deserialize)]
+struct RegistryIndex {
+    version: u32,
+    plugins: Vec<RegistryPlugin>,
+}
+
+#[derive(serde::Deserialize)]
+struct RegistryPlugin {
+    name: String,
+    version: String,
+    #[serde(default)]
+    description: String,
+    manifest: String,
+    #[serde(default)]
+    artifact: String,
+    #[serde(default)]
+    assets: Vec<RegistryAsset>,
+}
+
+#[derive(serde::Deserialize)]
+struct RegistryAsset {
+    path: String,
+    url: String,
+}
+
+fn registry_url(raw: &str) -> anyhow::Result<reqwest::Url> {
+    let url = reqwest::Url::parse(raw)?;
+    let local_http =
+        url.scheme() == "http" && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
+    if url.scheme() != "https" && !local_http {
+        anyhow::bail!("registry must use HTTPS (HTTP is allowed only for localhost tests)");
     }
-    println!("Building Tauri bundle...");
-    let status = std::process::Command::new("cargo")
-        .args(["tauri", "build"])
-        .current_dir("crates/desktop")
-        .status()?;
-    // Tauri may fail only on AppImage (linuxdeploy icon/strip); try manual fallback.
-    if !status.success() {
-        println!("Tauri build reported failure; attempting AppImage fallback...");
+    if url.username() != "" || url.password().is_some() || url.fragment().is_some() {
+        anyhow::bail!("registry URL must not contain credentials or a fragment");
     }
-    // Manual AppImage creation if AppDir exists.
-    let appdir =
-        std::path::Path::new("crates/desktop/target/release/bundle/appimage/Owasidea.AppDir");
-    // cargo uses build dir /mnt/scratch; check there too
-    let appdir_path = if appdir.exists() {
-        Some(appdir.to_path_buf())
+    Ok(url)
+}
+
+async fn fetch_registry_index(url: &str) -> anyhow::Result<(reqwest::Url, RegistryIndex)> {
+    let index_url = registry_url(url)?;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(20))
+        .build()?;
+    let response = client
+        .get(index_url.clone())
+        .send()
+        .await?
+        .error_for_status()?;
+    let bytes = read_limited(response, 4 * 1024 * 1024).await?;
+    let index: RegistryIndex = serde_json::from_slice(&bytes)?;
+    if index.version != 1 {
+        anyhow::bail!("unsupported registry index version {}", index.version);
+    }
+    Ok((index_url, index))
+}
+
+async fn cmd_registry_search(query: &str, url: &str, json: bool) -> anyhow::Result<()> {
+    let (_, index) = fetch_registry_index(url).await?;
+    let query = query.to_ascii_lowercase();
+    let found: Vec<_> = index
+        .plugins
+        .into_iter()
+        .filter(|plugin| {
+            plugin.name.to_ascii_lowercase().contains(&query)
+                || plugin.description.to_ascii_lowercase().contains(&query)
+        })
+        .collect();
+    if json {
+        println!("{}", serde_json::to_string_pretty(&found.iter().map(|plugin| {
+            serde_json::json!({"name": plugin.name, "version": plugin.version, "description": plugin.description})
+        }).collect::<Vec<_>>())?);
+    } else if found.is_empty() {
+        println!("No plugins found.");
     } else {
-        let alt = std::path::PathBuf::from(
-            "/mnt/scratch/build-artifacts/cargo/release/bundle/appimage/Owasidea.AppDir",
-        );
-        if alt.exists() {
-            Some(alt)
-        } else {
-            None
+        for plugin in found {
+            println!("{}@{}  {}", plugin.name, plugin.version, plugin.description);
         }
+    }
+    Ok(())
+}
+
+async fn cmd_registry_install(
+    name: &str,
+    version: &str,
+    registry: &str,
+    public_key: &Path,
+    manifest_dir: &Path,
+    force: bool,
+    json: bool,
+) -> anyhow::Result<()> {
+    validate_plugin_name(name)?;
+    let (index_url, index) = fetch_registry_index(registry).await?;
+    let entry = index
+        .plugins
+        .into_iter()
+        .find(|plugin| plugin.name == name && plugin.version == version)
+        .ok_or_else(|| anyhow::anyhow!("registry does not contain {name}@{version}"))?;
+    let manifest_url = index_url.join(&entry.manifest)?;
+    let artifact_url = index_url.join(&entry.artifact)?;
+    if manifest_url.origin() != index_url.origin() || artifact_url.origin() != index_url.origin() {
+        anyhow::bail!("registry manifest and artifact must stay on registry origin");
+    }
+
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(60))
+        .build()?;
+    let manifest_response = client.get(manifest_url).send().await?.error_for_status()?;
+    let manifest_bytes = read_limited(manifest_response, 1024 * 1024).await?;
+    let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes)?;
+    if manifest["name"].as_str() != Some(name) || manifest["version"].as_str() != Some(version) {
+        anyhow::bail!("registry index and plugin manifest identity do not match");
+    }
+    let is_ui = manifest["runtime"].as_str() == Some("js-wasm");
+    let mut ui_assets = std::collections::BTreeMap::new();
+    let artifact = if is_ui {
+        if !entry.artifact.is_empty() {
+            anyhow::bail!("UI registry entries must use the assets list, not artifact");
+        }
+        let expected_files = manifest["metadata"]["ui"]["files"]
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("UI manifest has no asset digest map"))?;
+        if expected_files.len() != entry.assets.len() {
+            anyhow::bail!("registry file list does not match signed UI manifest");
+        }
+        for asset in &entry.assets {
+            validate_registry_path(&asset.path)?;
+            let expected = expected_files
+                .get(&asset.path)
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("asset {} is not declared by manifest", asset.path)
+                })?;
+            let asset_url = index_url.join(&asset.url)?;
+            if asset_url.origin() != index_url.origin() {
+                anyhow::bail!("registry assets must stay on registry origin");
+            }
+            let response = client.get(asset_url).send().await?.error_for_status()?;
+            let bytes = read_limited(response, 64 * 1024 * 1024).await?;
+            use sha2::{Digest, Sha256};
+            let actual = format!("{:x}", Sha256::digest(&bytes));
+            if actual != expected {
+                anyhow::bail!("UI asset checksum mismatch: {}", asset.path);
+            }
+            ui_assets.insert(asset.path.clone(), bytes);
+        }
+        if ui_assets.len() != expected_files.len() {
+            anyhow::bail!("registry file list contains duplicate or missing UI assets");
+        }
+        let digests = expected_files
+            .iter()
+            .map(|(path, value)| {
+                Ok((
+                    path.clone(),
+                    value
+                        .as_str()
+                        .ok_or_else(|| anyhow::anyhow!("invalid digest for {path}"))?
+                        .to_string(),
+                ))
+            })
+            .collect::<anyhow::Result<std::collections::BTreeMap<_, _>>>()?;
+        let bundle_digest = digest_ui_file_list(&digests);
+        if manifest["metadata"]["ui"]["sha256"].as_str() != Some(bundle_digest.as_str()) {
+            anyhow::bail!("UI bundle digest does not match signed manifest");
+        }
+        Vec::new()
+    } else {
+        if !entry.assets.is_empty() {
+            anyhow::bail!("WASI component registry entries cannot contain UI assets");
+        }
+        let component_rel = manifest["component"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("manifest has no component path"))?;
+        validate_registry_path(component_rel)?;
+        if artifact_url.origin() != index_url.origin() {
+            anyhow::bail!("registry artifact must stay on registry origin");
+        }
+        let response = client.get(artifact_url).send().await?.error_for_status()?;
+        let artifact = read_limited(response, 512 * 1024 * 1024).await?;
+        use sha2::{Digest, Sha256};
+        let digest = format!("{:x}", Sha256::digest(&artifact));
+        if manifest["metadata"]["sha256"].as_str() != Some(digest.as_str()) {
+            anyhow::bail!("plugin artifact checksum mismatch");
+        }
+        artifact.to_vec()
     };
-    if let Some(dir) = appdir_path {
-        let icon = dir.join("icon.png");
-        let src_icon = dir.join("Owasidea.png");
-        if !icon.exists() && src_icon.exists() {
-            std::fs::copy(&src_icon, &icon).ok();
+    let signature = manifest["metadata"]["signature"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("registry plugin is unsigned"))?;
+    if manifest["metadata"]["signature_format"].as_str() != Some("owasidea-manifest-v1") {
+        anyhow::bail!("unsupported plugin signature format");
+    }
+    let key_b64 = std::fs::read_to_string(public_key)?;
+    let key_bytes = base64_decode(key_b64.trim())?;
+    let signature_bytes = base64_decode(signature)?;
+    let signed_manifest = manifest.clone();
+    let payload = cli_signature_payload(signed_manifest, &artifact)?;
+    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &key_bytes)
+        .verify(&payload, &signature_bytes)
+        .map_err(|_| anyhow::anyhow!("plugin signature verification failed"))?;
+
+    std::fs::create_dir_all(manifest_dir)?;
+    let manifest_root = std::fs::canonicalize(manifest_dir)?;
+    let manifest_path = manifest_root.join(format!("{name}.manifest.json"));
+    let component_path = if is_ui {
+        None
+    } else {
+        let component_rel = manifest["component"].as_str().unwrap();
+        let path = manifest_root.join(component_rel);
+        if path == manifest_path {
+            anyhow::bail!("component and manifest paths collide");
         }
-        let linuxdeploy =
-            std::path::Path::new("/home/pablitux/.cache/tauri/linuxdeploy-x86_64.AppImage");
-        if linuxdeploy.exists() {
-            let mut cmd = std::process::Command::new(linuxdeploy);
-            cmd.arg("--appdir")
-                .arg(&dir)
-                .arg("--output")
-                .arg("appimage");
-            cmd.env("APPIMAGE_EXTRACT_AND_RUN", "1");
-            cmd.env("NO_STRIP", "1");
-            let st = cmd.status()?;
-            if st.success() {
-                println!("AppImage created via linuxdeploy fallback.");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let parent = std::fs::canonicalize(path.parent().unwrap())?;
+        if !parent.starts_with(&manifest_root) {
+            anyhow::bail!("component path resolves outside manifest directory");
+        }
+        Some(path)
+    };
+    let ui_root = if is_ui {
+        let project_root = std::fs::canonicalize(".")?;
+        let base = Path::new("ui/public/plugins");
+        std::fs::create_dir_all(base)?;
+        let base = std::fs::canonicalize(base)?;
+        if !base.starts_with(&project_root) {
+            anyhow::bail!("UI plugin root resolves outside the project directory");
+        }
+        let root = base.join(name);
+        if std::fs::symlink_metadata(&root).is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            anyhow::bail!("UI plugin asset directory must not be a symlink");
+        }
+        std::fs::create_dir_all(&root)?;
+        let root = std::fs::canonicalize(root)?;
+        if !root.starts_with(&base) {
+            anyhow::bail!("UI plugin directory resolves outside static asset root");
+        }
+        Some(root)
+    } else {
+        None
+    };
+    if !force
+        && (manifest_path.exists()
+            || component_path.as_ref().is_some_and(|path| path.exists())
+            || ui_root
+                .as_ref()
+                .is_some_and(|root| root.read_dir().is_ok_and(|mut d| d.next().is_some())))
+    {
+        anyhow::bail!("plugin files already exist; pass --force to replace them");
+    }
+    let previous_component = if force {
+        component_path
+            .as_ref()
+            .filter(|path| path.is_file())
+            .map(std::fs::read)
+            .transpose()?
+    } else {
+        None
+    };
+    let suffix = format!("tmp-{}", std::process::id());
+    let manifest_tmp = manifest_path.with_extension(suffix);
+    let component_tmp = component_path
+        .as_ref()
+        .map(|path| path.with_extension(format!("tmp-{}", std::process::id())));
+    if let Some(tmp) = &component_tmp {
+        std::fs::write(tmp, &artifact)?;
+    }
+    std::fs::write(&manifest_tmp, serde_json::to_vec_pretty(&manifest)?)?;
+    if let (Some(path), Some(tmp)) = (&component_path, &component_tmp) {
+        if let Err(error) = std::fs::rename(tmp, path) {
+            let _ = std::fs::remove_file(tmp);
+            let _ = std::fs::remove_file(&manifest_tmp);
+            return Err(error.into());
+        }
+    }
+    if let Some(root) = &ui_root {
+        for (relative, bytes) in &ui_assets {
+            let path = root.join(relative);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let parent = std::fs::canonicalize(path.parent().unwrap())?;
+            if !parent.starts_with(root) {
+                anyhow::bail!("UI asset path resolves outside plugin asset directory");
+            }
+            if std::fs::symlink_metadata(&path)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+            {
+                anyhow::bail!("refusing to replace symlink UI asset: {}", path.display());
+            }
+            std::fs::write(path, bytes)?;
+        }
+    }
+    if let Err(error) = std::fs::rename(&manifest_tmp, &manifest_path) {
+        if let (Some(path), Some(tmp)) = (&component_path, &component_tmp) {
+            if let Some(previous) = previous_component {
+                let _ = std::fs::write(path, previous);
+            } else {
+                let _ = std::fs::remove_file(path);
+            }
+            let _ = std::fs::remove_file(tmp);
+        }
+        let _ = std::fs::remove_file(&manifest_tmp);
+        return Err(error.into());
+    }
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"installed": name, "version": version})
+        );
+    } else {
+        println!("installed {name}@{version} into {}", manifest_dir.display());
+    }
+    Ok(())
+}
+
+async fn read_limited(mut response: reqwest::Response, limit: usize) -> anyhow::Result<Vec<u8>> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        anyhow::bail!("remote response exceeds {} bytes", limit);
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if bytes.len().saturating_add(chunk.len()) > limit {
+            anyhow::bail!("remote response exceeds {} bytes", limit);
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+fn validate_registry_path(value: &str) -> anyhow::Result<()> {
+    validate_ui_entry(value)?;
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || b"._-/".contains(&byte))
+    {
+        anyhow::bail!("unsupported character in registry artifact path {value:?}");
+    }
+    Ok(())
+}
+
+fn digest_ui_file_list(files: &std::collections::BTreeMap<String, String>) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    for (path, digest) in files {
+        hasher.update(path.as_bytes());
+        hasher.update([0]);
+        hasher.update(digest.as_bytes());
+        hasher.update(b"\n");
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+fn cli_signature_payload(
+    mut manifest: serde_json::Value,
+    component: &[u8],
+) -> anyhow::Result<Vec<u8>> {
+    manifest["metadata"]
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("manifest metadata must be an object"))?
+        .remove("signature");
+    let manifest_bytes = serde_json::to_vec(&manifest)?;
+    let mut payload = b"owasidea-plugin-signature-v1\0".to_vec();
+    payload.extend_from_slice(&manifest_bytes);
+    payload.push(0);
+    payload.extend_from_slice(component);
+    Ok(payload)
+}
+
+fn csp_allows_origin(csp: &str, origin: &str) -> bool {
+    fn matches(source: &str, origin: &str) -> bool {
+        let source = source.trim_end_matches('/');
+        if source == "*" || source == origin {
+            return true;
+        }
+        // CSP allows a wildcard port: http://127.0.0.1:*
+        match source.strip_suffix(":*") {
+            Some(prefix) => {
+                origin.starts_with(prefix) && origin.as_bytes().get(prefix.len()) == Some(&b':')
+            }
+            None => false,
+        }
+    }
+    let mut connect_src = None;
+    let mut default_src = None;
+    for directive in csp.split(';') {
+        let directive = directive.trim();
+        for (name, slot) in [
+            ("connect-src", &mut connect_src),
+            ("default-src", &mut default_src),
+        ] {
+            if let Some(rest) = directive.strip_prefix(name) {
+                if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+                    *slot = Some(rest.trim());
+                }
             }
         }
     }
-    println!("Bundle complete.");
+    let sources = connect_src.or(default_src).unwrap_or("");
+    sources
+        .split_whitespace()
+        .any(|source| matches(source, origin))
+}
+
+fn warn_csp_mismatch(desktop_dir: &Path, host_url: &str) {
+    let Ok(raw) = std::fs::read_to_string(desktop_dir.join("tauri.conf.json")) else {
+        return;
+    };
+    let Ok(config) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return;
+    };
+    let Some(csp) = config["app"]["security"]["csp"].as_str() else {
+        return;
+    };
+    let origin = host_url.trim_end_matches('/');
+    if csp.trim().is_empty() || csp_allows_origin(csp, origin) {
+        return;
+    }
+    eprintln!(
+        "warning: tauri.conf.json connect-src does not allow {origin}; add it to app.security.csp or the packaged UI cannot reach the host"
+    );
+}
+
+fn isolated_bundle_command(
+    workdir: &Path,
+    extra_masks: &[PathBuf],
+    program: &str,
+    args: &[std::ffi::OsString],
+) -> anyhow::Result<std::process::Command> {
+    if !cfg!(target_os = "linux") {
+        println!("note: --isolate-host-libs only applies to Linux bundlers; ignoring it");
+        let mut command = external_command(program);
+        command.args(args);
+        return Ok(command);
+    }
+    let mut masks = Vec::new();
+    for candidate in ["/usr/lib/vmware", "/usr/lib64/vmware"] {
+        let path = PathBuf::from(candidate);
+        if path.is_dir() {
+            // /usr/lib64 is a symlink to /usr/lib on several distributions;
+            // canonicalize so the same directory is masked only once.
+            let path = path.canonicalize().unwrap_or(path);
+            if !masks.contains(&path) {
+                masks.push(path);
+            }
+        }
+    }
+    for path in extra_masks {
+        if !path.is_dir() {
+            anyhow::bail!("--mask-path is not a directory: {}", path.display());
+        }
+        let path = path.canonicalize().unwrap_or_else(|_| path.clone());
+        if !masks.contains(&path) {
+            masks.push(path);
+        }
+    }
+    let bwrap = tool_path("bwrap").ok_or_else(|| {
+        anyhow::anyhow!(
+            "--isolate-host-libs requires bubblewrap (bwrap); install it (for example `pacman -S bubblewrap` or `apt install bubblewrap`) or use the chroot recipe in docs/CLEAN_BUILD.md"
+        )
+    })?;
+    if masks.is_empty() {
+        println!("note: no vendor library directory found to hide; running the bundler normally");
+        let mut command = external_command(program);
+        command.args(args);
+        return Ok(command);
+    }
+    let mut command = std::process::Command::new(bwrap);
+    // Full host access, like running without bwrap; only the vendor library
+    // directories are replaced with empty tmpfs mounts.
+    command.args(["--dev-bind", "/", "/"]);
+    for mask in &masks {
+        println!("Hiding {} from the bundler", mask.display());
+        command.arg("--tmpfs").arg(mask);
+    }
+    command.arg("--chdir").arg(workdir.canonicalize()?);
+    command.arg("--").arg(program).args(args);
+    Ok(command)
+}
+
+fn cmd_bundle(
+    config: &Path,
+    manifest_dir: &Path,
+    build: bool,
+    bundles: &[String],
+    isolate_host_libs: bool,
+    mask_paths: &[PathBuf],
+) -> anyhow::Result<()> {
+    let root = app_root(config);
+    if build {
+        cmd_build(config, manifest_dir, true)?;
+    }
+    let cfg = read_app_config(config).unwrap_or_default();
+    if !build {
+        sign_all(&root, &app_path(&root, manifest_dir), cfg.signing.as_ref())?;
+    }
+    let desktop = cfg.desktop.unwrap_or_default();
+    let ui_dir = app_path(&root, desktop.ui.as_deref().unwrap_or("ui"));
+
+    let desktop_dir = match desktop.path {
+        Some(path) => app_path(&root, path),
+        None if root.join("desktop/Cargo.toml").is_file() => root.join("desktop"),
+        None => root.join("crates/desktop"),
+    };
+    if !ui_dir.join("package.json").is_file() {
+        anyhow::bail!("UI package.json not found in {}", ui_dir.display());
+    }
+    if !desktop_dir.join("tauri.conf.json").is_file() {
+        anyhow::bail!(
+            "Tauri config not found in {}; add [desktop] path to {} or scaffold a desktop shell",
+            desktop_dir.display(),
+            config.display()
+        );
+    }
+    if !root.join("manifests").is_dir() {
+        println!(
+            "warning: manifests directory is missing under {}; run `owasidea build` first",
+            root.display()
+        );
+    }
+
+    ensure_npm_dependencies(&ui_dir)?;
+    // The dashboard embeds the host origin at build time (Vite `define`).
+    // Use the same source of truth as `dev`/`run` instead of the framework
+    // default, otherwise changing [host].addr silently breaks the bundle.
+    let host_url = format!(
+        "http://{}",
+        read_host_addr(config).unwrap_or_else(|| "127.0.0.1:8790".to_string())
+    );
+    warn_csp_mismatch(&desktop_dir, &host_url);
+    println!("Building UI in {}...", ui_dir.display());
+    let status = external_command("npm")
+        .args(["run", "build"])
+        .env("OWASIDEA_HOST", &host_url)
+        .current_dir(&ui_dir)
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("UI build failed");
+    }
+    println!("Building Tauri bundle in {}...", desktop_dir.display());
+    let requested = bundles
+        .iter()
+        .map(|bundle| bundle.trim())
+        .filter(|bundle| !bundle.is_empty() && *bundle != "all")
+        .collect::<Vec<_>>();
+    if !requested.is_empty() {
+        println!("Bundle targets: {}", requested.join(","));
+    } else {
+        println!("Bundle targets: all (from config)");
+    }
+    let appimage =
+        cfg!(target_os = "linux") && (requested.is_empty() || requested.contains(&"appimage"));
+    let mut tauri_args = vec![
+        std::ffi::OsString::from("tauri"),
+        std::ffi::OsString::from("build"),
+    ];
+    if !requested.is_empty() {
+        tauri_args.push(std::ffi::OsString::from("--bundles"));
+        tauri_args.push(std::ffi::OsString::from(requested.join(",")));
+    }
+    let mut tauri = if isolate_host_libs {
+        isolated_bundle_command(&desktop_dir, mask_paths, "cargo", &tauri_args)?
+    } else {
+        let mut command = external_command("cargo");
+        command.args(&tauri_args);
+        command
+    };
+    if appimage {
+        // linuxdeploy is itself an AppImage; extraction avoids a FUSE
+        // dependency. Disabling strip avoids failures on hosts with a
+        // partially broken ELF toolchain.
+        tauri
+            .env("APPIMAGE_EXTRACT_AND_RUN", "1")
+            .env("NO_STRIP", "1");
+    }
+    let status = tauri.current_dir(&desktop_dir).status()?;
+    let tauri_ok = status.success();
+    if !tauri_ok {
+        eprintln!(
+            "Tauri reported a bundle failure; collecting artifacts that were generated before the failure..."
+        );
+        if !isolate_host_libs && cfg!(target_os = "linux") && Path::new("/usr/lib/vmware").is_dir()
+        {
+            eprintln!(
+                "hint: /usr/lib/vmware exists on this host; if linuxdeploy failed, rerun with --isolate-host-libs"
+            );
+        }
+    }
+    let metadata = std::process::Command::new("cargo")
+        .args(["metadata", "--format-version", "1", "--no-deps"])
+        .current_dir(&desktop_dir)
+        .output()?;
+    let meta: serde_json::Value = serde_json::from_slice(&metadata.stdout)?;
+    let target = PathBuf::from(meta["target_directory"].as_str().unwrap_or(""));
+    let bundle_dir = target.join("release/bundle");
+    let direct_resources = target.join("release/resources");
+    copy_runtime_resources(&root, &direct_resources, cfg.signing.as_ref())?;
+    println!("Direct-run resources: {}", direct_resources.display());
+    if bundle_dir.is_dir() {
+        if let Some(output) = desktop.output {
+            let output_dir = app_path(&root, output);
+            clear_bundle_artifacts(&output_dir)?;
+            copy_selected_bundles(&bundle_dir, &output_dir, &requested)?;
+            println!("Artifacts copied to {}", output_dir.display());
+        } else {
+            println!("Artifacts are under {}", bundle_dir.display());
+        }
+    } else {
+        println!(
+            "No bundle artifacts were produced under {}",
+            bundle_dir.display()
+        );
+    }
+    if tauri_ok {
+        println!("Bundle complete.");
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "bundle completed with failed target(s); successful artifacts are still available under dist/"
+        )
+    }
+}
+
+fn copy_runtime_resources(
+    root: &Path,
+    destination: &Path,
+    signing: Option<&SigningSection>,
+) -> anyhow::Result<()> {
+    std::fs::create_dir_all(destination)?;
+    let manifests = root.join("manifests");
+    if manifests.is_dir() {
+        copy_dir_all(&manifests, &destination.join("manifests"))?;
+    }
+    let plugins = root.join("plugins");
+    if plugins.is_dir() {
+        for entry in std::fs::read_dir(&plugins)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let component = path.join(format!("{name}.component.wasm"));
+            if component.is_file() {
+                let target = destination.join("plugins").join(name);
+                std::fs::create_dir_all(&target)?;
+                std::fs::copy(&component, target.join(component.file_name().unwrap()))?;
+            }
+        }
+    }
+    let public_key = signing
+        .and_then(|signing| signing.public_key.as_deref())
+        .map(|path| app_path(root, path))
+        .unwrap_or_else(|| root.join("keys/owasidea.pub"));
+    if public_key.is_file() {
+        let trust = destination.join("trust");
+        std::fs::create_dir_all(&trust)?;
+        std::fs::copy(&public_key, trust.join("owasidea.pub"))?;
+    }
+    Ok(())
+}
+
+fn copy_selected_bundles(
+    bundle_dir: &Path,
+    destination: &Path,
+    targets: &[&str],
+) -> anyhow::Result<()> {
+    if targets.is_empty() {
+        for entry in std::fs::read_dir(bundle_dir)? {
+            let entry = entry?;
+            if entry.path().is_dir() {
+                copy_tree_files(&entry.path(), destination)?;
+            }
+        }
+        return Ok(());
+    }
+    for target in targets {
+        let folder = match *target {
+            "app" => "macos",
+            other => other,
+        };
+        let source = bundle_dir.join(folder);
+        if source.is_dir() {
+            copy_tree_files(&source, destination)?;
+        } else {
+            println!("  (no {} artifact at {})", target, source.display());
+        }
+    }
+    Ok(())
+}
+
+fn clear_bundle_artifacts(destination: &Path) -> anyhow::Result<()> {
+    if !destination.is_dir() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(destination)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let extension = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if matches!(
+            extension.as_str(),
+            "deb" | "rpm" | "appimage" | "msi" | "dmg" | "zip" | "exe"
+        ) {
+            std::fs::remove_file(&path)?;
+        }
+    }
+    Ok(())
+}
+
+fn copy_tree_files(source: &Path, destination: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(destination)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            copy_tree_files(&path, destination)?;
+        } else if path.is_file() {
+            let extension = path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if !matches!(
+                extension.as_str(),
+                "deb" | "rpm" | "appimage" | "msi" | "dmg" | "zip" | "exe"
+            ) {
+                continue;
+            }
+            let target = destination.join(entry.file_name());
+            std::fs::copy(&path, &target)?;
+            println!("  {}", target.display());
+        }
+    }
+    Ok(())
+}
+
+struct TestHost {
+    child: std::process::Child,
+    data_dir: PathBuf,
+}
+
+impl Drop for TestHost {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = std::fs::remove_dir_all(&self.data_dir);
+    }
+}
+
+async fn wait_for_host(client: &reqwest::Client, base: &str) -> anyhow::Result<()> {
+    for _ in 0..120 {
+        if let Ok(response) = client.get(format!("{base}/health")).send().await {
+            if response.status().is_success() {
+                return Ok(());
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    anyhow::bail!("host did not become ready at {base}")
+}
+
+fn check(ok: bool, label: impl std::fmt::Display) -> bool {
+    if ok {
+        println!("  ok   {label}");
+    } else {
+        println!("  FAIL {label}");
+    }
+    ok
+}
+
+async fn run_api_smoke(
+    config_path: &Path,
+    manifest_dir: &Path,
+    cfg: &AppConfig,
+    json: bool,
+) -> anyhow::Result<usize> {
+    let root = app_root(config_path);
+    let manifest_abs = std::fs::canonicalize(manifest_dir)
+        .map_err(|_| anyhow::anyhow!("manifests not found at {}", manifest_dir.display()))?;
+    let config_abs = std::fs::canonicalize(config_path)?;
+    if std::fs::read_dir(&manifest_abs)?.next().is_none() {
+        anyhow::bail!(
+            "no manifests found at {}; run `owasidea build` first",
+            manifest_abs.display()
+        );
+    }
+
+    let port = reserve_http_addr("127.0.0.1:0")?;
+    let base = format!("http://{port}");
+    let data_dir = std::env::temp_dir().join(format!("owasidea-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data_dir);
+    std::fs::create_dir_all(&data_dir)?;
+    let log_path = data_dir.join("host.log");
+    let log = std::fs::File::create(&log_path)?;
+    let mut command = std::process::Command::new(std::env::current_exe()?);
+    command
+        .arg("--config")
+        .arg(&config_abs)
+        .arg("--manifest-dir")
+        .arg(&manifest_abs)
+        .arg("--http-addr")
+        .arg(&port)
+        .arg("run")
+        .current_dir(&root)
+        .env("OWASIDEA_DATA_DIR", &data_dir)
+        .stdout(std::process::Stdio::from(log.try_clone()?))
+        .stderr(std::process::Stdio::from(log));
+    apply_signing_env_to(&mut command, cfg, &root);
+    let child = command.spawn()?;
+    let host = TestHost { child, data_dir };
+    let client = reqwest::Client::new();
+    if let Err(error) = wait_for_host(&client, &base).await {
+        eprintln!(
+            "host log:\n{}",
+            std::fs::read_to_string(&log_path).unwrap_or_default()
+        );
+        return Err(error);
+    }
+
+    let mut failures = 0;
+    println!("smoke: host ready at {base}");
+
+    let health = client.get(format!("{base}/health")).send().await?;
+    let health_ok = health.status().is_success() && health.text().await? == "ok";
+    failures += usize::from(!check(health_ok, "GET /health"));
+
+    let plugins = client
+        .get(format!("{base}/plugins"))
+        .send()
+        .await?
+        .json::<Vec<serde_json::Value>>()
+        .await?;
+    let plugin_names = plugins
+        .iter()
+        .filter_map(|plugin| plugin["name"].as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let configured = cfg.plugins.clone().unwrap_or_default();
+    for (name, plugin) in &configured {
+        if plugin.runtime.as_deref() == Some("js-wasm") {
+            continue;
+        }
+        failures += usize::from(!check(
+            plugin_names.contains(name.as_str()),
+            format!("plugin {name} loaded"),
+        ));
+    }
+
+    let ui_plugins = client
+        .get(format!("{base}/ui-plugins"))
+        .send()
+        .await?
+        .json::<Vec<serde_json::Value>>()
+        .await?;
+    let expected_ui = configured
+        .values()
+        .filter(|plugin| plugin.runtime.as_deref() == Some("js-wasm"))
+        .count();
+    failures += usize::from(!check(
+        ui_plugins.len() == expected_ui,
+        format!("UI plugins: {} (expected {expected_ui})", ui_plugins.len()),
+    ));
+
+    let smoke = cfg.smoke.clone().unwrap_or_default();
+    for call in &smoke.calls {
+        let response = client
+            .post(format!("{base}/plugin/{}/call", call.plugin))
+            .json(&serde_json::json!({"function": call.function, "args": call.args}))
+            .send()
+            .await;
+        let label = format!("{}.{}", call.plugin, call.function);
+        let Ok(response) = response else {
+            failures += usize::from(!check(false, label));
+            continue;
+        };
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        let value: serde_json::Value =
+            serde_json::from_str(&body).unwrap_or(serde_json::Value::String(body.clone()));
+        let result = value
+            .get("result")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let is_error = result.get("err").is_some();
+        let rendered = match &result {
+            serde_json::Value::String(text) => text.clone(),
+            other => other.to_string(),
+        };
+        let mut ok = status.is_success() && !is_error;
+        if let Some(expected) = &call.expect_contains {
+            ok &= rendered.contains(expected);
+        }
+        if let Some(expected) = &call.expect_equals {
+            ok &= &result == expected;
+        }
+        if let Some(min) = call.min {
+            ok &= result.as_f64().is_some_and(|value| value >= min);
+        }
+        if let Some(max) = call.max {
+            ok &= result.as_f64().is_some_and(|value| value <= max);
+        }
+        failures += usize::from(!check(ok, format!("{label} -> {rendered}")));
+    }
+
+    for http in &smoke.http {
+        let method = http.method.as_deref().unwrap_or("GET");
+        let mut request = client.request(
+            reqwest::Method::from_bytes(method.as_bytes()).unwrap_or(reqwest::Method::GET),
+            format!("{base}{}", http.path),
+        );
+        if let Some(body) = &http.body {
+            request = request.json(body);
+        }
+        let response = request.send().await;
+        let label = format!("{method} {}", http.path);
+        let Ok(response) = response else {
+            failures += usize::from(!check(false, label));
+            continue;
+        };
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        let mut ok = http.expect_status.map_or_else(
+            || status.is_success(),
+            |expected| status.as_u16() == expected,
+        );
+        if let Some(expected) = &http.expect_contains {
+            ok &= body.contains(expected);
+        }
+        failures += usize::from(!check(ok, format!("{label} -> {} {body}", status.as_u16())));
+    }
+
+    for service in &smoke.services {
+        let plugin = &service.plugin;
+        let started = client
+            .post(format!("{base}/plugin/{plugin}/service/start"))
+            .json(&serde_json::json!({"region_json": ""}))
+            .send()
+            .await;
+        let start_ok = started
+            .as_ref()
+            .is_ok_and(|response| response.status().is_success());
+        failures += usize::from(!check(start_ok, format!("{plugin} service start")));
+        let status = client
+            .get(format!("{base}/plugin/{plugin}/service/status"))
+            .send()
+            .await;
+        let running = status
+            .as_ref()
+            .ok()
+            .is_some_and(|response| response.status().is_success());
+        let running = if running {
+            status
+                .unwrap()
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .is_some_and(|value| value["running"] == true)
+        } else {
+            false
+        };
+        failures += usize::from(!check(running, format!("{plugin} service status")));
+        let stopped = client
+            .post(format!("{base}/plugin/{plugin}/service/stop"))
+            .send()
+            .await;
+        failures += usize::from(!check(
+            stopped
+                .as_ref()
+                .is_ok_and(|response| response.status().is_success()),
+            format!("{plugin} service stop"),
+        ));
+    }
+
+    drop(host);
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"smoke": failures == 0, "failures": failures})
+        );
+    }
+    Ok(failures)
+}
+
+fn apply_signing_env_to(command: &mut std::process::Command, cfg: &AppConfig, root: &Path) {
+    let Some(signing) = &cfg.signing else {
+        return;
+    };
+    let public_key = app_path(
+        root,
+        signing.public_key.as_deref().unwrap_or("keys/owasidea.pub"),
+    );
+    if public_key.is_file() {
+        command.env("OWASIDEA_PUBLIC_KEY", public_key);
+    }
+    command.env(
+        "OWASIDEA_REQUIRE_SIGNATURES",
+        if signing.require.unwrap_or(true) {
+            "true"
+        } else {
+            "false"
+        },
+    );
+}
+
+async fn cmd_test(
+    config_path: &Path,
+    manifest_dir: &Path,
+    build: bool,
+    smoke: bool,
+    ui: bool,
+    json: bool,
+) -> anyhow::Result<()> {
+    let root = app_root(config_path);
+    if build {
+        cmd_build(config_path, manifest_dir, true)?;
+    }
+    let cfg = read_app_config(config_path)?;
+    let manifest_dir = app_path(&root, manifest_dir);
+    if !build {
+        sign_all(&root, &manifest_dir, cfg.signing.as_ref())?;
+    }
+    let mut failures = 0usize;
+    if smoke {
+        failures += run_api_smoke(config_path, &manifest_dir, &cfg, json).await?;
+    }
+    if ui {
+        let command = cfg
+            .test
+            .as_ref()
+            .map(|test| test.ui.clone())
+            .unwrap_or_default();
+        if command.is_empty() {
+            println!("ui tests: no [test].ui command configured; skipped");
+        } else {
+            println!("ui tests: {}", command.join(" "));
+            let mut child = external_command(&command[0]);
+            child.args(&command[1..]).current_dir(&root);
+            if let Ok(exe) = std::env::current_exe() {
+                child.env("OWASIDEA_BIN", exe);
+            }
+            apply_signing_env_to(&mut child, &cfg, &root);
+            let status = child.status()?;
+            if !status.success() {
+                failures += 1;
+                println!("  FAIL ui test command");
+            }
+        }
+    }
+    if failures > 0 {
+        anyhow::bail!("{failures} test failure(s)");
+    }
+    println!("tests passed");
     Ok(())
 }
 
@@ -2334,18 +4757,36 @@ fn cmd_wit_generate(path: &Path, _json: bool) -> anyhow::Result<()> {
     generate_wit(path)
 }
 
-fn cmd_keygen(out: &Path) -> anyhow::Result<()> {
+fn generate_keypair(private_key_path: &Path, public_key_path: &Path) -> anyhow::Result<()> {
     use ring::signature::{Ed25519KeyPair, KeyPair};
-    std::fs::create_dir_all(out)?;
+    if let Some(parent) = private_key_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if let Some(parent) = public_key_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let pkcs8 = Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
         .map_err(|e| anyhow::anyhow!("keygen failed: {e}"))?;
     let keypair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())
         .map_err(|e| anyhow::anyhow!("parse key failed: {e}"))?;
     let pub_bytes = keypair.public_key().as_ref();
-    std::fs::write(out.join("owasidea.key"), base64_encode(pkcs8.as_ref()))?;
-    std::fs::write(out.join("owasidea.pub"), base64_encode(pub_bytes))?;
-    println!("generated {}/owasidea.key and owasidea.pub", out.display());
+    std::fs::write(private_key_path, base64_encode(pkcs8.as_ref()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(private_key_path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    std::fs::write(public_key_path, base64_encode(pub_bytes))?;
+    println!(
+        "generated {} and {}",
+        private_key_path.display(),
+        public_key_path.display()
+    );
     Ok(())
+}
+
+fn cmd_keygen(out: &Path) -> anyhow::Result<()> {
+    generate_keypair(&out.join("owasidea.key"), &out.join("owasidea.pub"))
 }
 
 fn base64_encode(data: &[u8]) -> String {
@@ -2353,25 +4794,137 @@ fn base64_encode(data: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(data)
 }
 
-fn cmd_sign(manifest_dir: &Path, plugin: &str, key_path: &Path) -> anyhow::Result<()> {
+fn sign_manifest(manifest_dir: &Path, plugin: &str, key_path: &Path) -> anyhow::Result<()> {
     use ring::signature::Ed25519KeyPair;
     let manifest_path = manifest_dir.join(format!("{}.manifest.json", plugin));
     let raw = std::fs::read_to_string(&manifest_path)?;
     let mut manifest: serde_json::Value = serde_json::from_str(&raw)?;
-    let comp_rel = manifest["component"].as_str().unwrap_or("").to_string();
-    let comp_path = manifest_path.parent().unwrap().join(&comp_rel);
-    let bytes = std::fs::read(&comp_path)?;
+    let bytes = if manifest["runtime"].as_str() == Some("js-wasm") {
+        Vec::new()
+    } else {
+        let comp_rel = manifest["component"].as_str().unwrap_or("").to_string();
+        let comp_path = manifest_path.parent().unwrap().join(&comp_rel);
+        std::fs::read(&comp_path)?
+    };
     let key_b64 = std::fs::read_to_string(key_path)?;
     let key_bytes = base64_decode(key_b64.trim())?;
     let keypair = Ed25519KeyPair::from_pkcs8(&key_bytes)
         .map_err(|e| anyhow::anyhow!("invalid private key: {e}"))?;
-    let sig = keypair.sign(&bytes);
+    manifest["permissions"]
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("manifest permissions must be an object"))?
+        .entry("network")
+        .or_insert_with(|| serde_json::json!({"outbound": [], "inbound": []}));
+    manifest["metadata"]["signature_format"] = serde_json::json!("owasidea-manifest-v1");
+    manifest["metadata"]
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("manifest metadata must be an object"))?
+        .remove("signature");
+    let manifest_bytes = serde_json::to_vec(&manifest)?;
+    let mut payload = b"owasidea-plugin-signature-v1\0".to_vec();
+    payload.extend_from_slice(&manifest_bytes);
+    payload.push(0);
+    payload.extend_from_slice(&bytes);
+    let sig = keypair.sign(&payload);
     manifest["metadata"]["signature"] = serde_json::json!(base64_encode(sig.as_ref()));
     std::fs::write(
         &manifest_path,
         serde_json::to_string_pretty(&manifest)? + "\n",
     )?;
-    println!("signed {} -> {}", plugin, manifest_path.display());
+    Ok(())
+}
+
+fn sign_all(
+    root: &Path,
+    manifest_dir: &Path,
+    signing: Option<&SigningSection>,
+) -> anyhow::Result<()> {
+    let Some(signing) = signing else {
+        return Ok(());
+    };
+    let key_path = app_path(root, signing.key.as_deref().unwrap_or("keys/owasidea.key"));
+    if !key_path.is_file() {
+        if !signing.generate {
+            anyhow::bail!(
+                "signing key not found at {}; run `owasidea keygen --out keys` or set [signing].generate = true",
+                key_path.display()
+            );
+        }
+        let public_key_path = app_path(
+            root,
+            signing.public_key.as_deref().unwrap_or("keys/owasidea.pub"),
+        );
+        generate_keypair(&key_path, &public_key_path)?;
+    }
+    let mut names = std::fs::read_dir(manifest_dir)?
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            name.strip_suffix(".manifest.json").map(str::to_string)
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    for name in &names {
+        sign_manifest(manifest_dir, name, &key_path)?;
+    }
+    if !names.is_empty() {
+        println!("signed {} manifests", names.len());
+    }
+    Ok(())
+}
+
+fn apply_signing_env(config_path: &Path) {
+    let root = app_root(config_path);
+    let Ok(config) = read_app_config(config_path) else {
+        return;
+    };
+    let Some(signing) = config.signing else {
+        return;
+    };
+    let public_key = app_path(
+        &root,
+        signing.public_key.as_deref().unwrap_or("keys/owasidea.pub"),
+    );
+    if public_key.is_file() {
+        std::env::set_var("OWASIDEA_PUBLIC_KEY", &public_key);
+    }
+    std::env::set_var(
+        "OWASIDEA_REQUIRE_SIGNATURES",
+        if signing.require.unwrap_or(true) {
+            "true"
+        } else {
+            "false"
+        },
+    );
+}
+
+fn ensure_npm_dependencies(plugin_dir: &Path) -> anyhow::Result<()> {
+    if !plugin_dir.join("package.json").is_file() || plugin_dir.join("node_modules").is_dir() {
+        return Ok(());
+    }
+    println!(
+        "    installing npm dependencies in {}",
+        plugin_dir.display()
+    );
+    let status = external_command("npm")
+        .args(["install", "--no-audit", "--no-fund"])
+        .current_dir(plugin_dir)
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("npm install failed in {}", plugin_dir.display());
+    }
+    Ok(())
+}
+
+fn cmd_sign(manifest_dir: &Path, plugin: &str, key_path: &Path) -> anyhow::Result<()> {
+    sign_manifest(manifest_dir, plugin, key_path)?;
+    println!(
+        "signed {} -> {}",
+        plugin,
+        manifest_dir
+            .join(format!("{}.manifest.json", plugin))
+            .display()
+    );
     Ok(())
 }
 
@@ -2380,4 +4933,73 @@ fn base64_decode(s: &str) -> anyhow::Result<Vec<u8>> {
     base64::engine::general_purpose::STANDARD
         .decode(s)
         .map_err(|e| anyhow::anyhow!("base64 decode failed: {e}"))
+}
+
+#[cfg(test)]
+mod csp_tests {
+    use super::*;
+
+    #[test]
+    fn connect_src_matches_configured_host() {
+        let csp = "default-src 'self'; connect-src 'self' ipc: http://127.0.0.1:8790";
+        assert!(csp_allows_origin(csp, "http://127.0.0.1:8790"));
+        assert!(!csp_allows_origin(csp, "http://127.0.0.1:9000"));
+    }
+
+    #[test]
+    fn wildcard_port_and_default_src_are_supported() {
+        assert!(csp_allows_origin(
+            "default-src 'self' http://127.0.0.1:*",
+            "http://127.0.0.1:9000"
+        ));
+        assert!(!csp_allows_origin(
+            "default-src 'self'",
+            "http://127.0.0.1:9000"
+        ));
+    }
+}
+
+#[cfg(test)]
+mod dev_tests {
+    use super::*;
+
+    #[test]
+    fn dev_watcher_extracts_wasi_plugin_and_skips_webview_plugins() {
+        let root = std::env::temp_dir().join(format!("owasidea-watch-test-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let component = root.join("demo.component.wasm");
+        std::fs::write(&component, b"artifact").unwrap();
+        assert_eq!(plugin_changed_by_path(&component, &root), None);
+        std::fs::write(
+            root.join("demo.manifest.json"),
+            r#"{"name":"demo","runtime":"wasi-component"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            plugin_changed_by_path(&component, &root),
+            Some("demo".to_string())
+        );
+
+        let ui_manifest = root.join("dashboard.manifest.json");
+        std::fs::write(&ui_manifest, r#"{"name":"dashboard","runtime":"js-wasm"}"#).unwrap();
+        assert_eq!(plugin_changed_by_path(&ui_manifest, &root), None);
+
+        let wasi_manifest = root.join("notes.manifest.json");
+        std::fs::write(
+            &wasi_manifest,
+            r#"{"name":"notes","runtime":"wasi-component"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            plugin_changed_by_path(&wasi_manifest, &root),
+            Some("notes".to_string())
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dev_reserves_concrete_host_and_ui_ports() {
+        assert_ne!(reserve_http_addr("127.0.0.1:0").unwrap(), "127.0.0.1:0");
+        assert!(reserve_ui_port().unwrap() >= 5173);
+    }
 }

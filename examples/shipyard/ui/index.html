@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>Shipyard · polyglot release cockpit</title>
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="#/workbench" aria-label="Shipyard home">
+        <span class="mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span>
+          <small>OWASIDEA EXAMPLE</small>
+          <strong>SHIPYARD</strong>
+        </span>
+      </a>
+      <nav id="nav">
+        <a href="#/workbench" title="Call every plugin with real inputs">Workbench</a>
+        <a href="#/inventory" title="Generated manifests, exports and runtime types">Inventory</a>
+        <a href="#/runtime" title="Persistent service and executable HTTP plugin">Runtime</a>
+        <a href="#/ui" title="Verified Svelte and React bundles in sandboxed iframes">Isolated UI</a>
+        <a href="#/logs" title="host-log ring buffer + SSE stream">Logs</a>
+        <a href="#/dev" title="Watch roots and explicit component reload">Dev</a>
+      </nav>
+      <div id="host-pill" class="pill"><span class="pulse"></span><span>connecting…</span></div>
+    </header>
+    <main id="view" class="view"></main>
+    <footer class="footer">
+      <span>Rust · Go · TypeScript · C# · C · C++ · React · Svelte</span>
+      <span>host API <code id="host-label"></code></span>
+    </footer>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -18,6 +18,7 @@ wasm-tools compose plugins/composed-go/composed-go.client.wasm \
 python3 scripts/gen-manifest.py \
   --component plugins/composed-go/composed-go.component.wasm \
   --name composed-go --version 0.1.0 --language go --type library \
+  --kv composed-go:read-write \
   --out manifests/composed-go.manifest.json \
   --description "Composed Go client importing Rust notes (cross-language)"
 

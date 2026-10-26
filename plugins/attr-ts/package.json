@@ -6,7 +6,7 @@
     "build": "jco componentize src/index.ts --wit wit --world-name tester -o attr-ts.component.wasm"
   },
   "devDependencies": {
-    "@bytecodealliance/jco": "latest",
-    "@bytecodealliance/componentize-js": "latest"
+    "@bytecodealliance/jco": "1.39.0",
+    "@bytecodealliance/componentize-js": "0.23.0"
   }
 }

@@ -8,7 +8,10 @@
     "test": "tests"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "build": "npm --prefix ui run build",
+    "test": "playwright test",
+    "test:shipyard": "cargo run -p owasidea-cli -- --config examples/shipyard/wasm-app.toml test",
+    "smoke:shipyard": "cargo run -p owasidea-cli -- --config examples/shipyard/wasm-app.toml smoke"
   },
   "keywords": [],
   "type": "commonjs",

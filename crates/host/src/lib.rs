@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use axum::{
     body::Body,
     extract::{Path as AxumPath, State},
-    http::{HeaderMap, Method, StatusCode, Uri},
+    http::{header, HeaderValue, Method, StatusCode},
     middleware,
     response::{
         sse::{Event, KeepAlive, Sse},
@@ -13,19 +13,21 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
-    net::{Ipv4Addr, UdpSocket},
+    collections::{HashMap, HashSet, VecDeque},
+    net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
 };
 use tokio::{sync::Mutex, task::JoinHandle};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use wasmtime::component::{Component, Linker, ResourceTable, Type, Val};
 use wasmtime::{Engine, Store};
-use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+use wasmtime_wasi::{
+    sockets::SocketAddrUse, FsPerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView,
+};
 use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpCtxView, WasiHttpView};
 
 // ---------------------------------------------------------------------------
@@ -42,7 +44,9 @@ struct Manifest {
     runtime: Option<String>,
     #[serde(rename = "type")]
     kind: String,
+    #[serde(default)]
     component: String,
+    #[serde(default)]
     exports: Vec<Export>,
     #[serde(default)]
     imports: Imports,
@@ -79,9 +83,23 @@ struct Permissions {
     #[serde(default)]
     http: HttpPerm,
     #[serde(default)]
+    network: NetworkPerm,
+    #[serde(default)]
     kv: Option<KvPerm>,
     #[serde(default)]
     resources: Resources,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+struct NetworkPerm {
+    /// Outbound hostnames or IP addresses. Hostnames are resolved at instance
+    /// creation and sockets are restricted to the resulting addresses.
+    #[serde(default)]
+    outbound: Vec<String>,
+    /// Local IP addresses the component may bind/listen on. Use explicit
+    /// wildcard addresses only when external reachability is intended.
+    #[serde(default)]
+    inbound: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -147,13 +165,34 @@ struct Composition {
 struct PluginRuntime {
     manifest: Manifest,
     manifest_path: PathBuf,
-    component_path: PathBuf,
+    /// Compiled once when the plugin is loaded or reloaded. Wasmtime component
+    /// compilation dominates call latency for Go/JS/C# components, so it must
+    /// not happen on every /call.
+    component: Component,
     kv: Arc<std::sync::Mutex<rusqlite::Connection>>,
-    logs: Arc<Mutex<Vec<String>>>,
-    // Executable plugins are served by a `wasmtime serve` child process for
-    // this POC. A production host would embed wasmtime-wasi-http instead.
-    child: Option<Child>,
-    port: Option<u16>,
+    logs: Arc<Mutex<LogBuffer>>,
+    instance_slots: Arc<tokio::sync::Semaphore>,
+    http_pre: Option<wasmtime_wasi_http::p2::bindings::ProxyPre<HostState>>,
+}
+
+const MAX_LOG_ENTRIES: usize = 1_000;
+const MAX_LOG_CHARS: usize = 1024;
+
+#[derive(Default)]
+struct LogBuffer {
+    next_id: u64,
+    entries: VecDeque<(u64, String)>,
+}
+
+impl LogBuffer {
+    fn push(&mut self, message: String) {
+        self.next_id += 1;
+        let message = message.chars().take(MAX_LOG_CHARS).collect();
+        self.entries.push_back((self.next_id, message));
+        if self.entries.len() > MAX_LOG_ENTRIES {
+            self.entries.pop_front();
+        }
+    }
 }
 
 struct TailcatSession {
@@ -164,13 +203,40 @@ struct TailcatSession {
     ticker: Option<JoinHandle<()>>,
 }
 
+struct ServiceSession {
+    store: Store<HostState>,
+    instance: wasmtime::component::Instance,
+    timeout_ms: u64,
+}
+
 #[derive(Clone)]
 struct AppState {
     engine: Engine,
     plugins: Arc<std::sync::RwLock<HashMap<String, std::sync::Arc<PluginRuntime>>>>,
+    ui_plugins: Arc<Vec<UiPluginInfo>>,
     tailcat_session: Arc<Mutex<Option<TailcatSession>>>,
+    services: Arc<Mutex<HashMap<String, ServiceSession>>>,
     requests: Arc<std::sync::atomic::AtomicU64>,
     errors: Arc<std::sync::atomic::AtomicU64>,
+    dev_mode: bool,
+    dev_hot_reload: bool,
+    dev_watch_paths: Vec<String>,
+    dev_last_reload: Arc<std::sync::RwLock<std::collections::BTreeMap<String, ReloadStatus>>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ReloadStatus {
+    ok: bool,
+    http_status: u16,
+    timestamp_unix: u64,
+}
+
+#[derive(Serialize)]
+struct DevStatusRes {
+    active: bool,
+    hot_reload: bool,
+    watch_paths: Vec<String>,
+    last_reload: std::collections::BTreeMap<String, ReloadStatus>,
 }
 
 impl AppState {
@@ -185,6 +251,7 @@ struct HostState {
     http: WasiHttpCtx,
     http_hooks: AllowlistHooks,
     limits: wasmtime::StoreLimits,
+    _instance_permit: tokio::sync::OwnedSemaphorePermit,
 }
 
 #[derive(Clone)]
@@ -215,7 +282,7 @@ impl wasmtime_wasi_http::WasiHttpHooks for AllowlistHooks {
             > + Send,
     > {
         let host = request.uri().host().unwrap_or("").to_string();
-        let allowed = self.allowed.iter().any(|a| a == "*" || a == &host);
+        let allowed = self.allowed.iter().any(|a| a.eq_ignore_ascii_case(&host));
         if !allowed {
             _ = fut;
             return Box::new(async move { Err(wasmtime_wasi_http::Error::HttpRequestDenied) });
@@ -297,6 +364,18 @@ fn build_linker(engine: &Engine, plugin: &PluginRuntime) -> Result<Linker<HostSt
         .iter()
         .any(|h| h.starts_with("poc:host/host-kv"))
     {
+        let can_read = plugin
+            .manifest
+            .permissions
+            .kv
+            .as_ref()
+            .is_some_and(|permission| matches!(permission.access.as_str(), "read" | "read-write"));
+        let can_write = plugin
+            .manifest
+            .permissions
+            .kv
+            .as_ref()
+            .is_some_and(|permission| permission.access == "read-write");
         let kv = plugin.kv.clone();
         let mut root = linker.root();
         let mut inst = root
@@ -306,6 +385,9 @@ fn build_linker(engine: &Engine, plugin: &PluginRuntime) -> Result<Linker<HostSt
         inst.func_wrap(
             "get",
             move |_store: wasmtime::StoreContextMut<'_, HostState>, (key,): (String,)| {
+                if !can_read {
+                    return Ok((None::<String>,));
+                }
                 let value = kv_get.lock().ok().and_then(|conn| {
                     conn.query_row(
                         "SELECT value FROM kv WHERE key = ?1",
@@ -322,11 +404,13 @@ fn build_linker(engine: &Engine, plugin: &PluginRuntime) -> Result<Linker<HostSt
             "set",
             move |_store: wasmtime::StoreContextMut<'_, HostState>,
                   (key, value): (String, String)| {
-                if let Ok(conn) = kv_set.lock() {
-                    let _ = conn.execute(
-                        "INSERT OR REPLACE INTO kv (key, value) VALUES (?1, ?2)",
-                        rusqlite::params![key, value],
-                    );
+                if can_write {
+                    if let Ok(conn) = kv_set.lock() {
+                        let _ = conn.execute(
+                            "INSERT OR REPLACE INTO kv (key, value) VALUES (?1, ?2)",
+                            rusqlite::params![key, value],
+                        );
+                    }
                 }
                 Ok(())
             },
@@ -363,92 +447,168 @@ async fn instantiate(
     engine: &Engine,
     plugin: &PluginRuntime,
 ) -> Result<(Store<HostState>, wasmtime::component::Instance)> {
-    // Verify component checksum if declared in manifest metadata.
-    if let Some(expected) = plugin
-        .manifest
-        .metadata
-        .get("sha256")
-        .and_then(|v| v.as_str())
+    let linker = build_linker(engine, plugin)?;
+    let mut store = create_store(engine, plugin).await?;
+    let instance = linker
+        .instantiate_async(&mut store, &plugin.component)
+        .await
+        .map_err(|e| anyhow!("failed to instantiate component: {e}"))?;
+    Ok((store, instance))
+}
+
+/// Verify the component bytes against the signed manifest and compile them.
+/// Callers cache the returned component; never call this per invocation.
+fn verify_and_compile_component(
+    engine: &Engine,
+    manifest: &Manifest,
+    component_path: &Path,
+) -> Result<Component> {
+    if !manifest.imports.plugins.is_empty() {
+        anyhow::bail!(
+            "plugin {} declares unresolved plugin imports; compose dependencies at build time",
+            manifest.name
+        );
+    }
+    if manifest
+        .permissions
+        .http
+        .outbound
+        .iter()
+        .any(|host| host == "*")
     {
+        anyhow::bail!(
+            "wildcard HTTP permissions are not allowed for {}",
+            manifest.name
+        );
+    }
+    let bytes = std::fs::read(component_path).map_err(|e| anyhow!("read component: {e}"))?;
+    // Verify component checksum if declared in manifest metadata.
+    if let Some(expected) = manifest.metadata.get("sha256").and_then(|v| v.as_str()) {
         use sha2::{Digest, Sha256};
-        let bytes =
-            std::fs::read(&plugin.component_path).map_err(|e| anyhow!("read component: {e}"))?;
         let mut hasher = Sha256::new();
         hasher.update(&bytes);
         let actual = format!("{:x}", hasher.finalize());
         if actual != expected {
             return Err(anyhow!(
                 "checksum mismatch for {}: expected {}, got {}",
-                plugin.manifest.name,
+                manifest.name,
                 expected,
                 actual
             ));
         }
     }
-    // Verify signature if declared.
-    if let Some(sig_b64) = plugin
+    verify_manifest_signature(manifest, &bytes)?;
+    let component = Component::from_file(engine, component_path)
+        .map_err(|e| anyhow!("failed to load component {component_path:?}: {e}"))?;
+    validate_component_imports(engine, &component, manifest)?;
+    Ok(component)
+}
+
+fn prepare_http_plugin(
+    engine: &Engine,
+    plugin: &PluginRuntime,
+) -> Result<Option<wasmtime_wasi_http::p2::bindings::ProxyPre<HostState>>> {
+    if !matches!(plugin.manifest.kind.as_str(), "executable" | "hybrid") {
+        return Ok(None);
+    }
+    if !plugin.manifest.permissions.http.inbound {
+        anyhow::bail!(
+            "HTTP plugin {} lacks permissions.http.inbound",
+            plugin.manifest.name
+        );
+    }
+    if !plugin
         .manifest
-        .metadata
-        .get("signature")
-        .and_then(|v| v.as_str())
+        .exports
+        .iter()
+        .any(|export| export.name.starts_with("wasi:http/incoming-handler"))
     {
-        if let Ok(pub_path) = std::env::var("OWASIDEA_PUBLIC_KEY") {
-            use base64::Engine;
-            use ring::signature::{UnparsedPublicKey, ED25519};
-            let pub_b64 =
-                std::fs::read_to_string(&pub_path).map_err(|e| anyhow!("read pub key: {e}"))?;
-            let pub_bytes = base64::engine::general_purpose::STANDARD
-                .decode(pub_b64.trim())
-                .map_err(|e| anyhow!("decode pub key: {e}"))?;
-            let sig_bytes = base64::engine::general_purpose::STANDARD
-                .decode(sig_b64)
-                .map_err(|e| anyhow!("decode signature: {e}"))?;
-            let pk = UnparsedPublicKey::new(&ED25519, &pub_bytes);
-            let bytes = std::fs::read(&plugin.component_path)
-                .map_err(|e| anyhow!("read component: {e}"))?;
-            pk.verify(&bytes, &sig_bytes).map_err(|_| {
-                anyhow!("signature verification failed for {}", plugin.manifest.name)
-            })?;
-        }
+        anyhow::bail!(
+            "HTTP plugin {} does not export wasi:http/incoming-handler",
+            plugin.manifest.name
+        );
     }
-    let component = Component::from_file(engine, &plugin.component_path)
-        .map_err(|e| anyhow!("failed to load component {:?}: {e}", plugin.component_path))?;
     let linker = build_linker(engine, plugin)?;
+    Ok(Some(wasmtime_wasi_http::p2::bindings::ProxyPre::new(
+        linker.instantiate_pre(&plugin.component)?,
+    )?))
+}
 
+async fn create_store(engine: &Engine, plugin: &PluginRuntime) -> Result<Store<HostState>> {
+    let timeout_ms = plugin
+        .manifest
+        .permissions
+        .resources
+        .timeout_ms
+        .unwrap_or(30_000);
+    let permit = tokio::time::timeout(
+        std::time::Duration::from_millis(timeout_ms),
+        plugin.instance_slots.clone().acquire_owned(),
+    )
+    .await
+    .map_err(|_| anyhow!("plugin instance limit wait timed out"))??;
     let mut builder = WasiCtxBuilder::new();
-    builder.inherit_stdio();
-    let (gateway, self_ip) = network_hints();
-    if let Some(gateway) = gateway {
-        builder.env("TAILCAT_WASI_GATEWAY", gateway);
-    }
-    if let Some(self_ip) = self_ip {
-        builder.env("TAILCAT_WASI_SELF_IP", self_ip);
-    }
-    for key in ["TAILCAT_WASI_VERBOSE_PORTMAPPER", "TAILCAT_WASI_LOG_HTTP"] {
-        if let Ok(value) = std::env::var(key) {
-            builder.env(key, value);
+    if plugin.manifest.name == "tailcat-wasi" {
+        let (gateway, self_ip) = network_hints();
+        if let Some(gateway) = gateway {
+            builder.env("TAILCAT_WASI_GATEWAY", gateway);
+        }
+        if let Some(self_ip) = self_ip {
+            builder.env("TAILCAT_WASI_SELF_IP", self_ip);
+        }
+        for key in ["TAILCAT_WASI_VERBOSE_PORTMAPPER", "TAILCAT_WASI_LOG_HTTP"] {
+            if let Ok(value) = std::env::var(key) {
+                builder.env(key, value);
+            }
         }
     }
 
-    // Grant network only when the component declares wasi:sockets imports.
-    if plugin
+    let has_tcp = plugin
         .manifest
         .imports
         .wasi
         .iter()
-        .any(|w| w.starts_with("wasi:sockets"))
-    {
-        builder.inherit_network();
-        builder.allow_udp(true);
-        builder.allow_tcp(true);
-        builder.allow_ip_name_lookup(true);
+        .any(|w| w.starts_with("wasi:sockets/tcp"));
+    let has_udp = plugin
+        .manifest
+        .imports
+        .wasi
+        .iter()
+        .any(|w| w.starts_with("wasi:sockets/udp"));
+    let has_name_lookup = plugin
+        .manifest
+        .imports
+        .wasi
+        .iter()
+        .any(|w| w.starts_with("wasi:sockets/ip-name-lookup"));
+    if has_tcp || has_udp || has_name_lookup {
+        let outbound = resolve_network_hosts(&plugin.manifest.permissions.network.outbound).await?;
+        let inbound = parse_inbound_addresses(&plugin.manifest.permissions.network.inbound)?;
+        let outbound_for_check = outbound.clone();
+        let inbound_for_check = inbound.clone();
+        builder
+            .allow_tcp(has_tcp && (!outbound.is_empty() || !inbound.is_empty()))
+            .allow_udp(has_udp && (!outbound.is_empty() || !inbound.is_empty()))
+            .allow_ip_name_lookup(has_name_lookup && !outbound.is_empty())
+            .socket_addr_check(move |addr, usage| {
+                let outbound = outbound_for_check.clone();
+                let inbound = inbound_for_check.clone();
+                Box::pin(async move { socket_address_allowed(addr, usage, &outbound, &inbound) })
+            });
     }
     for fs in &plugin.manifest.permissions.filesystem {
-        let host_path = PathBuf::from(&fs.path);
-        std::fs::create_dir_all(&host_path).ok();
+        if !fs.preopen {
+            continue;
+        }
+        let host_path = resolve_state_path(&fs.path);
+        std::fs::create_dir_all(&host_path)
+            .with_context(|| format!("create filesystem permission path {}", fs.path))?;
+        let host_path = std::fs::canonicalize(&host_path)
+            .with_context(|| format!("canonicalize filesystem permission path {}", fs.path))?;
         let perms = match fs.access.as_str() {
             "read" => FsPerms::ReadOnly,
-            _ => FsPerms::ReadWrite,
+            "read-write" => FsPerms::ReadWrite,
+            other => anyhow::bail!("unsupported filesystem access {other:?} for {}", fs.path),
         };
         builder
             .preopened_dir(&host_path, &fs.path, perms)
@@ -466,23 +626,257 @@ async fn instantiate(
             },
             limits: {
                 let mut b = wasmtime::StoreLimitsBuilder::new();
-                if let Some(mb) = plugin.manifest.permissions.resources.max_memory_mb {
-                    b = b.memory_size((mb as usize) * 1024 * 1024);
-                }
+                let mb = plugin
+                    .manifest
+                    .permissions
+                    .resources
+                    .max_memory_mb
+                    .unwrap_or(64);
+                let bytes = mb
+                    .checked_mul(1024 * 1024)
+                    .and_then(|bytes| usize::try_from(bytes).ok())
+                    .filter(|bytes| *bytes > 0)
+                    .ok_or_else(|| anyhow!("invalid memory limit for {}", plugin.manifest.name))?;
+                b = b.memory_size(bytes);
                 b.build()
             },
+            _instance_permit: permit,
         },
     );
     store.limiter(|state| &mut state.limits);
-    // Wire manifest fuel limit (if declared).
-    if let Some(max_fuel) = plugin.manifest.permissions.resources.max_fuel {
-        let _ = store.set_fuel(max_fuel);
+    store.set_fuel(
+        plugin
+            .manifest
+            .permissions
+            .resources
+            .max_fuel
+            .unwrap_or(1_000_000_000),
+    )?;
+    Ok(store)
+}
+
+fn validate_component_imports(
+    engine: &Engine,
+    component: &Component,
+    manifest: &Manifest,
+) -> Result<()> {
+    let declared_wasi: HashSet<&str> = manifest.imports.wasi.iter().map(String::as_str).collect();
+    let declared_host: HashSet<&str> = manifest.imports.host.iter().map(String::as_str).collect();
+    let mut actual_wasi = HashSet::new();
+    let mut actual_host = HashSet::new();
+    let component_type = component.component_type();
+
+    for (import_name, import) in component_type.imports(engine) {
+        let interface = import.implements.unwrap_or(import_name);
+        let (actual, declared, kind) = if interface.starts_with("wasi:") {
+            (&mut actual_wasi, &declared_wasi, "WASI")
+        } else {
+            (&mut actual_host, &declared_host, "host")
+        };
+        if !declared
+            .iter()
+            .any(|name| *name == interface || import.is_implements(name))
+        {
+            anyhow::bail!(
+                "plugin {} imports undeclared {kind} interface {interface}",
+                manifest.name
+            );
+        }
+        actual.insert(interface);
     }
-    let instance = linker
-        .instantiate_async(&mut store, &component)
-        .await
-        .map_err(|e| anyhow!("failed to instantiate component: {e}"))?;
-    Ok((store, instance))
+
+    for name in &declared_wasi {
+        if !actual_wasi.contains(name) {
+            anyhow::bail!(
+                "manifest declares unused WASI interface {name} for {}",
+                manifest.name
+            );
+        }
+    }
+    for name in &declared_host {
+        if !actual_host.contains(name) {
+            anyhow::bail!(
+                "manifest declares unused host interface {name} for {}",
+                manifest.name
+            );
+        }
+    }
+    let imports_kv = actual_host
+        .iter()
+        .any(|interface| interface.starts_with("poc:host/host-kv"));
+    match (&manifest.permissions.kv, imports_kv) {
+        (Some(permission), true) => {
+            if !matches!(permission.access.as_str(), "read" | "read-write") {
+                anyhow::bail!(
+                    "unsupported KV access {:?} for {}",
+                    permission.access,
+                    manifest.name
+                );
+            }
+            if permission.namespace.is_empty()
+                || !permission
+                    .namespace
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+            {
+                anyhow::bail!("invalid KV namespace for {}", manifest.name);
+            }
+        }
+        (Some(_), false) => {
+            anyhow::bail!("manifest grants unused KV permission to {}", manifest.name);
+        }
+        (None, true) => {
+            anyhow::bail!(
+                "plugin {} imports host-kv without KV permission",
+                manifest.name
+            );
+        }
+        (None, false) => {}
+    }
+    let imports_filesystem = actual_wasi
+        .iter()
+        .any(|interface| interface.starts_with("wasi:filesystem/"));
+    if !manifest.permissions.filesystem.is_empty() && !imports_filesystem {
+        anyhow::bail!(
+            "manifest grants unused filesystem permission to {}",
+            manifest.name
+        );
+    }
+    for permission in &manifest.permissions.filesystem {
+        if !matches!(permission.access.as_str(), "read" | "read-write") {
+            anyhow::bail!(
+                "unsupported filesystem access {:?} for {}",
+                permission.access,
+                manifest.name
+            );
+        }
+    }
+    let imports_sockets = actual_wasi
+        .iter()
+        .any(|interface| interface.starts_with("wasi:sockets/"));
+    if (!manifest.permissions.network.outbound.is_empty()
+        || !manifest.permissions.network.inbound.is_empty())
+        && !imports_sockets
+    {
+        anyhow::bail!(
+            "manifest grants unused network permission to {}",
+            manifest.name
+        );
+    }
+    let imports_http_outbound = actual_wasi
+        .iter()
+        .any(|interface| interface.starts_with("wasi:http/outgoing-handler"));
+    if !manifest.permissions.http.outbound.is_empty() && !imports_http_outbound {
+        anyhow::bail!(
+            "manifest grants unused HTTP outbound permission to {}",
+            manifest.name
+        );
+    }
+    let exports_http_inbound = manifest
+        .exports
+        .iter()
+        .any(|export| export.name.starts_with("wasi:http/incoming-handler"));
+    if manifest.permissions.http.inbound != exports_http_inbound {
+        anyhow::bail!(
+            "HTTP inbound permission/export mismatch for {}",
+            manifest.name
+        );
+    }
+    if manifest.permissions.http.inbound
+        && !matches!(manifest.kind.as_str(), "executable" | "hybrid")
+    {
+        anyhow::bail!(
+            "only executable/hybrid plugins may request HTTP inbound: {}",
+            manifest.name
+        );
+    }
+    Ok(())
+}
+
+fn signed_manifest_payload(manifest: &Manifest, component: &[u8]) -> Result<Vec<u8>> {
+    let mut value = serde_json::to_value(manifest)?;
+    if let Some(metadata) = value
+        .get_mut("metadata")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        metadata.remove("signature");
+    }
+    let manifest_json = serde_json::to_vec(&value)?;
+    let mut payload = b"owasidea-plugin-signature-v1\0".to_vec();
+    payload.extend_from_slice(&manifest_json);
+    payload.push(0);
+    payload.extend_from_slice(component);
+    Ok(payload)
+}
+
+fn verify_manifest_signature(manifest: &Manifest, artifact: &[u8]) -> Result<()> {
+    let signature = manifest
+        .metadata
+        .get("signature")
+        .and_then(serde_json::Value::as_str);
+    let require_signatures = std::env::var("OWASIDEA_REQUIRE_SIGNATURES")
+        .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(!cfg!(debug_assertions));
+    if require_signatures && signature.is_none() {
+        anyhow::bail!(
+            "plugin {} is unsigned but signatures are required",
+            manifest.name
+        );
+    }
+    let Some(signature) = signature else {
+        return Ok(());
+    };
+    let public_key_path = match std::env::var("OWASIDEA_PUBLIC_KEY") {
+        Ok(path) => path,
+        Err(_) if require_signatures => {
+            anyhow::bail!("OWASIDEA_PUBLIC_KEY is required to verify signed plugins")
+        }
+        Err(_) => {
+            tracing::warn!(plugin = %manifest.name, "plugin signature present but not verified; configure OWASIDEA_PUBLIC_KEY");
+            return Ok(());
+        }
+    };
+    if manifest
+        .metadata
+        .get("signature_format")
+        .and_then(serde_json::Value::as_str)
+        != Some("owasidea-manifest-v1")
+    {
+        anyhow::bail!(
+            "unsupported or legacy signature format for {}",
+            manifest.name
+        );
+    }
+    use base64::Engine;
+    let public_key = std::fs::read_to_string(public_key_path).context("read public key")?;
+    let public_key = base64::engine::general_purpose::STANDARD
+        .decode(public_key.trim())
+        .context("decode public key")?;
+    let signature = base64::engine::general_purpose::STANDARD
+        .decode(signature)
+        .context("decode signature")?;
+    verify_signature_with_key(manifest, artifact, &public_key, &signature)
+}
+
+fn instance_slots(manifest: &Manifest) -> Result<Arc<tokio::sync::Semaphore>> {
+    let limit = manifest.permissions.resources.max_instances.unwrap_or(1);
+    if limit == 0 {
+        anyhow::bail!("max_instances must be at least 1 for {}", manifest.name);
+    }
+    Ok(Arc::new(tokio::sync::Semaphore::new(limit as usize)))
+}
+
+fn verify_signature_with_key(
+    manifest: &Manifest,
+    artifact: &[u8],
+    public_key: &[u8],
+    signature: &[u8],
+) -> Result<()> {
+    use ring::signature::{UnparsedPublicKey, ED25519};
+    let payload = signed_manifest_payload(manifest, artifact)?;
+    UnparsedPublicKey::new(&ED25519, &public_key)
+        .verify(&payload, signature)
+        .map_err(|_| anyhow!("signature verification failed for {}", manifest.name))
 }
 
 // ---------------------------------------------------------------------------
@@ -579,12 +973,23 @@ struct PluginInfo {
     name: String,
     version: String,
     language: String,
+    runtime: String,
     #[serde(rename = "type")]
     kind: String,
     exports: Vec<String>,
     imports_wasi: usize,
     imports_host: Vec<String>,
     served_on: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct UiPluginInfo {
+    name: String,
+    version: String,
+    language: String,
+    entry: String,
+    sha256: String,
+    files: std::collections::BTreeMap<String, String>,
 }
 
 async fn health() -> &'static str {
@@ -609,6 +1014,19 @@ async fn metrics(State(state): State<AppState>) -> String {
     )
 }
 
+async fn dev_status(State(state): State<AppState>) -> Json<DevStatusRes> {
+    Json(DevStatusRes {
+        active: state.dev_mode,
+        hot_reload: state.dev_hot_reload,
+        watch_paths: state.dev_watch_paths.clone(),
+        last_reload: state
+            .dev_last_reload
+            .read()
+            .map(|records| records.clone())
+            .unwrap_or_default(),
+    })
+}
+
 async fn overview(State(state): State<AppState>) -> Json<OverviewRes> {
     let mut libraries = 0;
     let mut executables = 0;
@@ -617,7 +1035,7 @@ async fn overview(State(state): State<AppState>) -> Json<OverviewRes> {
     for p in state.plugins.read().unwrap().values() {
         match p.manifest.kind.as_str() {
             "executable" => executables += 1,
-            "hybrid" => services += 1,
+            "service" | "hybrid" => services += 1,
             _ => libraries += 1,
         }
         runtimes.insert(
@@ -644,15 +1062,25 @@ async fn list_plugins(State(state): State<AppState>) -> Json<Vec<PluginInfo>> {
             name: name.clone(),
             version: p.manifest.version.clone(),
             language: p.manifest.language.clone(),
+            runtime: p
+                .manifest
+                .runtime
+                .clone()
+                .unwrap_or_else(|| "wasi-component".to_string()),
             kind: p.manifest.kind.clone(),
             exports: p.manifest.exports.iter().map(|e| e.name.clone()).collect(),
             imports_wasi: p.manifest.imports.wasi.len(),
             imports_host: p.manifest.imports.host.clone(),
-            served_on: p.port.map(|port| format!("http://127.0.0.1:{port}")),
+            served_on: matches!(p.manifest.kind.as_str(), "executable" | "hybrid")
+                .then(|| format!("/app/{name}")),
         });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     Json(out)
+}
+
+async fn list_ui_plugins(State(state): State<AppState>) -> Json<Vec<UiPluginInfo>> {
+    Json(state.ui_plugins.as_ref().clone())
 }
 
 async fn plugin_manifest(
@@ -672,7 +1100,14 @@ async fn plugin_logs(
     let p = state
         .plugin(&name)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
-    let logs = p.logs.lock().await.clone();
+    let logs = p
+        .logs
+        .lock()
+        .await
+        .entries
+        .iter()
+        .map(|(_, message)| message.clone())
+        .collect();
     Ok(Json(LogsRes { logs }))
 }
 
@@ -688,17 +1123,21 @@ async fn plugin_logs_stream(
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
     let logs = p.logs.clone();
     let stream = async_stream::stream! {
-        let mut last = 0usize;
+        let mut last = 0u64;
         loop {
-            let snapshot = {
+            let snapshot: Vec<_> = {
                 let l = logs.lock().await;
-                l.clone()
+                l.entries
+                    .iter()
+                    .filter(|(id, _)| *id > last)
+                    .cloned()
+                    .collect()
             };
-            if snapshot.len() > last {
-                for msg in &snapshot[last..] {
-                    yield Ok(Event::default().data(msg.clone()));
+            if !snapshot.is_empty() {
+                for (id, message) in snapshot {
+                    yield Ok(Event::default().id(id.to_string()).data(message));
+                    last = id;
                 }
-                last = snapshot.len();
             }
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
@@ -710,6 +1149,18 @@ async fn reload(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if state.services.lock().await.contains_key(&name) {
+        return Err((
+            StatusCode::CONFLICT,
+            format!("stop service {name} before reloading it"),
+        ));
+    }
+    if name == "tailcat-wasi" && state.tailcat_session.lock().await.is_some() {
+        return Err((
+            StatusCode::CONFLICT,
+            "stop tailcat-wasi before reloading it".to_string(),
+        ));
+    }
     let p = state
         .plugin(&name)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
@@ -723,20 +1174,49 @@ async fn reload(
     })?;
     let manifest: Manifest = serde_json::from_str(&raw)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid manifest: {e}")))?;
+    if manifest.name != name {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("manifest identity changed from {name} to {}", manifest.name),
+        ));
+    }
     let base = p
         .manifest_path
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
     let component_path = base.join(&manifest.component);
-    let runtime = PluginRuntime {
+    let namespace = manifest
+        .permissions
+        .kv
+        .as_ref()
+        .map(|permission| permission.namespace.as_str())
+        .unwrap_or(&manifest.name);
+    let previous_namespace = p
+        .manifest
+        .permissions
+        .kv
+        .as_ref()
+        .map(|permission| permission.namespace.as_str())
+        .unwrap_or(&p.manifest.name);
+    let kv = if namespace == previous_namespace {
+        p.kv.clone()
+    } else {
+        Arc::new(std::sync::Mutex::new(
+            open_kv_db(namespace).map_err(internal)?,
+        ))
+    };
+    let component = verify_and_compile_component(&state.engine, &manifest, &component_path)
+        .map_err(internal)?;
+    let mut runtime = PluginRuntime {
         manifest,
         manifest_path: p.manifest_path.clone(),
-        component_path,
-        kv: p.kv.clone(),
+        component,
+        kv,
         logs: p.logs.clone(),
-        child: None,
-        port: p.port,
+        instance_slots: p.instance_slots.clone(),
+        http_pre: None,
     };
+    runtime.http_pre = prepare_http_plugin(&state.engine, &runtime).map_err(internal)?;
     let timeout_ms = runtime
         .manifest
         .permissions
@@ -899,6 +1379,18 @@ async fn service_start_generic(
     let p = state
         .plugin(&name)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
+    if !matches!(p.manifest.kind.as_str(), "service" | "hybrid") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("plugin {name} is not a stateful service"),
+        ));
+    }
+    let mut sessions = state.services.lock().await;
+    if sessions.contains_key(&name) {
+        return Ok(Json(OutputRes {
+            output: "already running".to_string(),
+        }));
+    }
     let region_json = if req.region_json.trim().is_empty() {
         default_region_json()
     } else {
@@ -912,26 +1404,57 @@ async fn service_start_generic(
         for candidate in ["start-service", "start-server"] {
             if let Some(func) = instance.get_func(&mut store, candidate) {
                 let ty = func.ty(&store);
-                let mut params = vec![];
-                let mut results = ty.results().map(|ty| default_val(&ty)).collect::<Vec<_>>();
-                if ty.params().count() == 1 {
-                    params.push(Val::String(region_json.clone()));
+                let mut params = Vec::new();
+                let parameter_types: Vec<_> = ty.params().collect();
+                if parameter_types.len() > 1 {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        format!("{candidate} may accept zero or one string argument"),
+                    ));
                 }
+                if let Some((_, param_type)) = parameter_types.first() {
+                    params.push(
+                        json_to_val(param_type, &serde_json::Value::String(region_json.clone()))
+                            .map_err(|error| (StatusCode::BAD_REQUEST, error))?,
+                    );
+                }
+                let mut results = ty.results().map(|ty| default_val(&ty)).collect::<Vec<_>>();
                 func.call_async(&mut store, &params, &mut results)
                     .await
                     .map_err(internal)?;
-                let out = results
-                    .first()
-                    .map(val_to_json)
-                    .and_then(|v| v.as_str().map(|s| s.to_string()))
+                if let Some(Val::Result(Err(error))) = results.first() {
+                    let error = error
+                        .as_deref()
+                        .map(val_to_json)
+                        .unwrap_or(serde_json::Value::Null);
+                    return Err((StatusCode::BAD_REQUEST, error.to_string()));
+                }
+                let output_value = match results.first() {
+                    Some(Val::Result(Ok(Some(value)))) => Some(val_to_json(value)),
+                    Some(value) => Some(val_to_json(value)),
+                    None => None,
+                };
+                let out = output_value
+                    .and_then(|value| value.as_str().map(str::to_string))
                     .unwrap_or_else(|| "started".to_string());
-                return Ok::<_, (StatusCode, String)>(Json(OutputRes { output: out }));
+                return Ok::<_, (StatusCode, String)>((store, instance, out));
             }
         }
         Err((StatusCode::NOT_FOUND, "no start-service export".to_string()))
     };
     match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), work).await {
-        Ok(r) => r,
+        Ok(Ok((store, instance, output))) => {
+            sessions.insert(
+                name,
+                ServiceSession {
+                    store,
+                    instance,
+                    timeout_ms,
+                },
+            );
+            Ok(Json(OutputRes { output }))
+        }
+        Ok(Err(error)) => Err(error),
         Err(_) => Err((StatusCode::GATEWAY_TIMEOUT, "request timed out".to_string())),
     }
 }
@@ -940,73 +1463,63 @@ async fn service_stop_generic(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let p = state
-        .plugin(&name)
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
-    let timeout_ms = p.manifest.permissions.resources.timeout_ms.unwrap_or(30000);
-    let work = async {
-        let (mut store, instance) = instantiate(&state.engine, p.as_ref())
-            .await
-            .map_err(internal)?;
-        for candidate in ["stop-service", "stop-server"] {
-            if let Some(func) = instance.get_func(&mut store, candidate) {
-                let ty = func.ty(&store);
-                let mut results = ty.results().map(|ty| default_val(&ty)).collect::<Vec<_>>();
-                func.call_async(&mut store, &[], &mut results)
-                    .await
-                    .map_err(internal)?;
-                return Ok::<_, (StatusCode, String)>(serde_json::json!({"stopped": true}));
-            }
-        }
-        Ok(serde_json::json!({"stopped": false, "reason": "no stop export"}))
-    };
-    match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), work).await {
-        Ok(r) => Ok(Json(r?)),
-        Err(_) => Err((StatusCode::GATEWAY_TIMEOUT, "request timed out".to_string())),
+    if state.plugin(&name).is_none() {
+        return Err((StatusCode::NOT_FOUND, format!("unknown plugin {name}")));
     }
+    let stopped = state.services.lock().await.remove(&name).is_some();
+    Ok(Json(serde_json::json!({"stopped": stopped})))
 }
 
 async fn service_status_generic(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
 ) -> Result<Json<ServiceStatusRes>, (StatusCode, String)> {
-    let p = state
-        .plugin(&name)
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
-    let timeout_ms = p.manifest.permissions.resources.timeout_ms.unwrap_or(30000);
-    let work = async {
-        let (mut store, instance) = instantiate(&state.engine, p.as_ref())
-            .await
-            .map_err(internal)?;
-        for candidate in ["service-status", "server-status"] {
-            if let Some(func) = instance.get_func(&mut store, candidate) {
-                let ty = func.ty(&store);
-                let mut results = ty.results().map(|ty| default_val(&ty)).collect::<Vec<_>>();
-                func.call_async(&mut store, &[], &mut results)
-                    .await
-                    .map_err(internal)?;
-                let running = results
-                    .first()
-                    .and_then(|v| match v {
-                        Val::Bool(b) => Some(*b),
-                        _ => None,
-                    })
-                    .unwrap_or(false);
-                return Ok::<_, (StatusCode, String)>(ServiceStatusRes {
-                    running,
-                    address: None,
-                });
-            }
-        }
-        Ok(ServiceStatusRes {
+    if state.plugin(&name).is_none() {
+        return Err((StatusCode::NOT_FOUND, format!("unknown plugin {name}")));
+    }
+    let mut sessions = state.services.lock().await;
+    let Some(session) = sessions.get_mut(&name) else {
+        return Ok(Json(ServiceStatusRes {
             running: false,
             address: None,
-        })
+        }));
     };
-    match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), work).await {
-        Ok(r) => Ok(Json(r?)),
-        Err(_) => Err((StatusCode::GATEWAY_TIMEOUT, "request timed out".to_string())),
+    for candidate in ["service-status", "server-status"] {
+        if let Some(func) = session.instance.get_func(&mut session.store, candidate) {
+            let ty = func.ty(&session.store);
+            let mut results = ty.results().map(|ty| default_val(&ty)).collect::<Vec<_>>();
+            match tokio::time::timeout(
+                std::time::Duration::from_millis(session.timeout_ms),
+                func.call_async(&mut session.store, &[], &mut results),
+            )
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => return Err(internal(error)),
+                Err(_) => {
+                    return Err((
+                        StatusCode::GATEWAY_TIMEOUT,
+                        "service status timed out".to_string(),
+                    ));
+                }
+            }
+            let running = results
+                .first()
+                .and_then(|v| match v {
+                    Val::Bool(b) => Some(*b),
+                    _ => None,
+                })
+                .unwrap_or(true);
+            return Ok(Json(ServiceStatusRes {
+                running,
+                address: None,
+            }));
+        }
     }
+    Ok(Json(ServiceStatusRes {
+        running: true,
+        address: None,
+    }))
 }
 
 async fn echo_udp(
@@ -1321,6 +1834,68 @@ fn default_region_json() -> String {
     r#"{"RegionID":301,"RegionCode":"nyc","RegionName":"New York City","Nodes":[{"Name":"301a","RegionID":301,"HostName":"tc301a.ipn.dev","IPv4":"199.38.181.166","IPv6":"2607:f740:f::26b","CanPort80":true}]}"#.to_string()
 }
 
+async fn resolve_network_hosts(hosts: &[String]) -> Result<HashSet<IpAddr>> {
+    let mut addresses = HashSet::new();
+    for host in hosts {
+        if host == "*" || host.contains('/') || host.contains(':') {
+            if let Ok(ip) = host.parse::<IpAddr>() {
+                addresses.insert(ip);
+                continue;
+            }
+            anyhow::bail!("network permission must be an exact hostname or IP address: {host}");
+        }
+        if let Ok(ip) = host.parse::<IpAddr>() {
+            addresses.insert(ip);
+            continue;
+        }
+        let resolved = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::net::lookup_host((host.as_str(), 0)),
+        )
+        .await
+        .with_context(|| format!("resolve network permission host {host} timed out"))?
+        .with_context(|| format!("resolve network permission host {host}"))?;
+        let resolved: HashSet<IpAddr> = resolved.map(|addr| addr.ip()).collect();
+        if resolved.is_empty() {
+            anyhow::bail!("network permission host {host} resolved to no addresses");
+        }
+        addresses.extend(resolved);
+    }
+    Ok(addresses)
+}
+
+fn parse_inbound_addresses(hosts: &[String]) -> Result<HashSet<IpAddr>> {
+    hosts
+        .iter()
+        .map(|host| {
+            host.parse::<IpAddr>().with_context(|| {
+                format!("inbound network permission must be an IP address: {host}")
+            })
+        })
+        .collect()
+}
+
+fn socket_address_allowed(
+    addr: SocketAddr,
+    usage: SocketAddrUse,
+    outbound: &HashSet<IpAddr>,
+    inbound: &HashSet<IpAddr>,
+) -> bool {
+    let ip = addr.ip();
+    let local_bind_allowed = inbound.contains(&ip)
+        || (ip.is_unspecified()
+            && (inbound.contains(&IpAddr::V4(Ipv4Addr::UNSPECIFIED))
+                || inbound.contains(&IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED))));
+    match usage {
+        SocketAddrUse::TcpBind | SocketAddrUse::TcpListen | SocketAddrUse::UdpBind => {
+            local_bind_allowed
+        }
+        SocketAddrUse::TcpAccept => !inbound.is_empty(),
+        SocketAddrUse::TcpConnect | SocketAddrUse::UdpSend => outbound.contains(&ip),
+        SocketAddrUse::UdpReceive => outbound.contains(&ip) || !inbound.is_empty(),
+    }
+}
+
 async fn start_server(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
@@ -1419,6 +1994,29 @@ async fn bind_udp(
 
 fn internal<E: std::fmt::Display>(e: E) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+}
+
+fn cors_layer() -> Result<CorsLayer> {
+    let origins = std::env::var("OWASIDEA_ALLOWED_ORIGINS").unwrap_or_else(|_| {
+        "tauri://localhost,https://tauri.localhost,http://localhost:5173,http://127.0.0.1:5173"
+            .to_string()
+    });
+    if origins.split(',').any(|origin| origin.trim() == "*") {
+        anyhow::bail!("wildcard CORS origins are not allowed");
+    }
+    let origins = origins
+        .split(',')
+        .map(str::trim)
+        .filter(|origin| !origin.is_empty())
+        .map(HeaderValue::try_from)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    if origins.is_empty() {
+        anyhow::bail!("OWASIDEA_ALLOWED_ORIGINS must contain at least one origin");
+    }
+    Ok(CorsLayer::new()
+        .allow_origin(AllowOrigin::list(origins))
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_headers([header::CONTENT_TYPE]))
 }
 
 fn default_val(ty: &Type) -> Val {
@@ -1643,16 +2241,39 @@ fn val_to_json(val: &Val) -> serde_json::Value {
     }
 }
 
-fn open_kv_db(name: &str) -> rusqlite::Connection {
-    let dir = std::path::PathBuf::from("./data").join(name);
-    let _ = std::fs::create_dir_all(&dir);
+/// Root for host-managed mutable state. Desktop bundles point this at the
+/// platform app-data directory; development defaults to `./data`.
+fn data_root() -> PathBuf {
+    std::env::var_os("OWASIDEA_DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("./data"))
+}
+
+fn resolve_state_path(path: &str) -> PathBuf {
+    let path = Path::new(path);
+    if path.is_absolute() || std::env::var_os("OWASIDEA_DATA_DIR").is_none() {
+        path.to_path_buf()
+    } else {
+        data_root().join(path.strip_prefix("./").unwrap_or(path))
+    }
+}
+
+fn open_kv_db(name: &str) -> Result<rusqlite::Connection> {
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        anyhow::bail!("invalid KV database namespace {name:?}");
+    }
+    let dir = data_root().join(name);
+    std::fs::create_dir_all(&dir)?;
     let path = dir.join("kv.sqlite");
-    let conn = rusqlite::Connection::open(&path).expect("open kv db");
+    let conn = rusqlite::Connection::open(&path)?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
-    )
-    .expect("init kv table");
-    conn
+    )?;
+    Ok(conn)
 }
 
 // ---------------------------------------------------------------------------
@@ -1662,10 +2283,7 @@ fn open_kv_db(name: &str) -> rusqlite::Connection {
 async fn proxy_app(
     State(state): State<AppState>,
     AxumPath(params): AxumPath<HashMap<String, String>>,
-    method: Method,
-    headers: HeaderMap,
-    uri: Uri,
-    body: Body,
+    request: axum::http::Request<Body>,
 ) -> Result<Response, (StatusCode, String)> {
     let name = params
         .get("name")
@@ -1674,58 +2292,111 @@ async fn proxy_app(
     let p = state
         .plugin(&name)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
-    let port = p.port.ok_or_else(|| {
+    let pre = p.http_pre.as_ref().ok_or_else(|| {
         (
             StatusCode::BAD_REQUEST,
-            format!("plugin {name} is not an executable (no inbound HTTP)"),
+            format!("plugin {name} has no wasi:http incoming handler"),
         )
     })?;
-
     let path = params.get("path").cloned().unwrap_or_default();
-    tracing::info!("proxy_app plugin={name} path={path}");
-    let target = format!(
-        "http://127.0.0.1:{port}/{}{}",
-        path,
-        uri.query().map(|q| format!("?{q}")).unwrap_or_default()
-    );
-
+    let (mut parts, body) = request.into_parts();
     let body_bytes = axum::body::to_bytes(body, 32 * 1024 * 1024)
         .await
+        .map_err(|error| (StatusCode::PAYLOAD_TOO_LARGE, error.to_string()))?;
+    let target = format!(
+        "http://plugin.local/{}{}",
+        path,
+        parts
+            .uri
+            .query()
+            .map(|query| format!("?{query}"))
+            .unwrap_or_default()
+    );
+    parts.uri = target
+        .parse()
+        .map_err(|error: axum::http::uri::InvalidUri| {
+            (StatusCode::BAD_REQUEST, error.to_string())
+        })?;
+    parts.headers.remove(header::HOST);
+    let guest_request =
+        axum::http::Request::from_parts(parts, http_body_util::Full::new(body_bytes));
+
+    use wasmtime_wasi_http::p2::bindings::http::types::Scheme;
+    let mut store = create_store(&state.engine, p.as_ref())
+        .await
         .map_err(internal)?;
-
-    let mut req = reqwest::Client::new()
-        .request(method, &target)
-        .body(body_bytes);
-    for (k, v) in headers.iter() {
-        if k != axum::http::header::HOST {
-            req = req.header(k, v);
+    let incoming_request = store
+        .data_mut()
+        .http()
+        .new_incoming_request(Scheme::Http, guest_request)
+        .map_err(internal)?;
+    let (response_sender, response_receiver) = tokio::sync::oneshot::channel();
+    let response_outparam = store
+        .data_mut()
+        .http()
+        .new_response_outparam(response_sender)
+        .map_err(internal)?;
+    let pre = pre.clone();
+    let task = tokio::spawn(async move {
+        let proxy = pre.instantiate_async(&mut store).await?;
+        proxy
+            .wasi_http_incoming_handler()
+            .call_handle(&mut store, incoming_request, response_outparam)
+            .await?;
+        Ok::<(), wasmtime::Error>(())
+    });
+    let timeout_ms = p.manifest.permissions.resources.timeout_ms.unwrap_or(30000);
+    let guest_response = match tokio::time::timeout(
+        std::time::Duration::from_millis(timeout_ms),
+        response_receiver,
+    )
+    .await
+    {
+        Ok(Ok(Ok(response))) => response,
+        Ok(Ok(Err(error))) => return Err(internal(error)),
+        Ok(Err(_)) => {
+            let error = task
+                .await
+                .map_err(internal)?
+                .err()
+                .map(|error| error.to_string())
+                .unwrap_or_else(|| "guest did not set HTTP response".to_string());
+            return Err((StatusCode::BAD_GATEWAY, error));
         }
-    }
-    let resp = req.send().await.map_err(internal)?;
-
-    let status = resp.status();
-    let resp_headers = resp.headers().clone();
-    let bytes = resp.bytes().await.map_err(internal)?;
-
-    let mut builder = Response::builder().status(status);
-    for (k, v) in resp_headers.iter() {
-        // Let hyper recompute framing from the buffered body.
-        if k == axum::http::header::CONTENT_LENGTH
-            || k == axum::http::header::TRANSFER_ENCODING
-            || k == axum::http::header::CONNECTION
-        {
-            continue;
+        Err(_) => {
+            task.abort();
+            return Err((
+                StatusCode::GATEWAY_TIMEOUT,
+                "plugin request timed out".to_string(),
+            ));
         }
-        builder = builder.header(k, v);
-    }
-    builder
-        .body(Body::from(bytes))
-        .map_err(|e| internal(e.to_string()))
+    };
+    let (parts, body) = guest_response.into_parts();
+    Ok(Response::from_parts(parts, Body::new(body)))
 }
 
 // ---------------------------------------------------------------------------
 // Startup
 // ---------------------------------------------------------------------------
+
+fn compilation_cache() -> Option<wasmtime::Cache> {
+    let dir = std::env::var_os("OWASIDEA_WASMTIME_CACHE")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("OWASIDEA_DATA_DIR")
+                .map(|dir| PathBuf::from(dir).join("wasmtime-cache"))
+        })
+        .unwrap_or_else(|| std::env::temp_dir().join("owasidea-wasmtime-cache"));
+    let mut cache_config = wasmtime::CacheConfig::new();
+    cache_config.with_directory(dir);
+    match wasmtime::Cache::new(cache_config) {
+        Ok(cache) => Some(cache),
+        Err(error) => {
+            tracing::warn!("wasmtime compilation cache disabled: {error}");
+            None
+        }
+    }
+}
 
 fn load_manifests(dir: &Path) -> Result<Vec<(Manifest, PathBuf)>> {
     let mut out = Vec::new();
@@ -1743,46 +2414,31 @@ fn load_manifests(dir: &Path) -> Result<Vec<(Manifest, PathBuf)>> {
     Ok(out)
 }
 
-fn next_free_port(start: u16) -> u16 {
-    for port in start..start + 100 {
-        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
-            return port;
-        }
+fn validate_plugin_name(name: &str) -> Result<()> {
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        anyhow::bail!("invalid plugin name {name:?}");
     }
-    start
+    Ok(())
 }
 
-fn spawn_executable(_manifest: &Manifest, component: &Path, port: u16) -> Result<Child> {
-    let wasmtime = std::env::var("WASMTIME_BIN").unwrap_or_else(|_| {
-        format!(
-            "{}/.wasmtime/bin/wasmtime",
-            std::env::var("HOME").unwrap_or_default()
-        )
-    });
-    let child = Command::new(&wasmtime)
-        .args([
-            "serve",
-            "-S",
-            "common",
-            "-S",
-            "http",
-            "--addr",
-            &format!("127.0.0.1:{port}"),
-        ])
-        .arg(component)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| anyhow!("failed to spawn {wasmtime}: {e}"))?;
-
-    // Best-effort wait for the port to accept connections.
-    for _ in 0..50 {
-        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            return Ok(child);
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
+fn validate_ui_entry(entry: &str) -> Result<()> {
+    let path = Path::new(entry);
+    if entry.is_empty()
+        || path.is_absolute()
+        || !entry
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-/".contains(&byte))
+        || path
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+    {
+        anyhow::bail!("UI plugin entry must be a safe relative path: {entry:?}");
     }
-    Ok(child)
+    Ok(())
 }
 
 pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
@@ -1797,13 +2453,110 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
     config.wasm_component_model(true);
     // Enable fuel-based execution metering (manifest resources.max_fuel).
     config.consume_fuel(true);
+    // Compiling a Go/JS/C# component takes ~0.3-1.2 s. Persist the compiled
+    // artifact so restarts and `owasidea dev` reloads do not pay it again.
+    config.cache(compilation_cache());
     let engine = Engine::new(&config)?;
 
     let mut plugins = HashMap::new();
-    let mut next_port = 9100u16;
+    let mut ui_plugins = Vec::new();
+    let mut seen_plugins = HashSet::new();
+
+    // Component compilation is CPU-bound and dominates startup. Compile every
+    // headless plugin once, concurrently, and reuse the result for all calls.
+    let startup_started = std::time::Instant::now();
+    let mut compiled = HashMap::new();
+    {
+        let mut jobs = Vec::new();
+        for (manifest, manifest_path) in &loaded {
+            if manifest.runtime.as_deref() == Some("js-wasm") {
+                continue;
+            }
+            let component_path = manifest_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(&manifest.component);
+            if !component_path.exists() {
+                return Err(anyhow!(
+                    "component not found at {:?} for plugin {}",
+                    component_path,
+                    manifest.name
+                ));
+            }
+            let engine = engine.clone();
+            let manifest = manifest.clone();
+            let name = manifest.name.clone();
+            jobs.push((
+                name,
+                tokio::task::spawn_blocking(move || {
+                    verify_and_compile_component(&engine, &manifest, &component_path)
+                }),
+            ));
+        }
+        for (name, job) in jobs {
+            let component = job
+                .await
+                .with_context(|| format!("component compilation task failed for {name}"))??;
+            compiled.insert(name, component);
+        }
+    }
 
     for (manifest, manifest_path) in loaded {
+        validate_plugin_name(&manifest.name)?;
+        if !seen_plugins.insert(manifest.name.clone()) {
+            anyhow::bail!("duplicate plugin manifest for {}", manifest.name);
+        }
         if manifest.runtime.as_deref() == Some("js-wasm") {
+            let ui = manifest.metadata.get("ui").ok_or_else(|| {
+                anyhow!("js-wasm plugin {} is missing metadata.ui", manifest.name)
+            })?;
+            let entry = ui
+                .get("entry")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "js-wasm plugin {} is missing metadata.ui.entry",
+                        manifest.name
+                    )
+                })?;
+            validate_ui_entry(entry)?;
+            let files: std::collections::BTreeMap<String, String> =
+                serde_json::from_value(ui.get("files").cloned().unwrap_or_default())
+                    .with_context(|| format!("invalid UI file list for {}", manifest.name))?;
+            if files.is_empty() || !files.contains_key(entry) {
+                anyhow::bail!(
+                    "UI plugin {} must list entry in metadata.ui.files",
+                    manifest.name
+                );
+            }
+            for (path, digest) in &files {
+                validate_ui_entry(path)?;
+                if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    anyhow::bail!("invalid UI asset digest for {}: {path}", manifest.name);
+                }
+            }
+            let sha256 = ui
+                .get("sha256")
+                .and_then(serde_json::Value::as_str)
+                .filter(|digest| {
+                    digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit())
+                })
+                .ok_or_else(|| {
+                    anyhow!(
+                        "UI plugin {} is missing a valid bundle digest",
+                        manifest.name
+                    )
+                })?
+                .to_string();
+            verify_manifest_signature(&manifest, &[])?;
+            ui_plugins.push(UiPluginInfo {
+                name: manifest.name.clone(),
+                version: manifest.version.clone(),
+                language: manifest.language.clone(),
+                entry: format!("plugins/{}/{}", manifest.name, entry),
+                sha256,
+                files,
+            });
             tracing::info!(
                 "skipping js-wasm plugin {} (served by the webview UI, not Wasmtime)",
                 manifest.name
@@ -1824,58 +2577,65 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
             ));
         }
 
-        // Capability check: every host import the component uses must be
-        // declared in the manifest. (The generated manifest is derived from
-        // the component WIT, so this normally cannot fail; it protects against
-        // hand-edited manifests.)
-        for required in ["poc:host/host-kv", "poc:host/host-log"] {
-            let declared = manifest
-                .imports
-                .host
-                .iter()
-                .any(|h| h.starts_with(required));
-            if !declared {
-                // Only enforce if the component actually imports it. We detect
-                // this by trying to instantiate below; a missing declaration
-                // manifests as a linker error, which we surface clearly.
-                let _ = required;
-            }
-        }
-
+        let component = compiled.remove(&manifest.name).ok_or_else(|| {
+            anyhow!(
+                "component for plugin {} was not compiled at startup",
+                manifest.name
+            )
+        })?;
         let runtime = PluginRuntime {
             manifest: manifest.clone(),
             manifest_path: manifest_path.clone(),
-            component_path: component_path.clone(),
-            kv: Arc::new(std::sync::Mutex::new(open_kv_db(&manifest.name))),
-            logs: Arc::new(Mutex::new(Vec::new())),
-            child: None,
-            port: None,
+            component,
+            kv: Arc::new(std::sync::Mutex::new(open_kv_db(
+                manifest
+                    .permissions
+                    .kv
+                    .as_ref()
+                    .map(|permission| permission.namespace.as_str())
+                    .unwrap_or(&manifest.name),
+            )?)),
+            logs: Arc::new(Mutex::new(LogBuffer::default())),
+            instance_slots: instance_slots(&manifest)?,
+            http_pre: None,
         };
 
         let mut runtime = runtime;
 
-        if manifest.kind == "executable" || manifest.kind == "hybrid" {
-            let port = next_free_port(next_port);
-            next_port = port + 1;
-            let child = spawn_executable(&manifest, &component_path, port)?;
-            runtime.child = Some(child);
-            runtime.port = Some(port);
-        } else {
-            // Smoke test library plugins now so bad manifests fail fast.
-            instantiate(&engine, &runtime)
-                .await
-                .with_context(|| format!("startup smoke test failed for {}", manifest.name))?;
-        }
+        runtime.http_pre = prepare_http_plugin(&engine, &runtime)
+            .with_context(|| format!("HTTP preparation failed for {}", manifest.name))?;
+        // Instantiate every WASI component at startup so bad imports/policies
+        // fail fast, including executable plugins served by the embedded host.
+        instantiate(&engine, &runtime)
+            .await
+            .with_context(|| format!("startup smoke test failed for {}", manifest.name))?;
 
         plugins.insert(manifest.name.clone(), std::sync::Arc::new(runtime));
     }
 
+    println!(
+        "loaded {} plugins in {} ms",
+        plugins.len(),
+        startup_started.elapsed().as_millis()
+    );
+
     let state = AppState {
         engine,
         plugins: Arc::new(std::sync::RwLock::new(plugins)),
+        ui_plugins: Arc::new(ui_plugins),
         tailcat_session: Arc::new(Mutex::new(None)),
+        services: Arc::new(Mutex::new(HashMap::new())),
         requests: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         errors: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        dev_mode: std::env::var("OWASIDEA_DEV_MODE")
+            .is_ok_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes")),
+        dev_hot_reload: std::env::var("OWASIDEA_DEV_HOT_RELOAD")
+            .is_ok_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes")),
+        dev_watch_paths: std::env::var("OWASIDEA_DEV_WATCH_PATHS")
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default(),
+        dev_last_reload: Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
     };
 
     async fn count_requests(
@@ -1886,11 +2646,37 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
         state
             .requests
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let reload_plugin = req
+            .uri()
+            .path()
+            .split('/')
+            .filter(|part| !part.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
         let resp = next.run(req).await;
         if resp.status().is_client_error() || resp.status().is_server_error() {
             state
                 .errors
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        if state.dev_mode
+            && reload_plugin.len() == 3
+            && reload_plugin[0] == "plugin"
+            && reload_plugin[2] == "reload"
+        {
+            if let Ok(mut records) = state.dev_last_reload.write() {
+                records.insert(
+                    reload_plugin[1].to_string(),
+                    ReloadStatus {
+                        ok: resp.status().is_success(),
+                        http_status: resp.status().as_u16(),
+                        timestamp_unix: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs(),
+                    },
+                );
+            }
         }
         resp
     }
@@ -1899,7 +2685,9 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
         .route("/health", get(health))
         .route("/overview", get(overview))
         .route("/metrics", get(metrics))
+        .route("/dev/status", get(dev_status))
         .route("/plugins", get(list_plugins))
+        .route("/ui-plugins", get(list_ui_plugins))
         .route("/plugin/{name}/manifest", get(plugin_manifest))
         .route("/plugin/{name}/logs", get(plugin_logs))
         .route("/plugin/{name}/logs/stream", get(plugin_logs_stream))
@@ -1925,7 +2713,7 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
         .route("/app/{name}/{*path}", axum::routing::any(proxy_app))
         .route("/app/{name}/", axum::routing::any(proxy_app))
         .route("/app/{name}", axum::routing::any(proxy_app))
-        .layer(tower_http::cors::CorsLayer::permissive())
+        .layer(cors_layer()?)
         .layer(middleware::from_fn_with_state(
             state.clone(),
             count_requests,
@@ -1936,17 +2724,119 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
     let local_addr = listener.local_addr()?;
     tracing::info!("listening on http://{}", local_addr);
     println!("host listening on http://{}", local_addr);
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn manifest_deserializes() {
         let raw = r#"{"name":"x","version":"0.1.0","language":"rust","abi":"wasi-0.2","runtime":"wasi-component","type":"library","component":"x.wasm","exports":[],"imports":{"wasi":[],"host":[],"plugins":[]},"permissions":{},"state":{},"composition":{},"metadata":{}}"#;
         let m: Manifest = serde_json::from_str(raw).unwrap();
         assert_eq!(m.name, "x");
+    }
+
+    #[test]
+    fn socket_policy_denies_undeclared_destinations_and_bind_addresses() {
+        let outbound = HashSet::from(["203.0.113.10".parse::<IpAddr>().unwrap()]);
+        let inbound = HashSet::from(["127.0.0.1".parse::<IpAddr>().unwrap()]);
+        assert!(socket_address_allowed(
+            "203.0.113.10:443".parse().unwrap(),
+            SocketAddrUse::TcpConnect,
+            &outbound,
+            &inbound,
+        ));
+        assert!(!socket_address_allowed(
+            "203.0.113.11:443".parse().unwrap(),
+            SocketAddrUse::TcpConnect,
+            &outbound,
+            &inbound,
+        ));
+        assert!(socket_address_allowed(
+            "127.0.0.1:8080".parse().unwrap(),
+            SocketAddrUse::TcpBind,
+            &outbound,
+            &inbound,
+        ));
+        assert!(!socket_address_allowed(
+            "0.0.0.0:8080".parse().unwrap(),
+            SocketAddrUse::TcpBind,
+            &outbound,
+            &inbound,
+        ));
+    }
+
+    #[test]
+    fn plugin_log_buffer_is_bounded_and_truncates_messages() {
+        let mut logs = LogBuffer::default();
+        for id in 0..=MAX_LOG_ENTRIES {
+            logs.push(format!("log-{id}"));
+        }
+        assert_eq!(logs.entries.len(), MAX_LOG_ENTRIES);
+        assert_eq!(logs.entries.front().unwrap().0, 2);
+        assert_eq!(logs.entries.back().unwrap().0, (MAX_LOG_ENTRIES + 1) as u64);
+
+        logs.push("x".repeat(MAX_LOG_CHARS + 10));
+        assert_eq!(
+            logs.entries.back().unwrap().1.chars().count(),
+            MAX_LOG_CHARS
+        );
+    }
+
+    #[test]
+    fn plugin_signature_payload_covers_manifest_permissions_and_component() {
+        let raw = r#"{"name":"x","version":"0.1.0","language":"rust","abi":"wasi-0.2","runtime":"wasi-component","type":"library","component":"x.wasm","exports":[],"imports":{"wasi":[],"host":[],"plugins":[]},"permissions":{},"state":{},"composition":{},"metadata":{"sha256":"abc"}}"#;
+        let mut manifest: Manifest = serde_json::from_str(raw).unwrap();
+        let original = signed_manifest_payload(&manifest, b"component bytes").unwrap();
+        manifest
+            .permissions
+            .network
+            .outbound
+            .push("example.com".to_string());
+        let changed_policy = signed_manifest_payload(&manifest, b"component bytes").unwrap();
+        let changed_component = signed_manifest_payload(&manifest, b"changed component").unwrap();
+        assert_ne!(original, changed_policy);
+        assert_ne!(changed_policy, changed_component);
+    }
+
+    #[test]
+    fn ed25519_signature_authenticates_manifest_and_component() {
+        use base64::Engine;
+        use ring::signature::{Ed25519KeyPair, KeyPair};
+        let raw = r#"{"name":"signed","version":"1.0.0","language":"rust","abi":"wasi-0.2","runtime":"wasi-component","type":"library","component":"signed.wasm","exports":[],"imports":{"wasi":[],"host":[],"plugins":[]},"permissions":{"filesystem":[],"http":{"outbound":[],"inbound":false},"network":{"outbound":[],"inbound":[]},"kv":null,"resources":{"max_memory_mb":64,"max_fuel":1000000,"timeout_ms":5000,"max_instances":1}},"state":{"persistent":false,"storage":"none","root":null},"composition":{"strategy":"build-time","entry":false},"metadata":{"sha256":"hash","signature_format":"owasidea-manifest-v1"}}"#;
+        let mut manifest: Manifest = serde_json::from_str(raw).unwrap();
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();
+        let pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+        let payload = signed_manifest_payload(&manifest, b"artifact").unwrap();
+        let signature = pair.sign(&payload);
+        manifest.metadata["signature"] =
+            serde_json::json!(base64::engine::general_purpose::STANDARD.encode(signature.as_ref()));
+        assert!(verify_signature_with_key(
+            &manifest,
+            b"artifact",
+            pair.public_key().as_ref(),
+            signature.as_ref(),
+        )
+        .is_ok());
+
+        manifest
+            .permissions
+            .network
+            .outbound
+            .push("attacker.example".to_string());
+        assert!(verify_signature_with_key(
+            &manifest,
+            b"artifact",
+            pair.public_key().as_ref(),
+            signature.as_ref(),
+        )
+        .is_err());
     }
 }

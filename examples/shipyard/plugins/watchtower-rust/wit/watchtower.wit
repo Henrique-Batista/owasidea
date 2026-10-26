@@ -1,0 +1,8 @@
+package shipyard:watchtower@0.1.0;
+
+world watchtower {
+    import poc:host/host-log@0.1.0;
+
+    export start-service: func() -> result<string, string>;
+    export service-status: func() -> bool;
+}

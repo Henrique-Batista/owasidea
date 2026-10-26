@@ -36,6 +36,21 @@ python3 scripts/gen-manifest.py \
   --http-outbound example.com --http-outbound 127.0.0.1 \
   --description "Go executable plugin (wasi:http inbound + outbound)"
 
+echo "==> Building heartbeat service plugin"
+pushd plugins/heartbeat >/dev/null
+cargo component build --release
+HEARTBEAT_TARGET_DIR="$(cargo metadata --format-version 1 --no-deps | python3 -c 'import sys,json;print(json.load(sys.stdin)["target_directory"])')"
+popd >/dev/null
+cp "$HEARTBEAT_TARGET_DIR/wasm32-wasip1/release/heartbeat.wasm" \
+   plugins/heartbeat/heartbeat.component.wasm
+
+echo "==> Generating heartbeat manifest"
+python3 scripts/gen-manifest.py \
+  --component plugins/heartbeat/heartbeat.component.wasm \
+  --name heartbeat --version 0.1.0 --language rust --type service \
+  --out manifests/heartbeat.manifest.json \
+  --description "Generic persistent service lifecycle example"
+
 echo "==> Building composed example (notes-client + notes)"
 if [ -d plugins/notes-client ]; then
   pushd plugins/notes-client >/dev/null
@@ -49,4 +64,5 @@ fi
 
 echo "==> Done"
 ls -lh plugins/notes/notes.component.wasm plugins/chat-go/chat-go.component.wasm \
+      plugins/heartbeat/heartbeat.component.wasm \
       plugins/composed/composed.component.wasm 2>/dev/null || true

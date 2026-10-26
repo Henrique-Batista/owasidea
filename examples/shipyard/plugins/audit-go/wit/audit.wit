@@ -1,0 +1,7 @@
+package shipyard:audit@0.1.0;
+
+world audit {
+    import poc:host/host-log@0.1.0;
+
+    export scan: func(dependencies: list<string>) -> string;
+}
