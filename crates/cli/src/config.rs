@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 #[derive(serde::Deserialize, Debug, Default)]
+#[serde(deny_unknown_fields)]
 pub struct AppConfig {
     pub app: Option<AppSection>,
     pub host: Option<HostSection>,
@@ -14,6 +15,18 @@ pub struct AppConfig {
 
 impl AppConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
+        if let Some(app) = &self.app {
+            if let Some(name) = &app.name {
+                if name.trim().is_empty() {
+                    anyhow::bail!("app.name must not be empty");
+                }
+            }
+            if let Some(identifier) = &app.identifier {
+                if identifier.trim().is_empty() {
+                    anyhow::bail!("app.identifier must not be empty");
+                }
+            }
+        }
         if let Some(host) = &self.host {
             if let Some(addr) = &host.addr {
                 validate_socket_addr(addr)?;
@@ -29,17 +42,22 @@ impl AppConfig {
 }
 
 #[derive(serde::Deserialize, Debug, Default)]
+#[serde(deny_unknown_fields)]
 pub struct HostSection {
     #[serde(default)]
     pub addr: Option<String>,
 }
 
 #[derive(serde::Deserialize, Debug, Default)]
+#[serde(deny_unknown_fields)]
 pub struct AppSection {
+    pub name: Option<String>,
     pub version: Option<String>,
+    pub identifier: Option<String>,
 }
 
 #[derive(serde::Deserialize, Debug, Default)]
+#[serde(deny_unknown_fields)]
 pub struct DesktopSection {
     #[serde(default)]
     pub path: Option<String>,
@@ -50,6 +68,7 @@ pub struct DesktopSection {
 }
 
 #[derive(serde::Deserialize, Debug, Default)]
+#[serde(deny_unknown_fields)]
 pub struct DevSection {
     #[serde(default = "default_true")]
     pub watch: bool,
@@ -60,6 +79,7 @@ pub struct DevSection {
 }
 
 #[derive(serde::Deserialize, Debug, Default)]
+#[serde(deny_unknown_fields)]
 pub struct SigningSection {
     #[serde(default)]
     pub key: Option<String>,
@@ -72,12 +92,14 @@ pub struct SigningSection {
 }
 
 #[derive(serde::Deserialize, Debug, Default)]
+#[serde(deny_unknown_fields)]
 pub struct TestSection {
     #[serde(default)]
     pub ui: Vec<String>,
 }
 
 #[derive(serde::Deserialize, Debug, Default, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct SmokeSection {
     #[serde(default)]
     pub calls: Vec<SmokeCall>,
@@ -88,6 +110,7 @@ pub struct SmokeSection {
 }
 
 #[derive(serde::Deserialize, Debug, Default, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct SmokeCall {
     pub plugin: String,
     pub function: String,
@@ -104,6 +127,7 @@ pub struct SmokeCall {
 }
 
 #[derive(serde::Deserialize, Debug, Default, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct SmokeHttp {
     pub path: String,
     #[serde(default)]
@@ -117,11 +141,13 @@ pub struct SmokeHttp {
 }
 
 #[derive(serde::Deserialize, Debug, Default, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct SmokeService {
     pub plugin: String,
 }
 
 #[derive(serde::Deserialize, Debug, Default, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct PluginSection {
     pub path: String,
     pub language: String,
@@ -228,17 +254,47 @@ mod tests {
     }
 
     #[test]
-    fn unknown_fields_do_not_break_loading() {
-        let dir = std::env::temp_dir().join("owasidea-cfg-test-unknown");
+    fn unknown_top_level_field_fails() {
+        let dir = std::env::temp_dir().join("owasidea-cfg-test-unknown-top");
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("wasm-app.toml");
         std::fs::write(
             &path,
-            "[app]\nversion = \"1.2.3\"\nunknown_field = 42\n\n[plugins.demo]\npath = \"plugins/demo\"\nlanguage = \"rust\"\ntype = \"library\"\nextra = \"ignored\"\n",
+            "[app]\nversion = \"1.2.3\"\n\n[unknown_top]\nfoo = 1\n",
         )
         .unwrap();
-        let cfg = read_app_config(&path).unwrap();
-        assert_eq!(cfg.app.unwrap().version.as_deref(), Some("1.2.3"));
+        let err = read_app_config(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown_top") || err.to_string().contains("unknown field")
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn unknown_plugin_field_fails() {
+        let dir = std::env::temp_dir().join("owasidea-cfg-test-unknown-plugin");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("wasm-app.toml");
+        std::fs::write(
+            &path,
+            "[plugins.demo]\npath = \"plugins/demo\"\nlanguage = \"rust\"\ntype = \"library\"\nextra = \"ignored\"\n",
+        )
+        .unwrap();
+        let err = read_app_config(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("extra"), "msg: {msg}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn unknown_top_level_key_fails() {
+        let dir = std::env::temp_dir().join("owasidea-cfg-test-unknown-toplevel");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("wasm-app.toml");
+        std::fs::write(&path, "bogus_top = 1\n").unwrap();
+        let err = read_app_config(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("bogus_top"), "msg: {msg}");
         let _ = std::fs::remove_file(&path);
     }
 }

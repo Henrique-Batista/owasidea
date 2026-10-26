@@ -331,3 +331,22 @@ The command is an argv array, not a shell. It runs in the app root with
 - non-zero build/validation/toolchain error
 - non-zero when `doctor` is missing a required tool
 - non-zero on registry/signature verification failure
+
+## Config schema (v1)
+
+`wasm-app.toml` uses a frozen v1 schema. Unknown fields (top-level or inside
+`[plugins.<name>]`) are rejected with an error naming the key and its
+line/column. All supported fields:
+
+| Section | Field | Type | Notes |
+|---|---|---|---|
+| `[app]` | `name`, `version`, `identifier` | string | app metadata |
+| `[host]` | `addr` | socket addr | host bind address |
+| `[desktop]` | `path`, `ui`, `output` | string | desktop/ui paths |
+| `[signing]` | `key`, `public_key`, `generate`, `require` | string/bool | signing config |
+| `[test]` | `ui` | string[] | UI test command |
+| `[[smoke.calls]]` | `plugin`, `function`, `args`, `expect_contains`, `expect_equals`, `min`, `max` | mixed | smoke calls |
+| `[[smoke.http]]` | `path`, `method`, `body`, `expect_status`, `expect_contains` | mixed | smoke HTTP |
+| `[[smoke.services]]` | `plugin` | string | smoke services |
+| `[plugins.<name>]` | `path`, `language`, `type`, `version`, `fs`, `kv`, `http_outbound`, `network_outbound`, `network_inbound`, `persistent`, `runtime`, `ui_entry`, `ui_build`, `build`, `compose_with` | mixed | plugin config |
+| `[dev]` | `watch`, `hot_reload`, `ui_addr` | bool/string | dev mode |
