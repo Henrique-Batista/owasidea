@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 mod config;
+mod wit_types;
 use config::*;
 use std::collections::HashMap;
 use std::io::IsTerminal;
@@ -1193,7 +1194,6 @@ fn generate_manifest(
     network_inbound: &[String],
     persistent: bool,
 ) -> anyhow::Result<()> {
-    use regex::Regex;
     use serde_json::json;
     use sha2::{Digest, Sha256};
     use std::collections::BTreeSet;
@@ -1301,25 +1301,7 @@ fn generate_manifest(
         }
     }
 
-    // exports via text
-    let text_out = std::process::Command::new("wasm-tools")
-        .args(["component", "wit"])
-        .arg(component)
-        .output()?;
-    let text = String::from_utf8_lossy(&text_out.stdout);
-    let export_re = Regex::new(
-        r"(?m)^\s*export\s+([A-Za-z0-9_-]+)\s*:\s*(?:async\s+)?(func\(.*?\)(?:\s*->\s*[^;]+)?);",
-    )
-    .unwrap();
-    let export_iface_re =
-        Regex::new(r"(?m)^\s*export\s+([A-Za-z0-9:_/-]+(?:@[0-9.]+)?)\s*;").unwrap();
-    let mut exports = Vec::new();
-    for cap in export_re.captures_iter(&text) {
-        exports.push(json!({"name": &cap[1], "signature": cap[2].trim()}));
-    }
-    for cap in export_iface_re.captures_iter(&text) {
-        exports.push(json!({"name": &cap[1], "signature": "interface"}));
-    }
+    let exports = wit_types::extract_exports(&doc);
 
     // abi
     let abi = if wasi.iter().any(|w| w.contains("@0.3.")) {

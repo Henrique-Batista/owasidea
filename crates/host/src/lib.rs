@@ -60,10 +60,30 @@ struct Manifest {
     metadata: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+struct ExportParam {
+    #[serde(default)]
+    name: String,
+    #[serde(rename = "type", default)]
+    ty: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+struct ExportResult {
+    #[serde(default)]
+    name: String,
+    #[serde(rename = "type", default)]
+    ty: String,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct Export {
     name: String,
     signature: String,
+    #[serde(default)]
+    params: Vec<ExportParam>,
+    #[serde(default)]
+    results: Vec<ExportResult>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]

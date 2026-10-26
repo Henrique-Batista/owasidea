@@ -18,6 +18,14 @@ from the generated manifest:
 
 `args` is positional and matches the WIT signature in `exports[].signature`
 (for example `func(version: string, changes: list<string>) -> string`).
+
+Each export also carries structured type information: `exports[].params` is an array of
+`{ "name", "type" }` (in WIT parameter order) and `exports[].results` is an array of
+`{ "name", "type" }` (named results preserve their WIT name; a single unnamed result
+uses `name: "result"`). Supported type spellings: primitives (`bool`, `u8`..`u64`,
+`s8`..`s64`, `f32`, `f64`, `char`, `string`), `list<T>`, `option<T>`, `result<T,E>`
+(`_` for a void side, bare `result` when both are void), `tuple<...>`, `record <name>`,
+`enum <name>`, `flags <name>`, `variant <name>`, `resource`, and `handle`.
 The host converts each JSON value to the WIT type and rejects arity/type
 mismatches with HTTP 400. The response is `{ "result": ... }` for a single
 return value or `{ "results": [...] }` for multiple values; `result`/`results`
