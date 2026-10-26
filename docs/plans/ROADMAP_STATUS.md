@@ -32,9 +32,9 @@ Status permitidos: `todo`, `doing`, `review`, `done`, `blocked`.
 | B0.5 | done | — | 150fac8 (merge 2af19d0) | fmt/clippy/test verdes | seam de configuração |
 | B0.6 | done | wt-config | 408731e (merge 50583c1) | fmt/clippy/test verdes | schema v1 + `deny_unknown_fields` + docs/CLI.md |
 | B0.7 | done | wt-authoring | cadc41e (merge e6e85a8) | fmt/check verdes | convenções de módulos em AGENTS.md/ARCHITECTURE.md |
-| RF-01 | todo | — | — | — | — |
-| RF-02 | todo | — | — | — | — |
-| RF-03 | todo | — | — | — | — |
+| RF-01 | done | wt-host | 244042b (merge 818e197) | fmt/clippy/test + Shipyard build | valida addr/ui_addr/paths; porta 0 só bloqueada no bundle |
+| RF-02 | done | wt-config | 0d238a2 (merge 0f13255) | fmt/clippy/test + render/--check no Shipyard | `config render` runtime/tauri/playwright |
+| RF-03 | done | wt-authoring | db75c0e (merge f55f6f8) | REV + SEC aprovaram | ADR-0003 Accepted: initialization script + runtime.json |
 | RF-04 | todo | — | — | — | — |
 | RF-05 | todo | — | — | — | — |
 | RF-06 | todo | — | — | — | — |
@@ -49,7 +49,7 @@ Status permitidos: `todo`, `doing`, `review`, `done`, `blocked`.
 | DL-06 | todo | — | — | — | — |
 | DL-07 | todo | — | — | — | — |
 | DL-08 | todo | — | — | — | — |
-| CT-01 | todo | — | — | — | — |
+| CT-01 | done | wt-contracts | 06bd591 (merge ed25c20) | fmt/clippy/test isolado + Shipyard build | `params`/`results` estruturados; interface exports preservados |
 | CT-02 | todo | — | — | — | — |
 | CT-03 | todo | — | — | — | — |
 | CT-04 | todo | — | — | — | — |
