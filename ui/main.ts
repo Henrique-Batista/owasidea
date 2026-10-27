@@ -74,6 +74,7 @@ async function renderOverview() {
   view.innerHTML = `${skewBanner}<h1>Overview</h1>
     <div class="card">
       <p>host: ${health}</p>
+      <p>host_url: ${escapeHtml(HOST)}</p>
       <p>plugins: ${ov.plugins ?? 0} (libraries: ${ov.libraries ?? 0}, executables: ${ov.executables ?? 0}, services: ${ov.services ?? 0})</p>
       <p>runtimes: ${(ov.runtimes || []).map(escapeHtml).join(', ')}</p>
       <p>build_id: ${escapeHtml(buildId ?? 'n/a')}</p>
@@ -93,6 +94,7 @@ async function renderPluginDetail(name: string) {
   const logs = await fetch(`${HOST}/plugin/${encodedName}/logs`).then(r => r.json()).catch(() => ({ logs: [] }));
   const exports = (manifest.exports || []).filter((exp: any) => exp.signature !== 'interface');
   let html = `<h1>Plugin: ${escapeHtml(name)}</h1>
+    <button data-reload="1">reload plugin</button>
     <div class="card"><h2>Manifest</h2><pre>${escapeHtml(JSON.stringify(manifest, null, 2))}</pre></div>
     <div class="card"><h2>Exports</h2>`;
   for (const exp of (manifest.exports || [])) {
@@ -106,7 +108,6 @@ async function renderPluginDetail(name: string) {
         const lower = t.toLowerCase();
         const isBool = lower === 'bool' || lower === 'boolean';
         const isNumber = /^(i|u|f)\d*$/.test(lower) || lower.includes('int') || lower.includes('float') || lower.includes('double') || lower === 'number';
-        const isComplex = !isBool && !isNumber && lower !== 'string' && lower !== 'str' && lower !== 'char';
         const common = `data-param="${escapeHtml(p.name)}" data-input="${escapeHtml(p.name)}" name="${escapeHtml(p.name)}"`;
         html += `<label style="display:block;margin:0.35rem 0">${escapeHtml(p.name)} <small>(${escapeHtml(t)})</small><br/>`;
         if (isBool) {
