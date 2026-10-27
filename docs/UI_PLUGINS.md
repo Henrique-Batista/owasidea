@@ -143,3 +143,19 @@ iframe with an integrity error.
 - UI plugins receive no WASI, KV, filesystem, socket, or native capabilities.
 - Keep each plugin's bundle self-contained: relative asset URLs (`base: './'`)
   and no cross-origin runtime fetches unless the Tauri CSP allows them.
+
+## Generic invocation forms (CT-04)
+
+The dashboard derives one form per WIT export listed in a plugin manifest, ignoring
+entries whose `signature` is `interface`. Each declared `param` becomes a field:
+
+- `bool` -> checkbox
+- integer/float types -> number input
+- `string` -> text input
+- `list`, `option`, `result`, `tuple`, `record`, `enum`, `flags`, `variant` -> textarea
+  expecting a JSON value, with the WIT type shown as a hint
+
+Fields are labelled with the parameter `name`. The Invoke button validates arity and
+client-side types, calls `POST /plugin/{name}/call`, and shows the returned
+`result`/`results`, HTTP status/body on error, and latency in milliseconds.
+fetch and curl snippets are generated from the submitted arguments.
