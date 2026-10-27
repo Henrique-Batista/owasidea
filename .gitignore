@@ -9,6 +9,7 @@ ui/public/plugins/
 ui/public/ui-plugins.json
 ui/.owasidea/
 manifests/*.manifest.json
+manifests/permissions.*.json
 data/
 test-results/
 .DS_Store
