@@ -78,3 +78,38 @@ fn wit_generate_refuses_to_write_into_source() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains(".owasidea/wit"), "stderr: {stderr}");
 }
+
+#[test]
+fn rust_scaffold_has_no_wit_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("wasm-app.toml");
+    let output = Command::cargo_bin("owasidea")
+        .unwrap()
+        .args(["init"])
+        .arg(dir.path())
+        .args(["--preset", "minimal"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let output = Command::cargo_bin("owasidea")
+        .unwrap()
+        .args(["--config"])
+        .arg(&config)
+        .args(["plugin", "new", "demo", "--lang", "rust"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let plugin = dir.path().join("plugins/demo");
+    assert!(!plugin.join("wit").exists());
+    assert!(plugin.join(".owasidea/wit/demo.wit").is_file());
+    let generated = fs::read_to_string(plugin.join(".owasidea/wit/demo.wit")).unwrap();
+    assert!(generated.contains("export greet: func(name: string) -> string;"));
+    let config_raw = fs::read_to_string(&config).unwrap();
+    assert!(config_raw.contains("wit_source = \"attributes\""));
+}
