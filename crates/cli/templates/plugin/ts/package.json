@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "jco componentize src/index.ts --wit wit --world-name {{name}} -o {{name}}.component.wasm"
+    "build": "jco componentize src/index.ts --wit .owasidea/wit --world-name {{name}} -o {{name}}.component.wasm"
   },
   "devDependencies": {
     "@bytecodealliance/jco": "1.39.0",

@@ -1988,3 +1988,73 @@ fn tui_and_dev_document_no_tui_fallback() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("--no-tui"));
 }
+
+#[test]
+fn doctor_platform_windows_plan_uses_winget_and_no_sudo() {
+    let mut cmd = Command::cargo_bin("owasidea").unwrap();
+    let output = cmd
+        .args([
+            "doctor",
+            "--install-all",
+            "--platform",
+            "windows",
+            "--force",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let plan: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(plan["platform"], "windows");
+    assert_eq!(plan["dry_run"], true);
+    let entries = plan["entries"].as_array().unwrap();
+    let command = |tool: &str| {
+        entries
+            .iter()
+            .find(|entry| entry["tool"] == tool)
+            .and_then(|entry| entry["command"].as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert!(command("rustc").contains("winget install --id Rustlang.Rustup"));
+    assert!(command("go").contains("winget install --id GoLang.Go"));
+    assert!(command("node").contains("OpenJS.NodeJS.LTS"));
+    assert!(command("componentize-go").contains("go install"));
+    assert!(command("jco").contains("npm install -g @bytecodealliance/jco"));
+    // npm is covered by the Node installer, and no command needs sudo.
+    assert!(command("npm").is_empty());
+    for entry in entries {
+        if let Some(command) = entry["command"].as_str() {
+            assert!(!command.contains("sudo"), "unexpected sudo: {command}");
+        }
+    }
+    assert_eq!(command("wasi-sdk"), "owasidea doctor --install-wasi-sdk");
+}
+
+#[test]
+fn doctor_platform_unknown_fails() {
+    let mut cmd = Command::cargo_bin("owasidea").unwrap();
+    let output = cmd
+        .args(["doctor", "--platform", "solaris", "--json"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unknown platform"), "stderr: {stderr}");
+}
+
+#[test]
+fn doctor_platform_execution_is_refused_cross_platform() {
+    let mut cmd = Command::cargo_bin("owasidea").unwrap();
+    let output = cmd
+        .args(["doctor", "--install-all", "--platform", "windows", "--yes"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("planning preview"), "stderr: {stderr}");
+}

@@ -31,12 +31,16 @@ world = "<name>"
 
 | Value | Behavior |
 | --- | --- |
-| `attributes` | Render the contract from markers; no WIT file is read or committed. |
+| `attributes` | Render the contract from markers into `.owasidea/wit`; no WIT file is read or committed. Works for Rust, Go, TypeScript and C#. |
 | `wit` | Use a hand-written `wit/`; if markers exist, the build fails when they diverge. |
 | `auto` (default) | Use `wit/` when it exists, otherwise render from markers. |
 
 A `wit/` directory next to an attribute plugin is an error: remove it or set
-`wit_source = "wit"`. Committing `.owasidea/wit` is never necessary.
+`wit_source = "wit"`. Committing `.owasidea/wit` is never necessary. Go uses
+`// owasidea:world` / `// owasidea:export`; TypeScript uses the `@owasidea-*`
+JSDoc tags; C# uses `[OwasideaWorld("library")]` and `[OwasideaExport]` plus
+`Attributes.cs`. C and C++ still use `wit/` (the generator can emit it from
+their marker comments).
 
 The attribute mapper covers scalars, `String`/`&str`, `Vec`, slices, arrays,
 `Option`, `Result`, tuples, `Box`/`Arc`/`Rc`, and kebab-cased named types. Rust

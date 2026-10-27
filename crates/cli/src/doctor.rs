@@ -79,6 +79,17 @@ impl Os {
     }
 }
 
+impl Os {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "linux" => Some(Self::Linux),
+            "macos" | "mac" | "darwin" => Some(Self::Macos),
+            "windows" | "win" => Some(Self::Windows),
+            _ => None,
+        }
+    }
+}
+
 pub fn detect_os() -> Os {
     if cfg!(target_os = "linux") {
         Os::Linux
@@ -248,6 +259,40 @@ fn probe_command(program: &str, args: &[&str]) -> Option<String> {
     Some(text)
 }
 
+/// PATH additions for tools installed during this doctor run. Windows does
+/// not update the parent process PATH when an installer finishes, so probes and
+/// follow-up installers must see the usual install locations explicitly.
+#[cfg(windows)]
+pub fn windows_path() -> Option<std::ffi::OsString> {
+    let mut dirs = Vec::new();
+    let mut push = |base: Option<std::ffi::OsString>, rel: &str| {
+        if let Some(base) = base {
+            dirs.push(std::path::PathBuf::from(base).join(rel));
+        }
+    };
+    let user = std::env::var_os("USERPROFILE");
+    let appdata = std::env::var_os("APPDATA");
+    let local = std::env::var_os("LOCALAPPDATA");
+    let program_files = std::env::var_os("ProgramFiles");
+    push(user.clone(), ".cargo/bin");
+    push(user, "go/bin");
+    push(appdata.clone(), "npm");
+    push(program_files.clone(), "nodejs");
+    push(program_files.clone(), "dotnet");
+    push(program_files.clone(), "Go/bin");
+    push(local.clone(), "Programs/Go/bin");
+    push(local, "Microsoft/WinGet/Links");
+    if let Some(path) = std::env::var_os("PATH") {
+        dirs.extend(std::env::split_paths(&path));
+    }
+    std::env::join_paths(dirs).ok()
+}
+
+#[cfg(not(windows))]
+pub fn windows_path() -> Option<std::ffi::OsString> {
+    None
+}
+
 fn probe_process(program: &str) -> std::process::Command {
     #[cfg(windows)]
     {
@@ -259,7 +304,11 @@ fn probe_process(program: &str) -> std::process::Command {
             return command;
         }
     }
-    std::process::Command::new(program)
+    let mut command = std::process::Command::new(program);
+    if let Some(path) = windows_path() {
+        command.env("PATH", path);
+    }
+    command
 }
 
 fn probe_spec(spec: &ToolSpec, wasi_sdk_present: Option<bool>) -> ToolStatus {
@@ -468,6 +517,7 @@ pub struct Plan {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DoctorOptions {
     pub json: bool,
+    pub platform: Option<String>,
     pub install_wasi_sdk: bool,
     pub fix: bool,
     pub yes: bool,
@@ -488,6 +538,7 @@ impl DoctorOptions {
     /// immediately, then print the normal doctor report.
     pub fn legacy_wasi_sdk_only(&self) -> bool {
         self.install_wasi_sdk
+            && self.platform.is_none()
             && !self.dry_run
             && !self.install_all
             && self.install.is_empty()
@@ -522,7 +573,7 @@ impl DoctorOptions {
         if self.install_wasi_sdk {
             return Some(Selection::tools(vec![WASI_SDK_TOOL.to_string()]));
         }
-        if self.dry_run {
+        if self.platform.is_some() || self.dry_run {
             return Some(Selection::missing_required());
         }
         None
@@ -1334,6 +1385,16 @@ windows = "rustup toolchain install 1.80"
             Some(Selection::all())
         );
         assert!(DoctorOptions::default().selection().is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_path_includes_tool_install_dirs() {
+        let path = windows_path().expect("PATH");
+        let text = path.to_string_lossy().to_lowercase();
+        assert!(text.contains(".cargo"), "{text}");
+        assert!(text.contains("npm"), "{text}");
+        assert!(text.contains("dotnet"), "{text}");
     }
 
     #[test]

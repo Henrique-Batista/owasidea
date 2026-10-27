@@ -11,7 +11,6 @@ pub const INIT_WASM_APP_TOML: &str = include_str!("../templates/init/wasm-app.to
 pub const UI_INDEX_HTML: &str = include_str!("../templates/plugin/ui/index.html");
 pub const UI_README: &str = include_str!("../templates/plugin/ui/README.md");
 
-pub const WIT_SERVICE: &str = include_str!("../templates/plugin/wit/service.wit");
 pub const WIT_LIBRARY: &str = include_str!("../templates/plugin/wit/library.wit");
 
 pub const RUST_CARGO: &str = include_str!("../templates/plugin/rust/Cargo.toml");
@@ -28,10 +27,9 @@ pub const CSHARP_EXECUTABLE_CSPROJ: &str =
     include_str!("../templates/plugin/csharp/executable.csproj");
 pub const CSHARP_PROGRAM_CS: &str = include_str!("../templates/plugin/csharp/Program.cs");
 pub const CSHARP_LIBRARY_CSPROJ: &str = include_str!("../templates/plugin/csharp/library.csproj");
-pub const CSHARP_WIT: &str = include_str!("../templates/plugin/csharp/wit.wit");
-pub const CSHARP_HOST_WIT: &str = include_str!("../templates/plugin/csharp/host.wit");
 pub const CSHARP_IMPL: &str = include_str!("../templates/plugin/csharp/Impl.cs");
 pub const CSHARP_NUGET_CONFIG: &str = include_str!("../templates/plugin/csharp/nuget.config");
+pub const CSHARP_ATTRIBUTES: &str = include_str!("../templates/plugin/csharp/Attributes.cs");
 
 pub const C_WIT: &str = include_str!("../templates/plugin/c/wit.wit");
 pub const C_IMPL: &str = include_str!("../templates/plugin/c/impl.c");

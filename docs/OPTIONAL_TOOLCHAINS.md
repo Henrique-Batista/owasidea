@@ -58,6 +58,7 @@ owasidea doctor --install-all --yes --allow-sudo   # Linux: also run sudo
 owasidea doctor --install jco --install trunk --yes
 owasidea doctor --fix --yes                        # compatibility: required only
 owasidea doctor --install-all --json               # machine-readable plan
+owasidea doctor --install-all --platform windows   # preview another OS
 ```
 
 - `tools.lock` (repository root, or the nearest ancestor) maps a tool name to a
@@ -78,6 +79,10 @@ owasidea doctor --install-all --json               # machine-readable plan
 - `wasi-sdk` has no shell command: the plan uses the built-in downloader. Its
   presence is detected at `/opt/wasi-sdk`, `~/.local/wasi-sdk`,
   `$WASI_SDK_DIR` or `./wasi-sdk`.
+- `--platform <os>` previews another OS plan; execution is refused off that OS.
+- On Windows, winget commands accept the source/package agreements and the
+  installer PATH includes the usual cargo, Go, Node/npm, dotnet and WinGet
+  directories, so a fresh tool is visible to the next command in the same run.
 - A plain `owasidea doctor` (no install flags) only reports; it never installs.
 
 Example entry:

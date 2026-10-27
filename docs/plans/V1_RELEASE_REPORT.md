@@ -220,20 +220,25 @@ apenas um commit inicial (`339d967`, `LICENSE` MIT); a história foi integrada e
 Publicados: `main`, `release/1.0` e a tag `v1.0.0` (recriada no commit final;
 antes apontava para `c4aaf80`, tag local nunca publicada).
 
-## 11. Contratos sem WIT por atributos (Rust)
+## 11. Contratos sem WIT por atributos (Rust, Go, TypeScript, C#)
 
-Objetivo: o desenvolvedor Rust não precisa criar, ler ou versionar arquivos WIT.
+Objetivo: o desenvolvedor não precisa criar, ler ou versionar arquivos WIT.
 
 ### 11.1 O que mudou
 
 - Novo `wit_source` por plugin em `wasm-app.toml`: `auto` (padrão), `wit` ou
   `attributes`. `auto` usa `wit/` quando existe e, caso contrário, gera a partir
   dos marcadores.
-- Marcadores: `#[owasidea::world("<name>")]`, `#[owasidea::export]`,
-  `#[owasidea::host_log]`, `#[owasidea::host_kv]`.
-- O contrato gerado é **artefato**: Rust grava `.owasidea/wit/<world>.wit` e
-  `.owasidea/wit/deps/host/host.wit`; o metadata do `Cargo.toml` aponta para lá.
-  Nada disso é versionado.
+- Marcadores por linguagem: Rust `#[owasidea::world]`/`#[owasidea::export]` e
+  host markers; Go `// owasidea:world`/`// owasidea:export`; TypeScript
+  `@owasidea-world`/`@owasidea-export`; C# `[OwasideaWorld("library")]` +
+  `[OwasideaExport]` (com `Attributes.cs`).
+- O contrato gerado é **artefato**: as quatro linguagens gravam
+  `.owasidea/wit/<world>.wit` e `.owasidea/wit/deps/host/host.wit`. Rust aponta
+  o metadata do `Cargo.toml`; Go passa o diretório ao `componentize-go`; TypeScript
+  usa `jco --wit`; C# usa `<Wit Include>`. Nada disso é versionado. C# usa o
+  package do plugin e o world `library`, com interface `api`, para preservar o
+  formato do componentize-dotnet.
 - `owasidea build` regenera o contrato antes de compilar, sem silenciar erros, e
   poda `*.wit` órfãos quando o world é renomeado.
 - **Drift**: marcadores + `wit/` escrito à mão no mesmo plugin falham o build;
@@ -243,44 +248,65 @@ Objetivo: o desenvolvedor Rust não precisa criar, ler ou versionar arquivos WIT
   `some_arg` → `some-arg`.
 - Tipos cobertos: escalares, `String`/`&str`, `Vec`, slices, arrays, `Option`,
   `Result`, tuplas, `Box`/`Arc`/`Rc` e tipos nomeados em kebab-case.
-- `plugin new --lang rust` cria o plugin **sem** `wit/`, semeia `.owasidea/wit`
-  e registra `wit_source = "attributes"`.
+- `plugin new` cria Rust, Go, TypeScript e C# **sem** `wit/`, semeia
+  `.owasidea/wit`, registra `wit_source = "attributes"` e preenche os marcadores
+  no template. C/C++ continuam com `wit/`.
 - O erro de capability agora mostra o trecho exato de `wasm-app.toml` a adicionar
   (`kv = "<name>:read-write"`) ou o marcador/linha a remover.
 
 ### 11.2 Arquivos principais
 
-- `crates/cli/src/wit_flow.rs` — seleção de fonte, leitura do alvo no Cargo,
-  drift, poda e escrita do artefato.
-- `crates/cli/src/main.rs` — `render_wit_source`/`write_wit`, kebab-case e mapa
-  de tipos Rust.
-- `crates/cli/templates/plugin/rust/*` — template por atributos.
-- `examples/hello` e `plugins/attr-example` — apps migrados, sem `wit/`.
-- `crates/cli/tests/wit_flow.rs` — integração do comando e do scaffold.
+- `crates/cli/src/wit_flow.rs` — seleção de fonte, alvo por linguagem, drift,
+  poda e escrita do artefato.
+- `crates/cli/src/main.rs` — `render_wit_source`/`write_wit`, package/world/interface
+  por linguagem, kebab-case e mapas de tipo.
+- `crates/cli/src/go_build.rs` — `componentize-go` lê o diretório escolhido.
+- `crates/cli/templates/plugin/{rust,go,ts,csharp}/*` — templates por atributos.
+- `examples/hello` e `plugins/attr-example` — apps Rust migrados, sem `wit/`.
+- `crates/cli/tests/wit_flow.rs` — integração do comando e dos scaffolds.
 
 ### 11.3 Evidência
 
 | Gate | Resultado |
 | --- | --- |
-| `cargo test -p owasidea-cli -p owasidea-host` | unit 189, integração 44 + 3 (`wit_flow`), host 34 + 3 + 3, 0 falhas |
+| `cargo test -p owasidea-cli -p owasidea-host` | unit 210, integração 49 + 4 (`wit_flow`), host 34 + 3 + 3, 0 falhas |
 | `examples/hello` | build **sem `wit/`**, smoke 2/2, Playwright 3/3 |
 | `plugins/attr-example` | `owasidea wit generate` + `cargo component build` sem `wit/` |
 | App da raiz (`owasidea build`) | 10 plugins; `attr-example` gerado, demais em modo `wit` |
 | Shipyard (`build` + `smoke --no-build`) | pass; 11 manifests assinados e 19 checks |
-| `scripts/test-templates.sh --langs rust` | template Rust por atributos compila e valida |
+| `scripts/test-templates.sh --langs rust,go,typescript` | templates por atributos compilam e validam |
+| App poliglota temporário (Rust+Go+TS+C#) | build e smoke `greet` nas quatro linguagens; C# com namespace `lCsharp` |
 | Drift | `wit/` legado ao lado de atributos: build rejeitado com mensagem de remoção |
 | Rename de world | `old.wit` gerado é removido; só `<world>.wit` permanece |
 
 ### 11.4 Limites explícitos
 
 - Records, enums, variants, flags e resources ainda **não** são gerados a partir
-  de Rust; esses plugins continuam em `wit_source = "wit"`. O guia
+  de código; esses plugins continuam em `wit_source = "wit"`. O guia
   [`PLUGIN_AUTHORING.md`](../PLUGIN_AUTHORING.md#rust-cargo-component) registra o
   limite.
-- Go, TypeScript, C#, C e C++ continuam usando `wit/`; o gerador por comentários
-  existe, mas o fluxo principal sem WIT desta entrega é Rust.
+- C e C++ continuam usando `wit/`; o gerador por comentários existe, mas os
+  Makefiles/wit-bindgen ainda não apontam para `.owasidea/wit`.
 - No checkout local o template usa uma dependência de path para
   `crates/owasidea`; um CLI publicado deve resolver o crate `owasidea` da mesma
   forma que os demais crates do framework.
 - O CI Windows deste commit ainda não foi observado; a rodada anterior expôs e
   corrigiu problemas de path/ambiente, e estes testes novos são multiplataforma.
+
+## 12. Doctor: instalação de toolchains por plataforma
+
+- `owasidea doctor --install-all` / `--install <tool>` / `--fix` montam um plano
+  a partir de `tools.lock` para 15 ferramentas, em ordem de dependência, com
+  deduplicação. `--dry-run` é o padrão; `--yes`/`--execute` executa;
+  `--allow-sudo` libera comandos com sudo; `--force` replaneja ferramentas já
+  presentes.
+- `--platform linux|macos|windows` permite revisar o plano de outro OS. Planos
+  cross-platform não executam: rodar no OS de destino.
+- Windows: comandos `winget` com `--accept-source-agreements
+  --accept-package-agreements --silent`; PATH de instalação e de probe inclui
+  `%USERPROFILE%\.cargo\bin`, `%USERPROFILE%\go\bin`, `%ProgramFiles%\nodejs`,
+  `%APPDATA%\npm`, `%ProgramFiles%\dotnet`, Go e WinGet Links. O wasi-sdk usa o
+  downloader embutido (arquivo Windows, `clang.exe`).
+- Evidência: `cargo test -p owasidea-cli` cobre o plano Linux/macOS/Windows,
+  deduplicação, sudo, JSON e o preview `--platform windows`; o PATH Windows tem
+  teste `#[cfg(windows)]`. Nenhum instalador real foi executado nesta máquina.

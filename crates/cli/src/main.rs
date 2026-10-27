@@ -102,6 +102,9 @@ enum Commands {
         /// Re-run install commands even when the tool is already present.
         #[arg(long)]
         force: bool,
+        /// Plan for linux, macos or windows. Execution is only allowed on that OS.
+        #[arg(long, value_name = "OS")]
+        platform: Option<String>,
     },
     /// Manage plugins (create new plugins).
     #[command(about = "Manage plugins (create new plugins).")]
@@ -573,6 +576,9 @@ fn shell_command(command: &str) -> std::process::Command {
     {
         let mut cmd = std::process::Command::new("cmd");
         cmd.args(["/C", command]);
+        if let Some(path) = doctor::windows_path() {
+            cmd.env("PATH", path);
+        }
         cmd
     }
     #[cfg(not(windows))]
@@ -844,9 +850,11 @@ async fn main() -> anyhow::Result<()> {
             execute,
             allow_sudo,
             force,
+            platform,
         } => {
             cmd_doctor(doctor::DoctorOptions {
                 json: cli.json,
+                platform,
                 install_wasi_sdk,
                 fix,
                 yes,
@@ -1296,22 +1304,35 @@ async fn cmd_doctor(options: doctor::DoctorOptions) -> anyhow::Result<()> {
     }
 
     if let Some(selection) = options.selection() {
+        let native_os = doctor::detect_os();
+        let os = match options.platform.as_deref() {
+            None => native_os,
+            Some(value) => doctor::Os::parse(value).ok_or_else(|| {
+                anyhow::anyhow!("unknown platform {value:?}: expected linux, macos or windows")
+            })?,
+        };
+        if os != native_os && options.execute() {
+            anyhow::bail!(
+                "--platform is a planning preview; run `owasidea doctor` on {} to execute installs",
+                os.as_str()
+            );
+        }
         let lock = doctor::load_lock(&doctor::lock_path())?;
         let (wasi_sdk, _) = wasi_toolchain();
-        let statuses = doctor::probe_tools(&lock.tools, Some(wasi_sdk.is_some()));
+        // Cross-platform plans must not claim that tools present on this host
+        // are installed on the target OS.
+        let statuses = if os == native_os {
+            doctor::probe_tools(&lock.tools, Some(wasi_sdk.is_some()))
+        } else {
+            Vec::new()
+        };
         let plan_options = doctor::PlanOptions {
             execute: options.execute(),
             allow_sudo: options.allow_sudo,
             force: options.force,
         };
-        let mut plan = doctor::build_plan(
-            &lock,
-            doctor::detect_os(),
-            &statuses,
-            &selection,
-            plan_options,
-        )
-        .map_err(anyhow::Error::msg)?;
+        let mut plan = doctor::build_plan(&lock, os, &statuses, &selection, plan_options)
+            .map_err(anyhow::Error::msg)?;
 
         if !options.json {
             if plan_options.execute {
@@ -1404,7 +1425,9 @@ async fn cmd_doctor(options: doctor::DoctorOptions) -> anyhow::Result<()> {
         if options.json {
             println!("{}", serde_json::to_string_pretty(&plan)?);
         }
-        if !plan.summary.ok {
+        // A dry-run is a preview: producing the plan is success. Only an
+        // actual install run fails when required tools remain missing.
+        if !plan.summary.ok && plan_options.execute {
             std::process::exit(1);
         }
         return Ok(());
@@ -1795,13 +1818,11 @@ fn cmd_plugin_new(
             wit_flow::generate(&dir, &name, "rust", "0.1.0")?;
         }
         "go" => {
-            let wit = if kind == "service" {
-                templates::render(templates::WIT_SERVICE, &[("name", &name)])
-            } else {
-                templates::render(templates::WIT_LIBRARY, &[("name", &name)])
-            };
-            std::fs::create_dir_all(dir.join("wit"))?;
-            std::fs::write(dir.join("wit").join(format!("{name}.wit")), wit)?;
+            if kind == "executable" {
+                let wit = templates::render(templates::WIT_LIBRARY, &[("name", &name)]);
+                std::fs::create_dir_all(dir.join("wit"))?;
+                std::fs::write(dir.join("wit").join(format!("{name}.wit")), wit)?;
+            }
             std::fs::write(
                 dir.join("go.mod"),
                 templates::render(templates::GO_MOD, &[("name", &name)]),
@@ -1811,17 +1832,18 @@ fn cmd_plugin_new(
             std::fs::create_dir_all(dir.join("export_wit_world"))?;
             std::fs::write(
                 dir.join("export_wit_world").join("wit_bindings.go"),
-                templates::GO_EXPORT_IMPL,
+                templates::render(templates::GO_EXPORT_IMPL, &[("name", &name)]),
             )?;
+            if kind != "executable" {
+                wit_flow::generate(&dir, &name, "go", "0.1.0")?;
+            }
         }
         "typescript" | "javascript" => {
-            let wit = if kind == "service" {
-                templates::render(templates::WIT_SERVICE, &[("name", &name)])
-            } else {
-                templates::render(templates::WIT_LIBRARY, &[("name", &name)])
-            };
-            std::fs::create_dir_all(dir.join("wit"))?;
-            std::fs::write(dir.join("wit").join(format!("{name}.wit")), wit)?;
+            if kind == "executable" {
+                let wit = templates::render(templates::WIT_LIBRARY, &[("name", &name)]);
+                std::fs::create_dir_all(dir.join("wit"))?;
+                std::fs::write(dir.join("wit").join(format!("{name}.wit")), wit)?;
+            }
             std::fs::write(
                 dir.join("package.json"),
                 templates::render(templates::TS_PACKAGE_JSON, &[("name", &name)]),
@@ -1830,6 +1852,9 @@ fn cmd_plugin_new(
                 dir.join("src").join("index.ts"),
                 templates::render(templates::TS_INDEX, &[("name", &name)]),
             )?;
+            if kind != "executable" {
+                wit_flow::generate(&dir, &name, "typescript", "0.1.0")?;
+            }
         }
         "csharp" => {
             if kind == "executable" {
@@ -1839,25 +1864,24 @@ fn cmd_plugin_new(
                 )?;
                 std::fs::write(dir.join("Program.cs"), templates::CSHARP_PROGRAM_CS)?;
             } else {
-                std::fs::create_dir_all(dir.join("wit"))?;
-                std::fs::create_dir_all(dir.join("wit/deps/host"))?;
+                let ident = csharp_ident(&name);
                 std::fs::write(
                     dir.join(format!("{name}.csproj")),
-                    templates::render(templates::CSHARP_LIBRARY_CSPROJ, &[("name", &name)]),
-                )?;
-                std::fs::write(
-                    dir.join("wit").join(format!("{name}.wit")),
-                    templates::render(templates::CSHARP_WIT, &[("name", &name)]),
-                )?;
-                std::fs::write(
-                    dir.join("wit/deps/host/host.wit"),
-                    templates::CSHARP_HOST_WIT,
+                    templates::render(
+                        templates::CSHARP_LIBRARY_CSPROJ,
+                        &[("name", &name), ("name_ident", &ident)],
+                    ),
                 )?;
                 std::fs::write(
                     dir.join(format!("{}Impl.cs", name)),
-                    templates::render(templates::CSHARP_IMPL, &[("name", &name)]),
+                    templates::render(
+                        templates::CSHARP_IMPL,
+                        &[("name", &name), ("name_ident", &ident)],
+                    ),
                 )?;
                 std::fs::write(dir.join("nuget.config"), templates::CSHARP_NUGET_CONFIG)?;
+                std::fs::write(dir.join("Attributes.cs"), templates::CSHARP_ATTRIBUTES)?;
+                wit_flow::generate(&dir, &name, "csharp", "0.1.0")?;
             }
         }
         "c" | "cpp" | "c++" => {
@@ -1918,7 +1942,12 @@ fn cmd_plugin_new(
             &kind,
             &runtime,
             &[],
-            (lang == "rust").then_some("attributes"),
+            (kind != "executable"
+                && matches!(
+                    lang.as_str(),
+                    "rust" | "go" | "typescript" | "javascript" | "csharp"
+                ))
+            .then_some("attributes"),
         )?;
     }
     if json {
@@ -2047,6 +2076,30 @@ fn ensure_plugin_config_available(config_path: &Path, name: &str) -> anyhow::Res
 
 /// The macro crate ships with the framework checkout; an installed CLI falls
 /// back to the published version.
+/// componentize-dotnet turns `l-csharp` into the `lCsharp` namespace segment.
+fn csharp_ident(name: &str) -> String {
+    let mut out = String::new();
+    for (index, part) in name
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|part| !part.is_empty())
+        .enumerate()
+    {
+        if index == 0 {
+            out.push_str(part);
+        } else {
+            let mut chars = part.chars();
+            if let Some(first) = chars.next() {
+                out.extend(first.to_uppercase());
+                out.push_str(chars.as_str());
+            }
+        }
+    }
+    if out.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        out.insert(0, '_');
+    }
+    out
+}
+
 fn owasidea_macro_dependency(plugin_dir: &Path) -> String {
     let macros = Path::new(env!("CARGO_MANIFEST_DIR")).join("../owasidea");
     let macros = macros.canonicalize().unwrap_or(macros);
@@ -2483,16 +2536,24 @@ fn cmd_build(
                 std::fs::copy(&src, &dst)?;
             }
             "go" => {
-                if let Some(prepared) = wit_flow::prepare(
+                let prepared = wit_flow::prepare(
                     &plugin_dir,
                     name,
                     lang,
                     p.wit_source.as_deref(),
                     p.version.as_deref().unwrap_or("0.1.0"),
-                )? {
+                )?;
+                if let Some(prepared) = &prepared {
                     println!("    {}", prepared.summary());
                 }
-                let src = match go_build::component_source(&plugin_dir, name)? {
+                let wit_dir = prepared
+                    .as_ref()
+                    .map(|prepared| prepared.dir.clone())
+                    .unwrap_or_else(|| plugin_dir.join("wit"));
+                // Go tools run with current_dir = plugin; an app-relative path
+                // would be resolved twice. Pass an absolute path.
+                let wit_dir = wit_dir.canonicalize().unwrap_or(wit_dir);
+                let src = match go_build::component_source(&plugin_dir, &wit_dir, name)? {
                     go_build::ComponentSource::Prebuilt(src) => {
                         println!(
                             "    warning: using prebuilt main.wasm (no WIT source) for {name}: {}",
@@ -2501,22 +2562,14 @@ fn cmd_build(
                         src
                     }
                     go_build::ComponentSource::Build => {
-                        let world_arg = go_build::world_arg(&plugin_dir);
-                        go_build::ensure_bindings(&plugin_dir, world_arg.as_deref())?;
+                        let world_arg = go_build::world_arg(&wit_dir);
+                        go_build::ensure_bindings(&plugin_dir, &wit_dir, world_arg.as_deref())?;
                         let mut cmd = std::process::Command::new("go");
                         cmd.current_dir(&plugin_dir);
                         if let Some(wa) = &world_arg {
-                            cmd.args([
-                                "tool",
-                                "componentize-go",
-                                "-d",
-                                "wit",
-                                "-w",
-                                wa,
-                                "build",
-                                "-o",
-                                "main.wasm",
-                            ]);
+                            cmd.args(["tool", "componentize-go", "-d"])
+                                .arg(&wit_dir)
+                                .args(["-w", wa, "build", "-o", "main.wasm"]);
                         } else {
                             cmd.args(["tool", "componentize-go", "build"]);
                         }
@@ -5427,12 +5480,31 @@ struct ExportSig {
     is_async: bool,
 }
 
+fn skip_source_dir(path: &Path) -> bool {
+    matches!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some(
+            "target"
+                | "node_modules"
+                | "obj"
+                | "bin"
+                | "dist"
+                | "gen"
+                | "vendor"
+                | ".git"
+                | ".owasidea"
+        )
+    )
+}
+
 fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for e in entries.flatten() {
             let p = e.path();
             if p.is_dir() {
-                collect_rs_files(&p, out);
+                if !skip_source_dir(&p) {
+                    collect_rs_files(&p, out);
+                }
             } else if p.extension().and_then(|s| s.to_str()) == Some("rs") {
                 out.push(p);
             }
@@ -5445,7 +5517,9 @@ fn collect_cs_files(dir: &Path, out: &mut Vec<PathBuf>) {
         for e in entries.flatten() {
             let p = e.path();
             if p.is_dir() {
-                collect_cs_files(&p, out);
+                if !skip_source_dir(&p) {
+                    collect_cs_files(&p, out);
+                }
             } else if p.extension().and_then(|s| s.to_str()) == Some("cs") {
                 out.push(p);
             }
@@ -5525,7 +5599,9 @@ fn collect_ts_files(dir: &Path, out: &mut Vec<PathBuf>) {
         for e in entries.flatten() {
             let p = e.path();
             if p.is_dir() {
-                collect_ts_files(&p, out);
+                if !skip_source_dir(&p) {
+                    collect_ts_files(&p, out);
+                }
             } else if p.extension().and_then(|s| s.to_str()) == Some("ts") {
                 out.push(p);
             }
@@ -5538,7 +5614,9 @@ fn collect_go_files(dir: &Path, out: &mut Vec<PathBuf>) {
         for e in entries.flatten() {
             let p = e.path();
             if p.is_dir() {
-                collect_go_files(&p, out);
+                if !skip_source_dir(&p) {
+                    collect_go_files(&p, out);
+                }
             } else if p.extension().and_then(|s| s.to_str()) == Some("go") {
                 out.push(p);
             }
@@ -5551,7 +5629,9 @@ fn collect_c_files(dir: &Path, out: &mut Vec<PathBuf>) {
         for e in entries.flatten() {
             let p = e.path();
             if p.is_dir() {
-                collect_c_files(&p, out);
+                if !skip_source_dir(&p) {
+                    collect_c_files(&p, out);
+                }
             } else if p.extension().and_then(|s| s.to_str()) == Some("c") {
                 out.push(p);
             }
@@ -5564,7 +5644,9 @@ fn collect_cpp_files(dir: &Path, out: &mut Vec<PathBuf>) {
         for e in entries.flatten() {
             let p = e.path();
             if p.is_dir() {
-                collect_cpp_files(&p, out);
+                if !skip_source_dir(&p) {
+                    collect_cpp_files(&p, out);
+                }
             } else {
                 match p.extension().and_then(|s| s.to_str()) {
                     Some("cpp") | Some("cc") | Some("cxx") | Some("C") => out.push(p),
@@ -5736,7 +5818,7 @@ fn to_kebab_case(input: &str) -> String {
 
 #[cfg(test)]
 mod kebab_tests {
-    use super::to_kebab_case;
+    use super::{csharp_ident, to_kebab_case};
 
     #[test]
     fn converts_rust_names_to_wit_names() {
@@ -5747,6 +5829,9 @@ mod kebab_tests {
         assert_eq!(to_kebab_case("HTTPServer"), "http-server");
         assert_eq!(to_kebab_case("already-kebab"), "already-kebab");
         assert_eq!(to_kebab_case("_leading__double_"), "leading-double");
+        assert_eq!(csharp_ident("demo"), "demo");
+        assert_eq!(csharp_ident("l-csharp"), "lCsharp");
+        assert_eq!(csharp_ident("my_plugin"), "my_plugin");
     }
 }
 
@@ -5900,6 +5985,8 @@ pub(crate) fn render_wit_source(
     plugin_dir: &Path,
     default_world: &str,
     version: &str,
+    package_name: Option<&str>,
+    wrap_interface: bool,
 ) -> anyhow::Result<Option<RenderedWit>> {
     let src_dir = plugin_dir.join("src");
     let mut rs_files = Vec::new();
@@ -6042,11 +6129,7 @@ pub(crate) fn render_wit_source(
                 let modifiers = cap.get(1).map(|m| m.as_str()).unwrap_or("");
                 let ret_raw = cap.get(2).map(|m| m.as_str().trim()).unwrap_or("");
                 let raw_name = cap.get(3).unwrap().as_str().to_string();
-                let name = if let Some(first) = raw_name.chars().next() {
-                    first.to_lowercase().to_string() + &raw_name[first.len_utf8()..]
-                } else {
-                    raw_name
-                };
+                let name = to_kebab_case(&raw_name);
                 let params_raw = cap.get(4).map(|m| m.as_str()).unwrap_or("");
                 let is_async = modifiers.contains("async") || ret_raw.starts_with("Task");
                 let ret_str = if ret_raw.is_empty() || ret_raw == "void" || ret_raw == "Task" {
@@ -6244,9 +6327,21 @@ pub(crate) fn render_wit_source(
         }
     }
 
+    let package = package_name.unwrap_or(&world).to_string();
     let mut out = String::new();
     out.push_str("// Generated by owasidea from source attributes. Do not edit.\n");
-    out.push_str(&format!("package poc:{}@{};\n\n", world, version));
+    out.push_str(&format!("package poc:{}@{};\n\n", package, version));
+    if wrap_interface {
+        out.push_str("interface api {\n");
+        for e in &deduped {
+            let async_kw = if e.is_async { "async " } else { "" };
+            out.push_str(&format!(
+                "    {}: {}func({}){};\n",
+                e.name, async_kw, e.params, e.ret
+            ));
+        }
+        out.push_str("}\n\n");
+    }
     out.push_str(&format!("world {} {{\n", world));
     if host_log {
         out.push_str("    import poc:host/host-log@0.1.0;\n");
@@ -6254,15 +6349,19 @@ pub(crate) fn render_wit_source(
     if host_kv {
         out.push_str("    import poc:host/host-kv@0.1.0;\n");
     }
-    if (host_log || host_kv) && !deduped.is_empty() {
-        out.push('\n');
-    }
-    for e in &deduped {
-        let async_kw = if e.is_async { "async " } else { "" };
-        out.push_str(&format!(
-            "    export {}: {}func({}){};\n",
-            e.name, async_kw, e.params, e.ret
-        ));
+    if wrap_interface {
+        out.push_str("    export api;\n");
+    } else {
+        if (host_log || host_kv) && !deduped.is_empty() {
+            out.push('\n');
+        }
+        for e in &deduped {
+            let async_kw = if e.is_async { "async " } else { "" };
+            out.push_str(&format!(
+                "    export {}: {}func({}){};\n",
+                e.name, async_kw, e.params, e.ret
+            ));
+        }
     }
     out.push_str("}\n");
 
@@ -6365,21 +6464,6 @@ fn parse_go_params(raw: &str) -> String {
     out.join(", ")
 }
 
-fn camel_to_kebab(s: &str) -> String {
-    let mut out = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if c.is_uppercase() {
-            if i != 0 {
-                out.push('-');
-            }
-            out.push(c.to_ascii_lowercase());
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
 fn parse_go_fn_sig(name: &str, params_raw: &str, ret_raw: &str, is_async: bool) -> ExportSig {
     let params = parse_go_params(params_raw);
     let ret_trim = ret_raw.trim();
@@ -6419,7 +6503,7 @@ fn parse_go_fn_sig(name: &str, params_raw: &str, ret_raw: &str, is_async: bool) 
         }
     };
     ExportSig {
-        name: camel_to_kebab(name),
+        name: to_kebab_case(name),
         params,
         ret: ret_str,
         is_async,

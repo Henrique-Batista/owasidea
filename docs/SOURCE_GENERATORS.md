@@ -2,11 +2,12 @@
 
 Owasidea gera WIT automaticamente a partir de anotações no código-fonte.
 
-- **Rust**: o contrato é um artefato. O build escreve `.owasidea/wit/<world>.wit`
-  e `.owasidea/wit/deps/host/host.wit` e aponta o metadata do `Cargo.toml` para
-  esse diretório. Nenhum arquivo WIT precisa existir no repositório.
-- **Go, TypeScript, C#, C e C++**: as ferramentas leem `wit/`, então o gerador
-  escreve `wit/<world>.wit` e `wit/deps/host/host.wit` quando necessário.
+- **Rust, Go, TypeScript e C#**: o contrato é um artefato em
+  `.owasidea/wit/` (`deps/host/host.wit` incluído). O template/toolchain aponta
+  para esse diretório; nenhum WIT precisa existir no repositório. C# usa o
+  package do plugin e o world `library`, com uma interface `api`.
+- **C e C++**: as ferramentas ainda leem `wit/`; o gerador escreve
+  `wit/<world>.wit` quando esses marcadores são usados.
 
 `owasidea wit generate [path]` faz o mesmo sob demanda. `wit_source` em
 `wasm-app.toml` escolhe `auto` (padrão), `wit` ou `attributes`; ver

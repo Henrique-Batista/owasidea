@@ -29,12 +29,13 @@ Scaffold an app directory with `wasm-app.toml`, `plugins/`, `manifests/`, `ui/`,
 and `docs/`. The UI files are the generic dashboard: `index.html`, `main.ts`,
 `vite.config.ts`, `tsconfig.json`, and `package.json`.
 
-### `doctor [--json] [--install-all] [--install <tool>]... [--fix] [--dry-run] [--yes|--execute] [--allow-sudo] [--force] [--install-wasi-sdk]`
+### `doctor [--json] [--install-all] [--install <tool>]... [--fix] [--dry-run] [--yes|--execute] [--allow-sudo] [--force] [--platform <os>] [--install-wasi-sdk]`
 
 Check required tooling (rustc, cargo, cargo-component, wasm-tools, go, node, npm)
 and optional per-language tools (clang, dotnet, jco, componentize-go,
 componentize-dotnet, trunk, wasmtime, python3). It also reports wasi-sdk and the
-WASI preview1 reactor adapter. Exits non-zero when a required tool is missing.
+WASI preview1 reactor adapter. An install run exits non-zero when a required
+tool is still missing afterwards; a dry-run plan exits 0 once it is produced.
 
 Install planning reads `tools.lock` (the current directory or its nearest
 ancestor) and is platform-aware (`linux`, `macos`, `windows`):
@@ -54,6 +55,10 @@ ancestor) and is platform-aware (`linux`, `macos`, `windows`):
 - Selection precedence is `--install-all`, then explicit `--install`, then
   `--fix`, then `--install-wasi-sdk`. `--dry-run` without a selection plans the
   missing required tools.
+- `--platform linux|macos|windows` plans for another OS (for example a Windows
+  plan from Linux). Cross-platform plans do not probe local tools and cannot be
+  executed: run the command on that OS. This is the supported way to review
+  Windows commands in CI or on a Linux workstation.
 
 Commands run in dependency order (rustup/cargo before cargo-installed tools, Go
 before componentize-go, Node/npm before jco, .NET before
@@ -87,7 +92,17 @@ owasidea doctor --install dotnet --install trunk --yes
 owasidea doctor --install-all
 owasidea doctor --install-all --yes
 owasidea doctor --install componentize-dotnet --yes
+
+# Any host: preview the Windows plan without executing it
+owasidea doctor --install-all --platform windows --json
 ```
+
+On Windows the installer uses `winget` with `--accept-source-agreements
+--accept-package-agreements --silent`, refreshes the PATH for tools installed in
+the same run (`%USERPROFILE%\.cargo\bin`, `%USERPROFILE%\go\bin`,
+`%ProgramFiles%\nodejs`, `%APPDATA%\npm`, `%ProgramFiles%\dotnet`, Go and
+WinGet links), and falls back to the built-in wasi-sdk downloader. A new shell
+may still be needed for tools installed outside `doctor`.
 
 `doctor --json` without install flags keeps the stable probe array
 (`{tool, ok, optional}` plus `path` for wasi-sdk and the adapter). With an

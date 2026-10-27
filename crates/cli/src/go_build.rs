@@ -28,9 +28,19 @@ pub enum ComponentSource {
 /// A missing `wit/` is only acceptable when a component already exists; a
 /// plugin with neither must fail with an actionable message instead of the
 /// opaque `componentize-go` error.
-pub fn component_source(plugin_dir: &Path, name: &str) -> Result<ComponentSource> {
-    let wit_dir = plugin_dir.join("wit");
-    if wit_dir.is_dir() {
+pub fn component_source(plugin_dir: &Path, wit_dir: &Path, name: &str) -> Result<ComponentSource> {
+    let has_wit = std::fs::read_dir(wit_dir)
+        .map(|entries| {
+            entries.flatten().any(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    == Some("wit")
+            })
+        })
+        .unwrap_or(false);
+    if has_wit {
         return Ok(ComponentSource::Build);
     }
     let prebuilt = plugin_dir.join("main.wasm");
@@ -38,15 +48,15 @@ pub fn component_source(plugin_dir: &Path, name: &str) -> Result<ComponentSource
         return Ok(ComponentSource::Prebuilt(prebuilt));
     }
     bail!(
-        "go plugin {name} has no wit/ directory and no prebuilt main.wasm at {}; \
-         add wit/*.wit (package + world) or build the component and keep it as main.wasm",
+        "go plugin {name} has no wit/ directory or .owasidea/wit ({}) and no prebuilt main.wasm at {}; \
+         add marker comments (attributes mode) or wit/*.wit, or build the component and keep it as main.wasm",
+        wit_dir.display(),
         prebuilt.display()
     )
 }
 
 /// Derive `<package>/<world>` from the plugin's `wit/*.wit`.
-pub fn world_arg(plugin_dir: &Path) -> Option<String> {
-    let wit_dir = plugin_dir.join("wit");
+pub fn world_arg(wit_dir: &Path) -> Option<String> {
     let world_re = regex::Regex::new(r"world\s+([A-Za-z0-9_-]+)").unwrap();
     let pkg_re = regex::Regex::new(r"package\s+([A-Za-z0-9_-]+:[A-Za-z0-9_-]+)").unwrap();
     let entries = std::fs::read_dir(wit_dir).ok()?;
@@ -70,7 +80,7 @@ pub fn world_arg(plugin_dir: &Path) -> Option<String> {
 ///
 /// The generated bindings hard-code the `wit_component` module path, which is
 /// why the Go template uses `module wit_component`.
-pub fn ensure_bindings(plugin_dir: &Path, world: Option<&str>) -> Result<()> {
+pub fn ensure_bindings(plugin_dir: &Path, wit_dir: &Path, world: Option<&str>) -> Result<()> {
     if plugin_dir.join("wit_exports.go").is_file() {
         return Ok(());
     }
@@ -91,7 +101,9 @@ pub fn ensure_bindings(plugin_dir: &Path, world: Option<&str>) -> Result<()> {
     let mut command = std::process::Command::new("go");
     command
         .current_dir(plugin_dir)
-        .args(["tool", "componentize-go", "-d", "wit", "-w", world]);
+        .args(["tool", "componentize-go", "-d"])
+        .arg(wit_dir)
+        .args(["-w", world]);
     command
         .args(["bindings", "--format", "-o"])
         .arg(&output_dir);
@@ -165,7 +177,7 @@ mod tests {
         std::fs::write(plugin.join("main.wasm"), b"\0asm").unwrap();
 
         assert_eq!(
-            component_source(&plugin, "webhook-go").unwrap(),
+            component_source(&plugin, &plugin.join("wit"), "webhook-go").unwrap(),
             ComponentSource::Prebuilt(plugin.join("main.wasm"))
         );
     }
@@ -179,7 +191,7 @@ mod tests {
         std::fs::write(plugin.join("main.wasm"), b"\0asm").unwrap();
 
         assert_eq!(
-            component_source(&plugin, "notes").unwrap(),
+            component_source(&plugin, &plugin.join("wit"), "notes").unwrap(),
             ComponentSource::Build
         );
     }
@@ -190,7 +202,9 @@ mod tests {
         let plugin = dir.path().join("broken");
         std::fs::create_dir_all(&plugin).unwrap();
 
-        let error = component_source(&plugin, "broken").unwrap_err().to_string();
+        let error = component_source(&plugin, &plugin.join("wit"), "broken")
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("wit/"), "{error}");
         assert!(error.contains("main.wasm"), "{error}");
         assert!(error.contains("broken"), "{error}");

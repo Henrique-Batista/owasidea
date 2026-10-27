@@ -1,8 +1,9 @@
+// owasidea:world {{name}}
 package export_wit_world
 
 import "fmt"
 
-// Greet implements the `greet` export declared in wit/<plugin>.wit.
+// owasidea:export
 func Greet(name string) string {
 	return fmt.Sprintf("Hello, %s! (from Go)", name)
 }

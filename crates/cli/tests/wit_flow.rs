@@ -113,3 +113,54 @@ fn rust_scaffold_has_no_wit_file() {
     let config_raw = fs::read_to_string(&config).unwrap();
     assert!(config_raw.contains("wit_source = \"attributes\""));
 }
+
+#[test]
+fn go_typescript_and_csharp_scaffolds_have_no_wit_file() {
+    for (lang, world, artifact) in [
+        ("go", "demo", "demo.wit"),
+        ("typescript", "demo", "demo.wit"),
+        ("csharp", "library", "library.wit"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("wasm-app.toml");
+        let output = Command::cargo_bin("owasidea")
+            .unwrap()
+            .args(["init"])
+            .arg(dir.path())
+            .args(["--preset", "minimal"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{lang}: init failed");
+
+        let output = Command::cargo_bin("owasidea")
+            .unwrap()
+            .args(["--config"])
+            .arg(&config)
+            .args(["plugin", "new", "demo", "--lang", lang])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{lang}: plugin new failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let plugin = dir.path().join("plugins/demo");
+        assert!(!plugin.join("wit").exists(), "{lang} created wit/");
+        let generated = fs::read_to_string(plugin.join(".owasidea/wit").join(artifact))
+            .unwrap_or_else(|error| panic!("{lang}: missing artifact: {error}"));
+        assert!(
+            generated.contains("package poc:demo@"),
+            "{lang}: package missing: {generated}"
+        );
+        assert!(
+            generated.contains(&format!("world {world} {{")),
+            "{lang}: world missing: {generated}"
+        );
+        let config_raw = fs::read_to_string(&config).unwrap();
+        assert!(
+            config_raw.contains("wit_source = \"attributes\""),
+            "{lang}: config missing wit_source"
+        );
+    }
+}

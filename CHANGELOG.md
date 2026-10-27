@@ -82,6 +82,13 @@ First supported release. The `v1.0.0` tag is cut by the release gate
   start/stop (`s`), rebuild (`R`), open UI (`o`), an interactive call form with
   JSON args, and a `?` help overlay. Works without a TTY by falling back to the
   plain log; `--no-tui` forces it.
+- **Attribute contracts without WIT** for Rust, Go, TypeScript and C#:
+  `wit_source = auto|wit|attributes` per plugin. Attribute builds render
+  `.owasidea/wit` (gitignored), point Cargo/componentize-go/jco/componentize-dotnet
+  at it, and derive the manifest from the real component. `owasidea build`
+  fails on drift instead of silently choosing a contract, prunes stale worlds,
+  converts Rust/Go/TS/C# names to WIT kebab-case, and `plugin new` scaffolds
+  these languages without a `wit/` directory. C and C++ still use `wit/`.
 - **Minimal example apps** under `examples/`: `hello` (Rust library + UI),
   `notes` (host KV and the `kv` capability), `ticker` (service lifecycle and
   the 409 reload rule). Each has smoke checks and Playwright tests;
@@ -112,6 +119,11 @@ First supported release. The `v1.0.0` tag is cut by the release gate
   commands, `--force` replans present tools, and `--json` emits
   `{tool, required, present, action, command, platform, reason}` entries plus a
   summary. Commands run in dependency order and duplicates are executed once.
+  `--platform linux|macos|windows` previews another OS without executing it. On
+  Windows, winget commands accept the source/package agreements and the
+  installer/probe PATH includes the usual cargo, Go, Node/npm, dotnet and WinGet
+  directories, so a freshly installed tool is visible to the next command in
+  the same run.
 - **Desktop**: Tauri 2 shell embedding the host; deb/rpm/AppImage/NSIS
   packaging; CSP rendered from `wasm-app.toml`; optional host-lib isolation for
   AppImage builds.

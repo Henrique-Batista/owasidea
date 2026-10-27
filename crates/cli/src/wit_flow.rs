@@ -195,8 +195,11 @@ pub fn detect_language(plugin_dir: &Path) -> &'static str {
 /// contract to prepare (for example a UI plugin).
 /// Renders and writes the contract unconditionally. Used by
 /// `owasidea wit generate` and by `plugin new` to seed a buildable plugin.
+/// Renders and writes the contract unconditionally. Used by
+/// `owasidea wit generate` and by `plugin new` to seed a buildable plugin.
 pub fn generate(plugin_dir: &Path, name: &str, language: &str, version: &str) -> Result<Prepared> {
-    let (dir, world, version) = if language == "rust" {
+    let csharp = language == "csharp";
+    let (dir, world, package, wrap_interface, version) = if language == "rust" {
         let target = rust_target(plugin_dir)?;
         if !is_artifact_dir(&target.dir) {
             bail!(
@@ -208,25 +211,38 @@ pub fn generate(plugin_dir: &Path, name: &str, language: &str, version: &str) ->
         (
             resolve(plugin_dir, &target.dir),
             target.world,
+            None,
+            false,
             target.version,
         )
     } else {
-        (
-            plugin_dir.join("wit"),
+        if has_wit(&plugin_dir.join("wit")) {
+            bail!(
+                "plugin {name} ({language}): wit/ already exists; remove it to use \
+                 attribute-generated WIT (or keep it and use wit_source = \"wit\")"
+            );
+        }
+        let world = if csharp {
+            "library".to_string()
+        } else {
             plugin_dir
                 .file_name()
                 .and_then(|value| value.to_str())
                 .unwrap_or(name)
-                .to_string(),
+                .to_string()
+        };
+        (
+            plugin_dir.join(".owasidea").join("wit"),
+            world,
+            csharp.then_some(name),
+            csharp,
             version.to_string(),
         )
     };
-    let rendered = crate::render_wit_source(plugin_dir, &world, &version)?
+    let rendered = crate::render_wit_source(plugin_dir, &world, &version, package, wrap_interface)?
         .with_context(|| format!("no attribute markers found in {}", plugin_dir.display()))?;
     let changed = crate::write_wit(&dir, &rendered)?;
-    if language == "rust" {
-        prune_generated(&dir, &format!("{}.wit", rendered.world))?;
-    }
+    prune_generated(&dir, &format!("{}.wit", rendered.world))?;
     Ok(Prepared {
         mode: WitSource::Attributes,
         world: rendered.world,
@@ -254,7 +270,8 @@ fn prepare_rust(plugin_dir: &Path, name: &str, explicit: Option<&str>) -> Result
     let requested = WitSource::parse(explicit)?;
     let target = rust_target(plugin_dir)?;
     let target_dir = resolve(plugin_dir, &target.dir);
-    let rendered = crate::render_wit_source(plugin_dir, &target.world, &target.version)?;
+    let rendered =
+        crate::render_wit_source(plugin_dir, &target.world, &target.version, None, false)?;
     let has = has_wit(&target_dir);
     let artifact = is_artifact_dir(&target.dir);
     let mode = match requested {
@@ -325,6 +342,22 @@ fn prepare_rust(plugin_dir: &Path, name: &str, explicit: Option<&str>) -> Result
     }
 }
 
+fn first_world(dir: &Path) -> Option<String> {
+    let world_re = regex::Regex::new(r"world\s+([A-Za-z0-9_-]+)").unwrap();
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("wit") {
+            continue;
+        }
+        let content = std::fs::read_to_string(path).ok()?;
+        if let Some(captures) = world_re.captures(&content) {
+            return Some(captures[1].to_string());
+        }
+    }
+    None
+}
+
 fn prepare_other(
     plugin_dir: &Path,
     name: &str,
@@ -333,17 +366,31 @@ fn prepare_other(
     version: &str,
 ) -> Result<Option<Prepared>> {
     let requested = WitSource::parse(explicit)?;
-    let world = plugin_dir
+    let dir_name = plugin_dir
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or(name)
         .to_string();
-    // Go, TypeScript, C#, C and C++ tooling all read `wit/`.
-    let target_dir = plugin_dir.join("wit");
-    let rendered = crate::render_wit_source(plugin_dir, &world, version)?;
-    let has = has_wit(&target_dir);
+    let source_dir = plugin_dir.join("wit");
+    let artifact_dir = plugin_dir.join(".owasidea").join("wit");
+    let csharp = language == "csharp";
+    // C# uses a fixed `library` world and the plugin name as the WIT package;
+    // the generated interface keeps the componentize-dotnet shape.
+    let default_world = if csharp {
+        "library".to_string()
+    } else {
+        dir_name.clone()
+    };
+    let rendered = crate::render_wit_source(
+        plugin_dir,
+        &default_world,
+        version,
+        csharp.then_some(name),
+        csharp,
+    )?;
+    let has_source = has_wit(&source_dir);
     let mode = match requested {
-        WitSource::Auto if has => WitSource::Wit,
+        WitSource::Auto if has_source => WitSource::Wit,
         WitSource::Auto if rendered.is_some() => WitSource::Attributes,
         WitSource::Auto => WitSource::Wit,
         other => other,
@@ -356,33 +403,34 @@ fn prepare_other(
                     "plugin {name} ({language}): wit_source = attributes but no marker comments were found"
                 );
             };
-            let path = target_dir.join(format!("{}.wit", rendered.world));
-            if let Ok(on_disk) = std::fs::read_to_string(&path) {
-                if on_disk != rendered.content {
-                    return Err(drift_error(name, &path));
-                }
+            if has_source {
+                bail!(
+                    "plugin {name} ({language}): a wit/ directory duplicates the attribute contract; \
+                     remove it or set wit_source = \"wit\""
+                );
             }
-            let changed = crate::write_wit(&target_dir, &rendered)?;
+            let changed = crate::write_wit(&artifact_dir, &rendered)?;
+            prune_generated(&artifact_dir, &format!("{}.wit", rendered.world))?;
             Ok(Some(Prepared {
                 mode,
                 world: rendered.world,
-                dir: target_dir,
+                dir: artifact_dir,
                 changed,
                 exports: rendered.exports,
             }))
         }
         WitSource::Wit => {
-            if !has {
+            if !has_source {
                 // No contract to prepare. Go may still use a prebuilt
                 // component; other toolchains fail with their own message.
                 return Ok(None);
             }
-            // Non-Rust toolchains keep `wit/` as the source of truth; the
-            // marker comments feed `owasidea wit generate`, not drift checks.
+            // Non-Rust toolchains keep wit/ as the source of truth; marker
+            // comments feed `owasidea wit generate`, not drift checks.
             Ok(Some(Prepared {
                 mode,
-                world,
-                dir: target_dir,
+                world: first_world(&source_dir).unwrap_or(default_world),
+                dir: source_dir,
                 changed: false,
                 exports: 0,
             }))
@@ -535,6 +583,92 @@ mod tests {
         assert_eq!(detect_language(&dir), "rust");
         write(&dir.join("go.mod"), "module demo\n");
         assert_eq!(detect_language(&dir), "go");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod other_language_tests {
+    use super::*;
+
+    fn temp(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("owasidea-wit-other-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write(path: &Path, content: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn go_markers_generate_an_artifact() {
+        let dir = temp("go");
+        write(
+            &dir.join("main.go"),
+            "// owasidea:world demo\npackage demo\n\n// owasidea:export\nfunc Greet(name string) string { return name }\n",
+        );
+        let prepared = prepare(&dir, "demo", "go", None, "0.1.0").unwrap().unwrap();
+        assert_eq!(prepared.mode, WitSource::Attributes);
+        assert!(!dir.join("wit").exists());
+        let wit = std::fs::read_to_string(dir.join(".owasidea/wit/demo.wit")).unwrap();
+        assert!(wit.contains("export greet: func(name: string) -> string;"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn typescript_markers_generate_an_artifact() {
+        let dir = temp("ts");
+        write(
+            &dir.join("src/index.ts"),
+            "/** @owasidea-world demo */\n/** @owasidea-export */\nexport function greet(name: string): string { return name; }\n",
+        );
+        let prepared = prepare(&dir, "demo", "typescript", None, "0.1.0")
+            .unwrap()
+            .unwrap();
+        assert_eq!(prepared.mode, WitSource::Attributes);
+        assert!(!dir.join("wit").exists());
+        let wit = std::fs::read_to_string(dir.join(".owasidea/wit/demo.wit")).unwrap();
+        assert!(wit.contains("export greet: func(name: string) -> string;"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn csharp_uses_the_plugin_package_and_library_world() {
+        let dir = temp("cs");
+        write(
+            &dir.join("DemoImpl.cs"),
+            "[OwasideaWorld(\"library\")]\npublic class ApiExportsImpl {\n    [OwasideaExport]\n    public static string Greet(string name) { return name; }\n}\n",
+        );
+        let prepared = prepare(&dir, "demo", "csharp", None, "0.1.0")
+            .unwrap()
+            .unwrap();
+        assert_eq!(prepared.mode, WitSource::Attributes);
+        assert_eq!(prepared.world, "library");
+        let wit = std::fs::read_to_string(dir.join(".owasidea/wit/library.wit")).unwrap();
+        assert!(wit.contains("package poc:demo@0.1.0;"));
+        assert!(wit.contains("interface api {"));
+        assert!(wit.contains("greet: func(name: string) -> string;"));
+        assert!(wit.contains("world library {"));
+        assert!(wit.contains("export api;"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_legacy_wit_directory_blocks_attributes() {
+        let dir = temp("legacy-other");
+        write(
+            &dir.join("main.go"),
+            "// owasidea:world demo\npackage demo\n",
+        );
+        write(&dir.join("wit/demo.wit"), "package poc:demo@0.1.0;\n");
+        let error = prepare(&dir, "demo", "go", Some("attributes"), "0.1.0").unwrap_err();
+        assert!(error.to_string().contains("duplicates"), "{error}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

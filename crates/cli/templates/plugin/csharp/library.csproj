@@ -3,7 +3,7 @@
   <PropertyGroup>
     <OutputType>Library</OutputType>
     <TargetFramework>net10.0</TargetFramework>
-    <RootNamespace>{{name}}</RootNamespace>
+    <RootNamespace>{{name_ident}}</RootNamespace>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <RuntimeIdentifier>wasi-wasm</RuntimeIdentifier>
@@ -20,6 +20,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Wit Update="wit/{{name}}.wit" World="library" />
+    <Wit Remove="*.wit;wit/*.wit" />
+    <Wit Include=".owasidea/wit" World="library" />
   </ItemGroup>
 </Project>

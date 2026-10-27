@@ -9,7 +9,7 @@ min_version = "1.80"
 [tools.install]
 linux = "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
 macos = "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
-windows = "winget install --id Rustlang.Rustup -e"
+windows = "winget install --id Rustlang.Rustup -e --accept-source-agreements --accept-package-agreements --silent"
 
 [[tools]]
 name = "cargo"
@@ -17,7 +17,7 @@ min_version = "1.80"
 [tools.install]
 linux = "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
 macos = "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
-windows = "winget install --id Rustlang.Rustup -e"
+windows = "winget install --id Rustlang.Rustup -e --accept-source-agreements --accept-package-agreements --silent"
 
 [[tools]]
 name = "cargo-component"
@@ -39,7 +39,7 @@ min_version = "1.27.1"
 [tools.install]
 linux = "sudo apt-get install -y golang-go"
 macos = "brew install go"
-windows = "winget install --id GoLang.Go -e"
+windows = "winget install --id GoLang.Go -e --accept-source-agreements --accept-package-agreements --silent"
 
 [[tools]]
 name = "node"
@@ -47,14 +47,14 @@ min_version = "20"
 [tools.install]
 linux = "sudo apt-get install -y nodejs"
 macos = "brew install node@20"
-windows = "winget install --id OpenJS.NodeJS.LTS -e"
+windows = "winget install --id OpenJS.NodeJS.LTS -e --accept-source-agreements --accept-package-agreements --silent"
 
 [[tools]]
 name = "npm"
 [tools.install]
 linux = "sudo apt-get install -y npm"
 macos = "brew install node@20"
-windows = "winget install --id OpenJS.NodeJS.LTS -e"
+windows = "winget install --id OpenJS.NodeJS.LTS -e --accept-source-agreements --accept-package-agreements --silent"
 
 [[tools]]
 name = "jco"
@@ -72,7 +72,7 @@ min_version = "10.0"
 [tools.install]
 linux = "sudo apt-get install -y dotnet-sdk-10.0"
 macos = "brew install --cask dotnet-sdk"
-windows = "winget install --id Microsoft.DotNet.SDK.10 -e"
+windows = "winget install --id Microsoft.DotNet.SDK.10 -e --accept-source-agreements --accept-package-agreements --silent"
 
 [[tools]]
 name = "componentize-go"
@@ -104,7 +104,7 @@ optional = true
 [tools.install]
 linux = "curl -sSf https://wasmtime.dev/install.sh | bash"
 macos = "brew install wasmtime"
-windows = "winget install --id BytecodeAlliance.Wasmtime -e"
+windows = "winget install --id BytecodeAlliance.Wasmtime -e --accept-source-agreements --accept-package-agreements --silent"
 
 [[tools]]
 name = "python3"
@@ -112,7 +112,7 @@ optional = true
 [tools.install]
 linux = "sudo apt-get install -y python3"
 macos = "brew install python3"
-windows = "winget install --id Python.Python.3.13 -e"
+windows = "winget install --id Python.Python.3.13 -e --accept-source-agreements --accept-package-agreements --silent"
 
 [[tools]]
 name = "wasi-sdk"
