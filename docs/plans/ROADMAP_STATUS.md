@@ -48,12 +48,12 @@ Status permitidos: `todo`, `doing`, `review`, `done`, `blocked`.
 | DL-05 | done | wt-config | c64f4b5 (merge 2d97eb1) | fmt/clippy/test | histórico + SSE follow; filtro de nível; `--json` |
 | DL-06 | done | wt-host | 9dc2f94 + 1cc36b9 (merge 5c6ede5) | fmt/clippy/test + status real no Shipyard | health/build_id/plugins/services; `--watch`; JSON estável |
 | DL-07 | done | wt-ui | 5794bc9 (merge 0833b5d) | fmt/clippy/test | bloco next steps; stale bundle; links viewer |
-| DL-08 | todo | — | — | — | — |
+| DL-08 | done | wt-ui | 1006869 + 10cf610 (merge 6628999) | cargo gates + UI build + Playwright 8/8 | watcher de `plugins/*/dist`; índice versionado; reload de iframe |
 | CT-01 | done | wt-contracts | 06bd591 (merge ed25c20) | fmt/clippy/test isolado + Shipyard build | `params`/`results` estruturados; interface exports preservados |
 | CT-02 | done | wt-contracts | b7c0d48 (merge 1c7dc55) | fmt/clippy/test + Shipyard build | parser/validador de tipos com proptest; build valida params/results |
 | CT-03 | done | wt-contracts | 09e811e (merge d15aad6) | fmt/clippy/test + client --check no Shipyard | `createClient` TS tipado; `CallError`; timeout; `--check` |
 | CT-04 | done | wt-ui | 1fc070c + 03caa8e (merge 9de58de) | cargo gates + UI build + Playwright 8/8 | forms genéricos por `params`; resultado/erro/ms; snippets |
-| CT-05 | todo | — | — | — | — |
+| CT-05 | done | wt-authoring | ae399b0 + 1a26839 (merge 131dccb) | REV aprovado; SEC aprovado com ressalvas | ADR-0004: MessageChannel + nonce + allowlist; SDK same-origin; gates WebKit/WebView2 |
 | CT-06 | todo | — | — | — | — |
 | CT-07 | todo | — | — | — | — |
 | CT-08 | todo | — | — | — | — |
