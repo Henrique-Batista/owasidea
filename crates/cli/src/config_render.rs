@@ -396,6 +396,40 @@ pub(crate) fn tauri_content_for(
     } else {
         anyhow::bail!("tauri.conf.json missing app.security.csp slot");
     }
+    // RL-02: project the effective updater settings into `plugins.updater`.
+    // A missing/broken updater config must not break `config render`, so the
+    // error is reported as a warning and the base config is kept.
+    match crate::updater::resolve(root, cfg) {
+        Ok(Some(settings)) => {
+            let object = value
+                .as_object_mut()
+                .ok_or_else(|| anyhow::anyhow!("tauri.conf.json root must be object"))?;
+            let plugins = object
+                .entry("plugins".to_string())
+                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+            if !plugins.is_object() {
+                *plugins = serde_json::Value::Object(serde_json::Map::new());
+            }
+            plugins.as_object_mut().unwrap().insert(
+                "updater".to_string(),
+                crate::updater::tauri_plugin_config(&settings),
+            );
+            // Signed updater artifacts require the private key in the
+            // environment; without it `tauri build` would fail.
+            if crate::updater::updater_signing_available() {
+                if let Some(bundle) = value.get_mut("bundle").and_then(|b| b.as_object_mut()) {
+                    bundle.insert(
+                        "createUpdaterArtifacts".to_string(),
+                        serde_json::Value::Bool(true),
+                    );
+                }
+            }
+        }
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("warning: updater config not rendered: {error}");
+        }
+    }
     Ok(value)
 }
 
@@ -739,6 +773,54 @@ mod tests {
         assert_ne!(dev_raw, prod_raw);
         assert!(dev_raw.contains("9100"));
         assert!(prod_raw.contains("9200"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn tauri_content_injects_updater_config_from_section() {
+        let _g = ENV_LOCK.lock().unwrap();
+        for key in [
+            "OWASIDEA_UPDATER_ENDPOINT",
+            "OWASIDEA_UPDATER_PUBKEY",
+            "OWASIDEA_UPDATE_CHANNEL",
+            "OWASIDEA_UPDATER_BASE_URL",
+            "TAURI_SIGNING_PRIVATE_KEY",
+        ] {
+            std::env::remove_var(key);
+        }
+        let root = profile_root("updater");
+        std::fs::create_dir_all(root.join("keys")).unwrap();
+        std::fs::write(
+            root.join("keys/updater.pub"),
+            "untrusted comment: test key\nRWQtestkey\n",
+        )
+        .unwrap();
+        let cfg = AppConfig {
+            desktop: Some(crate::config::DesktopSection {
+                path: Some("desktop".to_string()),
+                ..Default::default()
+            }),
+            updater: Some(crate::config::UpdaterSection {
+                channel: Some("beta".to_string()),
+                endpoint: Some("https://updates.example.com/{{channel}}/latest.json".to_string()),
+                pubkey: Some("keys/updater.pub".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let value = tauri_content_for(&root, &cfg, None).unwrap();
+        assert_eq!(
+            value["plugins"]["updater"]["endpoints"][0],
+            "https://updates.example.com/beta/latest.json"
+        );
+        assert_eq!(
+            value["plugins"]["updater"]["pubkey"],
+            "untrusted comment: test key\nRWQtestkey"
+        );
+        assert_eq!(
+            value["plugins"]["updater"]["dangerousInsecureTransportProtocol"],
+            false
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

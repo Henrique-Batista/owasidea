@@ -1,10 +1,16 @@
 mod runtime;
+mod updater;
 
 use runtime::resolve;
 use tauri::Manager;
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .invoke_handler(tauri::generate_handler![
+            updater::updater_check,
+            updater::updater_install
+        ])
         .setup(|app| {
             let resource_dir = app.path().resource_dir().ok();
             let resolved = resolve(resource_dir);

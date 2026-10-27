@@ -17,6 +17,7 @@ mod smoke_gen;
 mod status;
 mod templates;
 mod type_parser;
+mod updater;
 mod verify;
 mod wit_types;
 use config::*;
@@ -227,6 +228,40 @@ enum Commands {
         mask_paths: Vec<PathBuf>,
         /// Config profile: merge `wasm-app.<profile>.toml` over `wasm-app.toml`
         /// (dev|staging|prod) and write artifacts to `dist/<profile>`.
+        #[arg(long, value_name = "PROFILE")]
+        profile: Option<String>,
+    },
+    /// Generate or validate latest.json for the Tauri updater.
+    #[command(about = "Generate or validate latest.json for the Tauri updater.")]
+    Latest {
+        /// Directory with signed updater artifacts (default: dist or dist/<profile>).
+        #[arg(long, value_name = "DIR")]
+        artifacts: Option<PathBuf>,
+        /// Output path (default: <artifacts>/latest.json).
+        #[arg(long, value_name = "PATH")]
+        output: Option<PathBuf>,
+        /// Base URL for artifact downloads (default: parent of the endpoint).
+        #[arg(long, value_name = "URL")]
+        url_base: Option<String>,
+        /// Release channel: stable|beta (default: [updater].channel or OWASIDEA_UPDATE_CHANNEL).
+        #[arg(long, value_name = "CHANNEL")]
+        channel: Option<String>,
+        /// Release version (default: [app].version).
+        #[arg(long, value_name = "VERSION")]
+        version: Option<String>,
+        /// Release notes text.
+        #[arg(long, value_name = "TEXT")]
+        notes: Option<String>,
+        /// Release notes file.
+        #[arg(long, value_name = "PATH")]
+        notes_file: Option<PathBuf>,
+        /// Publication date in RFC 3339 (default: now).
+        #[arg(long, value_name = "RFC3339")]
+        pub_date: Option<String>,
+        /// Validate the existing latest.json instead of writing.
+        #[arg(long)]
+        check: bool,
+        /// Config profile (dev|staging|prod): artifacts default to dist/<profile>.
         #[arg(long, value_name = "PROFILE")]
         profile: Option<String>,
     },
@@ -917,6 +952,31 @@ async fn main() -> anyhow::Result<()> {
             isolate_host_libs,
             &mask_paths,
             profile.as_deref(),
+        ),
+        Commands::Latest {
+            artifacts,
+            output,
+            url_base,
+            channel,
+            version,
+            notes,
+            notes_file,
+            pub_date,
+            check,
+            profile,
+        } => updater::cmd_latest(
+            &cli.config,
+            profile.as_deref(),
+            artifacts.as_deref(),
+            output.as_deref(),
+            url_base.as_deref(),
+            channel.as_deref(),
+            version.as_deref(),
+            notes.as_deref(),
+            notes_file.as_deref(),
+            pub_date.as_deref(),
+            check,
+            cli.json,
         ),
         Commands::Keygen { out } => cmd_keygen(&out),
         Commands::Sign { plugin, key } => cmd_sign(&manifest_dir, &plugin, &key),
@@ -4235,6 +4295,61 @@ fn isolated_bundle_command(
     Ok(command)
 }
 
+fn write_latest_if_configured(
+    root: &Path,
+    cfg: &AppConfig,
+    profile: Option<&str>,
+    artifacts_dir: &Path,
+) -> anyhow::Result<()> {
+    let settings = match updater::resolve(root, cfg)? {
+        Some(settings) => settings,
+        None => {
+            if cfg.updater.is_some() {
+                println!(
+                    "updater: incomplete [updater] config (endpoint and pubkey required); skipping latest.json"
+                );
+            }
+            return Ok(());
+        }
+    };
+    let artifacts =
+        updater::collect_artifacts(artifacts_dir, &["windows-x86_64", "windows-aarch64"])?;
+    if artifacts.is_empty() {
+        println!(
+            "updater: no signed artifacts under {}; set {} and rebuild to produce .sig files (skipping latest.json)",
+            artifacts_dir.display(),
+            updater::ENV_SIGNING_KEY
+        );
+        return Ok(());
+    }
+    let version = cfg
+        .app
+        .as_ref()
+        .and_then(|app| app.version.clone())
+        .unwrap_or_else(|| "0.1.0".to_string());
+    let base = updater::url_base(&settings, None)?;
+    let value = updater::latest_json(
+        &version,
+        &settings.channel,
+        settings.notes.as_deref(),
+        &updater::now_rfc3339(),
+        &base,
+        &artifacts,
+    )?;
+    let output = artifacts_dir.join("latest.json");
+    updater::write_latest(&output, &value)?;
+    println!(
+        "latest.json: {} (channel {}, {} platform(s))",
+        output.display(),
+        settings.channel,
+        artifacts.len()
+    );
+    if let Some(profile) = profile {
+        println!("updater: profile {profile} manifest written next to the profile artifacts");
+    }
+    Ok(())
+}
+
 fn cmd_bundle(
     config: &Path,
     manifest_dir: &Path,
@@ -4445,8 +4560,10 @@ fn cmd_bundle(
                 )?;
             }
             println!("Artifacts copied to {}", output_dir.display());
+            write_latest_if_configured(&root, &cfg, profile, &output_dir)?;
         } else {
             println!("Artifacts are under {}", bundle_dir.display());
+            write_latest_if_configured(&root, &cfg, profile, &bundle_dir)?;
         }
     } else {
         println!(

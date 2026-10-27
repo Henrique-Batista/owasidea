@@ -136,6 +136,8 @@ owasidea bundle          # build + sign + Tauri package
 - [`docs/AI_AGENTS.md`](docs/AI_AGENTS.md) — deterministic agent playbook
 - [`docs/WINDOWS.md`](docs/WINDOWS.md) — native Windows support and cross-compilation boundaries
 - [`docs/APPIMAGE.md`](docs/APPIMAGE.md) — AppImage packaging and clean-build requirements
+- [`docs/UPDATER.md`](docs/UPDATER.md) — Tauri updater, latest.json, channels, local testing
+- [`docs/RELEASE.md`](docs/RELEASE.md) — release checklist: gates, profiles, signing, CI secrets
 - [`docs/CLEAN_BUILD.md`](docs/CLEAN_BUILD.md) — bubblewrap isolation and clean Arch/Debian chroot builds
 - [`llms.txt`](llms.txt) — compact AI index
 - `docs/USAGE.md` — setup and running

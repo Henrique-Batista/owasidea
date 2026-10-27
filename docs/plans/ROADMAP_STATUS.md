@@ -75,7 +75,7 @@ Status permitidos: `todo`, `doing`, `review`, `done`, `blocked`.
 | PX-08 | done | wt-host | 2bb0044 (merge 01834d3) | fmt/clippy/test + Playwright 12/12 | `/service/restart`; last_error/restarts; UI restart |
 | PX-09 | done | wt-config | e60d558 (merge 13a11e8) | fmt/clippy/test | shell helper cmd/sh; paths/temp; CI Windows fmt/clippy/test; docs |
 | RL-01 | done | wt-config | d5ec289 (merge 9c38779) | fmt/clippy/test (86 unit + 17 CLI) | `--profile`; overlays `wasm-app.<profile>.toml`; dist/<profile> |
-| RL-02 | todo | — | — | — | — |
+| RL-02 | done | wt-release | single commit (RL-02) | fmt/clippy/test (100 unit + 19 CLI) + cargo check desktop/shipyard + latest.json em servidor estático | `tauri-plugin-updater`; `[updater]`/env; `owasidea latest` + `--check`; `scripts/gen-latest-json.sh`; capabilities; CI opcional; docs/UPDATER.md/RELEASE.md |
 | RL-03 | todo | — | — | — | — |
 | RL-04 | todo | — | — | — | — |
 | RL-05 | todo | — | — | — | — |

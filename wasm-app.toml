@@ -6,6 +6,13 @@ identifier = "dev.owasidea.app"
 [host]
 addr = "127.0.0.1:8787"
 
+# Tauri updater (RL-02). See docs/UPDATER.md. Uncomment to generate
+# latest.json from signed bundle artifacts; the private key never goes here.
+# [updater]
+# channel = "stable"            # or "beta"; OWASIDEA_UPDATE_CHANNEL overrides
+# endpoint = "https://releases.example.com/{{channel}}/latest.json"
+# pubkey = "keys/owasidea-updater.pub"
+
 [plugins.notes]
 path = "plugins/notes"
 language = "rust"
