@@ -952,6 +952,7 @@ fn cmd_plugin_new(
                     "uno",
                     "svelte",
                     "react",
+                    "vue",
                 ];
                 let sel =
                     dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
@@ -997,6 +998,7 @@ fn cmd_plugin_new(
         "uno",
         "svelte",
         "react",
+        "vue",
     ]
     .contains(&lang.as_str())
     {
@@ -1033,6 +1035,7 @@ fn cmd_plugin_new(
             "uno",
             "svelte",
             "react",
+            "vue",
         ]
         .contains(&lang.as_str())
         {
@@ -1043,11 +1046,119 @@ fn cmd_plugin_new(
         let dist = dir.join("dist");
         std::fs::create_dir_all(&dist)?;
         std::fs::write(dist.join("index.html"), templates::UI_INDEX_HTML)?;
+
+        match lang.as_str() {
+            "svelte" => {
+                std::fs::create_dir_all(dir.join("src"))?;
+                std::fs::write(
+                    dir.join("package.json"),
+                    templates::render(templates::SVELTE_PACKAGE_JSON, &[("name", &name)]),
+                )?;
+                std::fs::write(dir.join("vite.config.ts"), templates::SVELTE_VITE_CONFIG)?;
+                std::fs::write(dir.join("tsconfig.json"), templates::SVELTE_TSCONFIG)?;
+                std::fs::write(
+                    dir.join("index.html"),
+                    templates::render(templates::SVELTE_INDEX_HTML, &[("name", &name)]),
+                )?;
+                std::fs::write(dir.join("src").join("main.ts"), templates::SVELTE_MAIN_TS)?;
+                std::fs::write(
+                    dir.join("src").join("App.svelte"),
+                    templates::render(templates::SVELTE_APP_SVELTE, &[("name", &name)]),
+                )?;
+            }
+            "react" => {
+                std::fs::create_dir_all(dir.join("src"))?;
+                std::fs::write(
+                    dir.join("package.json"),
+                    templates::render(templates::REACT_PACKAGE_JSON, &[("name", &name)]),
+                )?;
+                std::fs::write(dir.join("vite.config.ts"), templates::REACT_VITE_CONFIG)?;
+                std::fs::write(dir.join("tsconfig.json"), templates::REACT_TSCONFIG)?;
+                std::fs::write(
+                    dir.join("index.html"),
+                    templates::render(templates::REACT_INDEX_HTML, &[("name", &name)]),
+                )?;
+                std::fs::write(dir.join("src").join("main.tsx"), templates::REACT_MAIN_TSX)?;
+                std::fs::write(
+                    dir.join("src").join("App.tsx"),
+                    templates::render(templates::REACT_APP_TSX, &[("name", &name)]),
+                )?;
+            }
+            "vue" => {
+                std::fs::create_dir_all(dir.join("src"))?;
+                std::fs::write(
+                    dir.join("package.json"),
+                    templates::render(templates::VUE_PACKAGE_JSON, &[("name", &name)]),
+                )?;
+                std::fs::write(dir.join("vite.config.ts"), templates::VUE_VITE_CONFIG)?;
+                std::fs::write(dir.join("tsconfig.json"), templates::VUE_TSCONFIG)?;
+                std::fs::write(
+                    dir.join("index.html"),
+                    templates::render(templates::VUE_INDEX_HTML, &[("name", &name)]),
+                )?;
+                std::fs::write(dir.join("src").join("main.ts"), templates::VUE_MAIN_TS)?;
+                std::fs::write(
+                    dir.join("src").join("App.vue"),
+                    templates::render(templates::VUE_APP_VUE, &[("name", &name)]),
+                )?;
+            }
+            "yew" => {
+                std::fs::create_dir_all(dir.join("src"))?;
+                std::fs::write(
+                    dir.join("Cargo.toml"),
+                    templates::render(templates::YEW_CARGO_TOML, &[("name", &name)]),
+                )?;
+                std::fs::write(
+                    dir.join("index.html"),
+                    templates::render(templates::YEW_INDEX_HTML, &[("name", &name)]),
+                )?;
+                std::fs::write(
+                    dir.join("src").join("main.rs"),
+                    templates::render(templates::YEW_MAIN_RS, &[("name", &name)]),
+                )?;
+                std::fs::write(dir.join("Trunk.toml"), templates::YEW_TRUNK_TOML)?;
+            }
+            "blazor" => {
+                std::fs::create_dir_all(dir.join("wwwroot"))?;
+                std::fs::write(
+                    dir.join(format!("{}.csproj", name)),
+                    templates::BLAZOR_CSPROJ,
+                )?;
+                std::fs::write(dir.join("Program.cs"), templates::BLAZOR_PROGRAM_CS)?;
+                std::fs::write(
+                    dir.join("App.razor"),
+                    templates::render(templates::BLAZOR_APP_RAZOR, &[("name", &name)]),
+                )?;
+                std::fs::write(
+                    dir.join("index.html"),
+                    templates::render(templates::BLAZOR_INDEX_HTML, &[("name", &name)]),
+                )?;
+                std::fs::write(
+                    dir.join("wwwroot").join("index.html"),
+                    templates::render(templates::BLAZOR_WWWROOT_INDEX, &[("name", &name)]),
+                )?;
+            }
+            "uno" => {
+                std::fs::write(dir.join(format!("{}.csproj", name)), templates::UNO_CSPROJ)?;
+                std::fs::write(
+                    dir.join("index.html"),
+                    templates::render(templates::UNO_INDEX_HTML, &[("name", &name)]),
+                )?;
+            }
+            _ => {}
+        }
         std::fs::write(
             dir.join("README.md"),
             templates::render(templates::UI_README, &[("name", &name), ("lang", &lang)]),
         )?;
-        register_plugin_config(config_path, &name, &lang, &kind, &runtime)?;
+        let ui_build: &[&str] = match lang.as_str() {
+            "svelte" | "react" | "vue" => &["npm", "run", "build"],
+            "yew" => &["trunk", "build", "--release"],
+            "blazor" => &["dotnet", "publish", "-c", "Release", "-o", "dist"],
+            "uno" => &["dotnet", "build"],
+            _ => &[],
+        };
+        register_plugin_config(config_path, &name, &lang, &kind, &runtime, ui_build)?;
         if json {
             println!(
                 "{}",
@@ -1200,7 +1311,7 @@ fn cmd_plugin_new(
             &[("name", &name), ("lang", &lang), ("kind", &kind)],
         ),
     )?;
-    register_plugin_config(config_path, &name, &lang, &kind, &runtime)?;
+    register_plugin_config(config_path, &name, &lang, &kind, &runtime, &[])?;
     if json {
         println!(
             "{}",
@@ -1242,6 +1353,7 @@ fn register_plugin_config(
     language: &str,
     kind: &str,
     runtime: &str,
+    ui_build: &[&str],
 ) -> anyhow::Result<()> {
     let mut config = if config_path.exists() {
         std::fs::read_to_string(config_path)?
@@ -1256,6 +1368,16 @@ fn register_plugin_config(
     ));
     if kind == "ui" {
         config.push_str("ui_entry = \"index.html\"\n");
+        if !ui_build.is_empty() {
+            config.push_str(&format!(
+                "ui_build = [{}]\n",
+                ui_build
+                    .iter()
+                    .map(|s| format!("\"{s}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
     }
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent)?;
