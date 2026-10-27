@@ -563,8 +563,7 @@ async fn main() -> anyhow::Result<()> {
                 .clone()
                 .or_else(|| read_host_addr(&cli.config))
                 .unwrap_or_else(|| "127.0.0.1:0".to_string());
-            #[allow(clippy::too_many_arguments)]
-            let _ = cmd_dev(
+            cmd_dev(
                 &cli.config,
                 &cli.manifest_dir,
                 &addr,
@@ -575,8 +574,7 @@ async fn main() -> anyhow::Result<()> {
                 no_host,
                 no_watch,
             )
-            .await;
-            Ok(())
+            .await
         }
         Commands::Run => {
             let addr = cli
@@ -2047,7 +2045,6 @@ fn walkdir(dir: std::path::PathBuf) -> Vec<std::path::PathBuf> {
     out
 }
 
-#[allow(clippy::zombie_processes)]
 #[allow(clippy::too_many_arguments)]
 async fn cmd_dev(
     config_path: &Path,
@@ -2246,21 +2243,25 @@ async fn cmd_dev(
         }
 
         // Host as a subprocess so its logs can be prefixed and managed.
-        let exe = std::env::current_exe()?;
-        let host_child = std::process::Command::new(&exe)
-            .arg("--config")
-            .arg(config_path)
-            .arg("--manifest-dir")
-            .arg(&manifest_dir)
-            .arg("--http-addr")
-            .arg(http_addr.clone())
-            .arg("run")
-            .current_dir(&root)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .context("failed to spawn host")?;
-        let mut host_child = crate::dev_desktop::spawn_prefixed(host_child, "host");
+        let mut host_child: Option<_> = if no_host {
+            None
+        } else {
+            let exe = std::env::current_exe()?;
+            let hc = std::process::Command::new(&exe)
+                .arg("--config")
+                .arg(config_path)
+                .arg("--manifest-dir")
+                .arg(&manifest_dir)
+                .arg("--http-addr")
+                .arg(http_addr.clone())
+                .arg("run")
+                .current_dir(&root)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .context("failed to spawn host")?;
+            Some(crate::dev_desktop::spawn_prefixed(hc, "host"))
+        };
 
         let ui_port_str = ui_port.unwrap().to_string();
         let vite_child = std::process::Command::new("node")
@@ -2297,11 +2298,22 @@ async fn cmd_dev(
         for (k, v) in &inv.env {
             tauri_cmd.env(k, v);
         }
-        let tauri_child = tauri_cmd
+        let tauri_child = match tauri_cmd
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
-            .context("failed to spawn tauri")?;
+        {
+            Ok(c) => c,
+            Err(e) => {
+                if let Some(hc) = host_child.as_mut() {
+                    let _ = hc.kill();
+                    let _ = hc.wait();
+                }
+                let _ = vite_child.kill();
+                let _ = vite_child.wait();
+                return Err(e.into());
+            }
+        };
         let tauri_child = crate::dev_desktop::spawn_prefixed(tauri_child, "tauri");
 
         if open {
@@ -2364,14 +2376,16 @@ async fn cmd_dev(
                 let _ = child.wait();
             }
         }
-        let _ = host_child.kill();
-        let _ = host_child.wait();
+        if let Some(hc) = host_child.as_mut() {
+            let _ = hc.kill();
+            let _ = hc.wait();
+        }
         let _ = vite_child.kill();
         let _ = vite_child.wait();
         return Ok(());
     }
 
-    let host_task = if !desktop {
+    let host_task = if !desktop && !no_host {
         Some(tokio::spawn(async move {
             owasidea_host::run(manifest_dir.clone(), http_addr.clone()).await
         }))
