@@ -79,7 +79,7 @@ Status permitidos: `todo`, `doing`, `review`, `done`, `blocked`.
 | RL-03 | todo | — | — | — | — |
 | RL-04 | todo | — | — | — | — |
 | RL-05 | done | wt-host | b6b1a66 (merge 434383d) | fmt/clippy/test com e sem feature `otel`; teste live OTLP | spans `plugin.call`/`http.request`; endpoint OTLP; desligado sem feature/env |
-| RL-06 | review | wt-host | — | fmt/clippy/test com e sem feature `streaming` | ADR-0005 + protótipo jobs/SSE/cancel atrás da feature; revisão ARCH/REV pendente |
+| RL-06 | review | wt-host | — | fmt/clippy/test com e sem feature `streaming`; hardening SEC | ADR-0005 + jobs/SSE/cancel; ressalvas SEC corrigidas (cancel/queued, limites, panic, SSE, bind) |
 | RL-07 | todo | — | — | — | — |
 | G0 | todo | — | — | — | — |
 | G1 | todo | — | — | — | — |

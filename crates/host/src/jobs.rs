@@ -17,16 +17,22 @@ use super::{
     invoke_export, plugin_metrics, PluginRuntime, DEFAULT_CALL_TIMEOUT_MS, MAX_CALL_TIMEOUT_MS,
 };
 use axum::{
-    extract::{Path as AxumPath, State},
-    http::StatusCode,
-    response::sse::{Event, KeepAlive, Sse},
+    extract::{Path as AxumPath, Request, State},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
+    middleware::Next,
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        Response,
+    },
     Json,
 };
+use futures::FutureExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::{HashMap, VecDeque},
     future::Future,
+    panic::AssertUnwindSafe,
     pin::Pin,
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -34,7 +40,7 @@ use std::{
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore};
 use wasmtime::Engine;
 
 /// Maximum number of jobs running or queued at once.
@@ -47,6 +53,14 @@ pub(crate) const MAX_EVENTS_PER_JOB: usize = 256;
 pub(crate) const MAX_ARGS_BYTES: usize = 64 * 1024;
 /// Maximum serialized size of one event's `data`; larger payloads are replaced.
 pub(crate) const MAX_EVENT_BYTES: usize = 8 * 1024;
+/// Maximum serialized size of a job result; larger results are marked truncated.
+pub(crate) const MAX_RESULT_BYTES: usize = 256 * 1024;
+/// Maximum byte length of a function name accepted by a job.
+pub(crate) const MAX_FUNCTION_BYTES: usize = 256;
+/// Maximum concurrent SSE readers per job.
+pub(crate) const MAX_STREAMS_PER_JOB: usize = 4;
+/// Maximum concurrent SSE readers across all jobs.
+pub(crate) const MAX_STREAMS_GLOBAL: usize = 64;
 /// How often the host emits a heartbeat progress event while a call runs.
 pub(crate) const PROGRESS_HEARTBEAT_MS: u64 = 500;
 
@@ -90,6 +104,7 @@ pub(crate) struct JobRecord {
     next_seq: u64,
     cancel: Arc<AtomicBool>,
     cancel_notify: Arc<Notify>,
+    stream_slots: Arc<Semaphore>,
 }
 
 impl JobRecord {
@@ -108,6 +123,7 @@ impl JobRecord {
             next_seq: 1,
             cancel: Arc::new(AtomicBool::new(false)),
             cancel_notify: Arc::new(Notify::new()),
+            stream_slots: Arc::new(Semaphore::new(MAX_STREAMS_PER_JOB)),
         }
     }
 }
@@ -197,6 +213,7 @@ pub(crate) struct JobManager {
     store: Arc<Mutex<JobStore>>,
     executor: Arc<dyn JobExecutor>,
     active: Arc<AtomicUsize>,
+    stream_slots: Arc<Semaphore>,
 }
 
 impl JobManager {
@@ -205,6 +222,7 @@ impl JobManager {
             store: Arc::new(Mutex::new(JobStore::default())),
             executor,
             active: Arc::new(AtomicUsize::new(0)),
+            stream_slots: Arc::new(Semaphore::new(MAX_STREAMS_GLOBAL)),
         }
     }
 
@@ -221,6 +239,12 @@ impl JobManager {
                 "function must not be empty".to_string(),
             ));
         }
+        if function.len() > MAX_FUNCTION_BYTES {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("function exceeds {MAX_FUNCTION_BYTES} bytes"),
+            ));
+        }
         let args_len = serde_json::to_vec(&args)
             .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid args: {e}")))?
             .len();
@@ -231,9 +255,9 @@ impl JobManager {
             ));
         }
         let timeout_ms = self.executor.validate(plugin, function)?;
+        let id = new_job_id()?;
         self.reserve_slot()?;
 
-        let id = new_job_id();
         let record = Arc::new(Mutex::new(JobRecord::new(
             id.clone(),
             plugin.to_string(),
@@ -295,6 +319,20 @@ impl JobManager {
         }
     }
 
+    pub(crate) fn try_stream_permit(&self) -> Result<OwnedSemaphorePermit, (StatusCode, String)> {
+        self.stream_slots.clone().try_acquire_owned().map_err(|_| {
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                format!("too many job event streams (limit {MAX_STREAMS_GLOBAL})"),
+            )
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_jobs(&self) -> usize {
+        self.active.load(Ordering::SeqCst)
+    }
+
     pub(crate) async fn view(&self, id: &str) -> Option<JobView> {
         let record = self.record(id).await?;
         let guard = record.lock().await;
@@ -346,6 +384,43 @@ fn prune_store(store: &mut JobStore) {
     }
 }
 
+struct ActiveSlot(Arc<AtomicUsize>);
+
+impl Drop for ActiveSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Transition a queued job to running. Returns false when the job was already
+/// cancelled (or otherwise terminal) before the task got to start it. This is
+/// the cancel/queued race barrier: cancellation and this transition both hold
+/// the record mutex, so a cancelled job never gets a `started` event.
+fn begin_job(record: &mut JobRecord, plugin: &str, function: &str) -> bool {
+    if record.state.is_terminal() {
+        return false;
+    }
+    record.state = JobState::Running;
+    record.started_unix_ms = Some(now_ms());
+    push_event(
+        record,
+        "started",
+        json!({ "plugin": plugin, "function": function }),
+    );
+    true
+}
+
+fn bound_result(value: Value) -> (Value, bool) {
+    let size = serde_json::to_vec(&value)
+        .map(|bytes| bytes.len())
+        .unwrap_or(usize::MAX);
+    if size > MAX_RESULT_BYTES {
+        (json!({ "truncated": true, "original_bytes": size }), true)
+    } else {
+        (value, false)
+    }
+}
+
 async fn run_job(
     executor: Arc<dyn JobExecutor>,
     record: Arc<Mutex<JobRecord>>,
@@ -355,15 +430,15 @@ async fn run_job(
     args: Vec<Value>,
     timeout_ms: u64,
 ) {
+    // Releases the active slot on every exit path, including a panic in the
+    // executor future (which is caught below) or in this task.
+    let _active_slot = ActiveSlot(active);
+
     let cancel = {
         let mut guard = record.lock().await;
-        guard.state = JobState::Running;
-        guard.started_unix_ms = Some(now_ms());
-        push_event(
-            &mut guard,
-            "started",
-            json!({ "plugin": plugin, "function": function }),
-        );
+        if !begin_job(&mut guard, &plugin, &function) {
+            return;
+        }
         guard.cancel.clone()
     };
     let handle = JobHandle {
@@ -389,10 +464,22 @@ async fn run_job(
         })
     };
 
-    let outcome = tokio::select! {
-        result = executor.run(plugin.clone(), function.clone(), args, handle) => Outcome::Done(result),
-        _ = wait_cancelled(record.clone()) => Outcome::Cancelled,
-        _ = tokio::time::sleep(Duration::from_millis(timeout_ms)) => Outcome::Timeout,
+    let run = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        executor.run(plugin.clone(), function.clone(), args, handle)
+    }));
+    let outcome = match run {
+        Ok(run) => {
+            let run = AssertUnwindSafe(run).catch_unwind();
+            tokio::select! {
+                result = run => match result {
+                    Ok(result) => Outcome::Done(result),
+                    Err(_) => Outcome::Panic,
+                },
+                _ = wait_cancelled(record.clone()) => Outcome::Cancelled,
+                _ = tokio::time::sleep(Duration::from_millis(timeout_ms)) => Outcome::Timeout,
+            }
+        }
+        Err(_) => Outcome::Panic,
     };
     heartbeat.abort();
 
@@ -401,10 +488,16 @@ async fn run_job(
         if !guard.state.is_terminal() {
             match outcome {
                 Outcome::Done(Ok(result)) => {
+                    let (result, truncated) = bound_result(result);
                     guard.result = Some(result);
                     guard.state = JobState::Succeeded;
                     guard.finished_unix_ms = Some(now_ms());
-                    push_event(&mut guard, "finished", json!({ "state": "succeeded" }));
+                    let data = if truncated {
+                        json!({ "state": "succeeded", "truncated": true })
+                    } else {
+                        json!({ "state": "succeeded" })
+                    };
+                    push_event(&mut guard, "finished", data);
                 }
                 Outcome::Done(Err(error)) => {
                     guard.error = Some(error);
@@ -428,16 +521,26 @@ async fn run_job(
                         json!({ "state": "failed", "reason": "timeout" }),
                     );
                 }
+                Outcome::Panic => {
+                    guard.error = Some("job panicked".to_string());
+                    guard.state = JobState::Failed;
+                    guard.finished_unix_ms = Some(now_ms());
+                    push_event(
+                        &mut guard,
+                        "finished",
+                        json!({ "state": "failed", "reason": "panic" }),
+                    );
+                }
             }
         }
     }
-    active.fetch_sub(1, Ordering::SeqCst);
 }
 
 enum Outcome {
     Done(Result<Value, String>),
     Cancelled,
     Timeout,
+    Panic,
 }
 
 async fn wait_cancelled(record: Arc<Mutex<JobRecord>>) {
@@ -479,23 +582,27 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn new_job_id() -> String {
+fn new_job_id() -> Result<String, (StatusCode, String)> {
     use ring::rand::{SecureRandom, SystemRandom};
+    job_id_from_fill(|bytes| SystemRandom::new().fill(bytes).map_err(|_| ()))
+}
+
+fn job_id_from_fill(
+    fill: impl FnOnce(&mut [u8]) -> Result<(), ()>,
+) -> Result<String, (StatusCode, String)> {
     let mut bytes = [0u8; 16];
-    if SystemRandom::new().fill(&mut bytes).is_ok() {
-        let mut id = String::with_capacity(32);
-        for byte in bytes {
-            use std::fmt::Write;
-            let _ = write!(id, "{byte:02x}");
-        }
-        return id;
+    fill(&mut bytes).map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to generate job id".to_string(),
+        )
+    })?;
+    let mut id = String::with_capacity(32);
+    for byte in bytes {
+        use std::fmt::Write;
+        let _ = write!(id, "{byte:02x}");
     }
-    static FALLBACK: AtomicU64 = AtomicU64::new(0);
-    format!(
-        "job-{}-{}",
-        now_ms(),
-        FALLBACK.fetch_add(1, Ordering::SeqCst)
-    )
+    Ok(id)
 }
 
 // ---------------------------------------------------------------------------
@@ -540,6 +647,7 @@ pub(crate) async fn cancel_job(
 pub(crate) async fn job_events(
     State(state): State<super::AppState>,
     AxumPath(id): AxumPath<String>,
+    headers: HeaderMap,
 ) -> Result<
     Sse<impl futures::Stream<Item = Result<Event, std::convert::Infallible>>>,
     (StatusCode, String),
@@ -549,10 +657,32 @@ pub(crate) async fn job_events(
         .record(&id)
         .await
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown job {id}")))?;
+    let job_permit = {
+        let guard = record.lock().await;
+        guard
+            .stream_slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| {
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    format!("too many event streams for this job (limit {MAX_STREAMS_PER_JOB})"),
+                )
+            })?
+    };
+    let global_permit = state.jobs.try_stream_permit()?;
+    let last_event_id = headers
+        .get("last-event-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+
     let stream = async_stream::stream! {
-        let mut last = 0u64;
+        let _job_permit = job_permit;
+        let _global_permit = global_permit;
+        let mut last = last_event_id;
         loop {
-            let (snapshot, terminal) = {
+            let (snapshot, terminal, first_seq) = {
                 let guard = record.lock().await;
                 (
                     guard
@@ -562,8 +692,19 @@ pub(crate) async fn job_events(
                         .cloned()
                         .collect::<Vec<_>>(),
                     guard.state.is_terminal(),
+                    guard.events.front().map(|event| event.seq),
                 )
             };
+            if let Some(first) = first_seq {
+                if first > last.saturating_add(1) {
+                    let data = json!({
+                        "requested_after": last,
+                        "first_available": first,
+                    })
+                    .to_string();
+                    yield Ok(Event::default().event("dropped").data(data));
+                }
+            }
             for event in snapshot {
                 last = event.seq;
                 let data = serde_json::to_string(&event).unwrap_or_default();
@@ -582,6 +723,15 @@ pub(crate) async fn job_events(
         }
     };
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+/// Job responses are per-call state and must never be cached.
+pub(crate) async fn no_store(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
 // ---------------------------------------------------------------------------
@@ -728,6 +878,8 @@ mod tests {
         WaitCancel,
         Sleep(u64),
         EmitMany(usize),
+        HugeResult(usize),
+        Panic,
     }
 
     struct FakeExecutor {
@@ -772,6 +924,8 @@ mod tests {
                         }
                         Ok(json!("done"))
                     }
+                    FakeMode::HugeResult(size) => Ok(json!("x".repeat(size))),
+                    FakeMode::Panic => panic!("fake executor panic"),
                 }
             })
         }
@@ -797,17 +951,21 @@ mod tests {
         }
     }
 
-    async fn request(
+    async fn raw_request(
         router: &axum::Router,
         method: &str,
         uri: &str,
         body: Option<Value>,
-    ) -> (StatusCode, String) {
+        headers: &[(&str, &str)],
+    ) -> Response {
         use axum::body::Body;
         use axum::http::Request;
         use tower::ServiceExt;
 
         let mut builder = Request::builder().method(method).uri(uri);
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
         let body = match body {
             Some(value) => {
                 builder = builder.header("content-type", "application/json");
@@ -815,16 +973,35 @@ mod tests {
             }
             None => Body::empty(),
         };
-        let response = router
+        router
             .clone()
             .oneshot(builder.body(body).unwrap())
             .await
-            .unwrap();
+            .unwrap()
+    }
+
+    async fn request_with_headers(
+        router: &axum::Router,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, String) {
+        let response = raw_request(router, method, uri, body, headers).await;
         let status = response.status();
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
         (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    async fn request(
+        router: &axum::Router,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, String) {
+        request_with_headers(router, method, uri, body, &[]).await
     }
 
     async fn create_job(router: &axum::Router, function: &str, args: Value) -> String {
@@ -854,6 +1031,16 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         panic!("job {id} did not reach a terminal state");
+    }
+
+    async fn wait_idle(jobs: &JobManager) {
+        for _ in 0..200 {
+            if jobs.active_jobs() == 0 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("job slots were not released");
     }
 
     #[tokio::test]
@@ -994,5 +1181,227 @@ mod tests {
             value["events"].as_array().unwrap().len(),
             MAX_EVENTS_PER_JOB
         );
+    }
+
+    #[test]
+    fn begin_job_does_not_start_a_cancelled_job() {
+        let mut record = JobRecord::new(
+            "job-id".to_string(),
+            "example".to_string(),
+            "slow-sum".to_string(),
+        );
+        record.state = JobState::Cancelled;
+        record.finished_unix_ms = Some(now_ms());
+        assert!(!begin_job(&mut record, "example", "slow-sum"));
+        assert_eq!(record.state, JobState::Cancelled);
+        assert!(record.started_unix_ms.is_none());
+        assert!(!record.events.iter().any(|event| event.event == "started"));
+    }
+
+    #[tokio::test]
+    async fn immediate_cancel_after_create_stays_cancelled() {
+        let executor = Arc::new(FakeExecutor {
+            mode: FakeMode::Sleep(200),
+            timeout_ms: 5_000,
+        });
+        let state = test_state(executor);
+        let jobs = state.jobs.clone();
+        let router = crate::build_router(state).unwrap();
+        for _ in 0..20 {
+            let id = create_job(&router, "slow-sum", json!([])).await;
+            let (status, _) = request(&router, "POST", &format!("/jobs/{id}/cancel"), None).await;
+            assert_eq!(status, StatusCode::OK);
+            let value = wait_terminal(&router, &id).await;
+            assert_eq!(value["state"], "cancelled");
+            assert!(
+                value["events"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|event| event["event"] == "finished"
+                        && event["data"]["state"] == "cancelled")
+            );
+            wait_idle(&jobs).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn function_name_limit_is_enforced() {
+        let executor = Arc::new(FakeExecutor {
+            mode: FakeMode::ProgressThenDone,
+            timeout_ms: 5_000,
+        });
+        let router = crate::build_router(test_state(executor)).unwrap();
+        let function = "f".repeat(MAX_FUNCTION_BYTES + 1);
+        let (status, body) = request(
+            &router,
+            "POST",
+            "/plugin/example/call/jobs",
+            Some(json!({ "function": function, "args": [] })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains("function exceeds"), "unexpected body: {body}");
+    }
+
+    #[tokio::test]
+    async fn oversized_result_is_marked_truncated() {
+        let executor = Arc::new(FakeExecutor {
+            mode: FakeMode::HugeResult(MAX_RESULT_BYTES + 1),
+            timeout_ms: 5_000,
+        });
+        let router = crate::build_router(test_state(executor)).unwrap();
+        let id = create_job(&router, "slow-sum", json!([])).await;
+        let value = wait_terminal(&router, &id).await;
+        assert_eq!(value["state"], "succeeded");
+        assert_eq!(value["result"]["truncated"], true);
+        assert!(value["result"]["original_bytes"].as_u64().unwrap() > MAX_RESULT_BYTES as u64);
+
+        let (status, body) = request(&router, "GET", &format!("/jobs/{id}/events"), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains("\"truncated\":true"),
+            "SSE should signal the truncated result: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn executor_panic_fails_the_job_and_releases_the_slot() {
+        let executor = Arc::new(FakeExecutor {
+            mode: FakeMode::Panic,
+            timeout_ms: 5_000,
+        });
+        let state = test_state(executor);
+        let jobs = state.jobs.clone();
+        let router = crate::build_router(state).unwrap();
+        for _ in 0..MAX_ACTIVE_JOBS {
+            let id = create_job(&router, "slow-sum", json!([])).await;
+            let value = wait_terminal(&router, &id).await;
+            assert_eq!(value["state"], "failed");
+            assert_eq!(value["error"], "job panicked");
+            wait_idle(&jobs).await;
+        }
+        // A leaked slot would make this the (MAX_ACTIVE_JOBS + 1)th active job.
+        let id = create_job(&router, "slow-sum", json!([])).await;
+        assert_eq!(wait_terminal(&router, &id).await["state"], "failed");
+    }
+
+    #[tokio::test]
+    async fn sse_subscriber_limits_are_enforced() {
+        let executor = Arc::new(FakeExecutor {
+            mode: FakeMode::WaitCancel,
+            timeout_ms: 5_000,
+        });
+        let router = crate::build_router(test_state(executor)).unwrap();
+        let id = create_job(&router, "slow-sum", json!([])).await;
+
+        let mut held = Vec::new();
+        for _ in 0..MAX_STREAMS_PER_JOB {
+            let response =
+                raw_request(&router, "GET", &format!("/jobs/{id}/events"), None, &[]).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            held.push(response);
+        }
+        let response = raw_request(&router, "GET", &format!("/jobs/{id}/events"), None, &[]).await;
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        drop(held);
+
+        let manager = JobManager::new(Arc::new(FakeExecutor {
+            mode: FakeMode::WaitCancel,
+            timeout_ms: 5_000,
+        }));
+        let mut permits = Vec::new();
+        for _ in 0..MAX_STREAMS_GLOBAL {
+            permits.push(manager.try_stream_permit().unwrap());
+        }
+        assert_eq!(
+            manager.try_stream_permit().unwrap_err().0,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        drop(permits);
+        assert!(manager.try_stream_permit().is_ok());
+
+        let (status, _) = request(&router, "POST", &format!("/jobs/{id}/cancel"), None).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn sse_honours_last_event_id_and_signals_dropped_events() {
+        let executor = Arc::new(FakeExecutor {
+            mode: FakeMode::EmitMany(10),
+            timeout_ms: 5_000,
+        });
+        let router = crate::build_router(test_state(executor)).unwrap();
+        let id = create_job(&router, "slow-sum", json!([])).await;
+        wait_terminal(&router, &id).await;
+
+        let (status, body) = request_with_headers(
+            &router,
+            "GET",
+            &format!("/jobs/{id}/events"),
+            None,
+            &[("last-event-id", "10")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains("id: 11"),
+            "Last-Event-ID not honoured: {body}"
+        );
+        assert!(!body.contains("id: 10"), "replayed consumed event: {body}");
+
+        let executor = Arc::new(FakeExecutor {
+            mode: FakeMode::EmitMany(MAX_EVENTS_PER_JOB + 40),
+            timeout_ms: 5_000,
+        });
+        let router = crate::build_router(test_state(executor)).unwrap();
+        let id = create_job(&router, "slow-sum", json!([])).await;
+        wait_terminal(&router, &id).await;
+        let (status, body) = request_with_headers(
+            &router,
+            "GET",
+            &format!("/jobs/{id}/events"),
+            None,
+            &[("last-event-id", "0")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("event: dropped"), "missing dropped: {body}");
+        assert!(
+            body.contains("\"first_available\""),
+            "missing drop metadata: {body}"
+        );
+        assert!(body.contains("event: end"), "missing end: {body}");
+    }
+
+    #[tokio::test]
+    async fn job_responses_disable_caching() {
+        let executor = Arc::new(FakeExecutor {
+            mode: FakeMode::ProgressThenDone,
+            timeout_ms: 5_000,
+        });
+        let router = crate::build_router(test_state(executor)).unwrap();
+        let id = create_job(&router, "slow-sum", json!([])).await;
+        let response = raw_request(&router, "GET", &format!("/jobs/{id}"), None, &[]).await;
+        assert_eq!(
+            response
+                .headers()
+                .get("cache-control")
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+    }
+
+    #[test]
+    fn job_id_generation_fails_closed() {
+        let (status, message) = job_id_from_fill(|_| Err(())).unwrap_err();
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(message.contains("failed to generate job id"));
+        let id = job_id_from_fill(|bytes| {
+            bytes.fill(0xab);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(id, "ab".repeat(16));
     }
 }

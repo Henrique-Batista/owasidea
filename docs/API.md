@@ -264,11 +264,19 @@ data: {"state":"succeeded"}
 ```
 
 `event: end` is always last and closes the stream. A client that connects after
-the job finished receives the buffered events and the `end` immediately.
+the job finished receives the buffered events and the `end` immediately. Send
+`Last-Event-ID: <seq>` to resume after a known event; if the ring already
+dropped events, the stream emits `event: dropped` with
+`{"requested_after":N,"first_available":M}` before the replay. A result larger
+than 256 KiB is returned as `{"truncated":true,"original_bytes":N}`, and the
+`finished` event carries `"truncated":true`. Every `/jobs/*` response sets
+`Cache-Control: no-store`.
 
 Cancel returns `200` with the current job. Cancelling a terminal job does not
-change it. The prototype drops the executor future; it cannot preempt a guest
-that never yields.
+change it. A job cancelled while still `queued` never emits `started` and ends
+`cancelled`. The prototype drops the executor future; it cannot preempt a guest
+that never yields. An executor panic fails the job (`job panicked`) and releases
+its slot.
 
 Limits (per host process):
 
@@ -276,10 +284,20 @@ Limits (per host process):
 - 64 retained terminal jobs;
 - 256 events per job (oldest dropped first);
 - 64 KiB serialized `args` (`413`);
+- 256-byte function name (`400`);
+- 256 KiB serialized result (larger becomes truncated metadata);
 - 8 KiB per event `data` (larger payloads become `{"truncated":true}`);
+- 4 SSE readers per job and 64 globally (`429` beyond that);
 - timeout `clamp(manifest permissions.resources.timeout_ms, 1, 300000)` ms,
   default 30 s; a timeout marks the job `failed`, it is not a `504`;
 - `progress` heartbeat every 500 ms while the call runs.
+
+Job ids are 128-bit random values. If the RNG fails, creation returns `500`
+instead of falling back to a predictable id. Job ids are not written to logs;
+HTTP traces redact `/jobs/<id>` to `/jobs/{id}`.
+
+The host refuses to bind a non-loopback address unless
+`--allow-non-loopback` or `OWASIDEA_ALLOW_NON_LOOPBACK=1` is set.
 
 Jobs share the plugin's `instance_slots` (`permissions.resources.max_instances`,
 default 1), so a long job serializes other calls to the same plugin unless the

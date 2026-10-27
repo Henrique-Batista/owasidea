@@ -115,8 +115,10 @@ Erros antes da criação:
 | Plugin desconhecido | `404` | `unknown plugin {name}` |
 | Plugin não é `library`/`hybrid` | `400` | `plugin {name} is a … plugin; jobs only run library exports` |
 | `function` vazio | `400` | `function must not be empty` |
+| `function` > 256 bytes | `400` | `function exceeds 256 bytes` |
 | `args` > 64 KiB serializados | `413` | `args exceed 65536 bytes` |
 | > 8 jobs ativos | `429` | `too many active jobs (limit 8)` |
+| RNG falhou | `500` | `failed to generate job id` |
 | Export inexistente/aridade/tipo | `202`, depois job `failed` | `error` no status |
 
 O export inexistente só é descoberto ao instanciar o componente; por isso vira
@@ -174,9 +176,18 @@ data: {"state":"succeeded"}
 - `id` é o `seq` monotônico do job (não reinicia quando o ring descarta eventos).
 - `event: job` cobre `queued`, `started`, `progress` e `finished`.
 - `event: end` é sempre o último e encerra o stream.
+- O header `Last-Event-ID` é honrado: o stream começa depois do `seq` informado.
+  Um valor inválido é ignorado (equivale a `0`).
+- Se o ring descartou eventos entre o último visto e o primeiro disponível, o
+  stream emite `event: dropped` com `{"requested_after":N,"first_available":M}`
+  antes do replay.
+- Se o resultado foi truncado por `MAX_RESULT_BYTES`, o evento `finished`
+  carrega `"truncated": true`.
 - O stream faz polling interno de 50 ms; não há canal unbounded nem task por
   cliente além do próprio handler.
 - Cliente lento não bloqueia o produtor: eventos ficam no ring do job.
+- Assinantes SSE são limitados: 4 por job e 64 no host; excedente recebe `429`.
+- Todas as respostas `/jobs/*` levam `Cache-Control: no-store`.
 
 ### Cancelar job
 
@@ -198,14 +209,28 @@ Constantes do protótipo (`crates/host/src/jobs.rs`):
 | `MAX_EVENTS_PER_JOB` | 256 | ring buffer; descarta o evento mais antigo |
 | `MAX_ARGS_BYTES` | 64 KiB | `413` antes de criar |
 | `MAX_EVENT_BYTES` | 8 KiB | `data` maior vira `{"truncated":true}` |
+| `MAX_RESULT_BYTES` | 256 KiB | resultado maior vira `{"truncated":true,"original_bytes":N}` |
+| `MAX_FUNCTION_BYTES` | 256 | nome de função maior recebe `400` |
+| `MAX_STREAMS_PER_JOB` | 4 | `429` ao abrir o quinto SSE do mesmo job |
+| `MAX_STREAMS_GLOBAL` | 64 | `429` ao abrir o 65º SSE no host |
 | `PROGRESS_HEARTBEAT_MS` | 500 ms | heartbeat `progress` |
 | timeout default | 30 s | igual a `/call` |
 | timeout máximo | 300 s | `clamp` do valor do manifesto |
 
 O job manager reserva slot com `compare_exchange` antes de criar a task, então
 duas requisições concorrentes não ultrapassam `MAX_ACTIVE_JOBS`. O slot é
-liberado no fim da task (sucesso, falha, timeout ou cancelamento). Um job
+liberado por um guard com `Drop`, inclusive quando o executor entra em panic.
+Um panic é capturado com `catch_unwind`, o job vira `failed` (`job panicked`) e
+o slot é liberado; o panic não derruba a task de serviço do host. Um job
 terminal permanece consultável até ser podado por retenção.
+
+A corrida `cancel` × `queued` é resolvida sob o mutex do registro: a transição
+para `running` e a emissão de `started` só acontecem se o job ainda não for
+terminal. Se o cancelamento vencer, a task não executa o guest e o job termina
+`cancelled` sem evento `started`.
+
+O id do job é gerado com 128 bits do `ring::SystemRandom`. Se o RNG falhar, a
+criação falha fechada com `500` e nenhum id previsível é emitido.
 
 Jobs usam o mesmo `instance_slots` do plugin que `/call`
 (`permissions.resources.max_instances`, default 1). Com o default, um job longo
@@ -216,18 +241,28 @@ limite por plugin.
 ## Segurança
 
 - **Superfície:** as rotas só existem com a feature ligada. O CORS existente
-  continua restrito às origens Tauri/Vite; não há `Origin: null`.
-- **IDs:** 128 bits aleatórios; não são sequenciais nem adivinháveis.
+  continua restrito às origens Tauri/Vite; não há `Origin: null`. Respostas
+  `/jobs/*` usam `Cache-Control: no-store`.
+- **Bind local:** o host recusa bind em endereço não-loopback sem
+  `--allow-non-loopback` ou `OWASIDEA_ALLOW_NON_LOOPBACK=1`; a checagem é feita
+  antes e depois do bind. O default continua `127.0.0.1`.
+- **IDs:** 128 bits aleatórios; não são sequenciais nem adivinháveis. Falha do
+  RNG é fail-closed (`500`), nunca fallback previsível. Ids de job não são
+  escritos em logs/traces; spans HTTP redigem `/jobs/<id>` para `/jobs/{id}`.
 - **Isolamento:** cada job usa o mesmo `PluginRuntime`/linker e as mesmas
   permissões do plugin; jobs não ampliam capabilities.
-- **Limites:** payload, concorrência, eventos, timeout e retenção são aplicados
-  no host. O guest continua limitado por fuel/memória do manifesto.
+- **Limites:** payload, resultado, nome de função, concorrência, eventos,
+  assinantes SSE, timeout e retenção são aplicados no host. O guest continua
+  limitado por fuel/memória do manifesto.
 - **Vazamento:** eventos carregam apenas estado/progresso e a mensagem de erro
   do host. Não incluem stack trace, paths, SQL ou segredos. Erros do guest são
-  reduzidos a `error: <mensagem>`.
-- **DoS:** o número de jobs ativos é fixo; o ring buffer é fixo; SSE não cria
-  fila ilimitada. Um cliente pode abrir vários SSE para o mesmo job, mas cada
-  um lê o ring e termina no `end`.
+  reduzidos a `error: <mensagem>`. Resultado acima de 256 KiB é substituído por
+  metadados de truncamento, não devolvido inteiro.
+- **DoS:** o número de jobs ativos é fixo; o ring buffer é fixo; SSE é limitado
+  a 4 leitores por job e 64 no host, sem fila ilimitada. Um cliente lento não
+  bloqueia o produtor.
+- **Panic:** panic do executor é capturado, marca o job `failed` e libera o slot
+  via guard; não derruba o processo nem vaza concorrência.
 - **Cancelamento:** não há preempção cooperativa do guest no protótipo. O host
   descarta o future e a instância; um guest que não devolve controle continua
   consumindo CPU até o drop/timeout do Wasmtime. Isso é uma limitação
@@ -258,12 +293,23 @@ Implementados em `crates/host/src/jobs.rs` (`#[cfg(test)]`) e
 - criar job → `202`, id opaco, URLs de status/eventos/cancelamento;
 - consultar job em andamento e terminal (resultado e erro);
 - cancelar job → `cancelled`, evento `finished`, idempotência;
+- cancelamento imediato após criar (incluindo job ainda `queued`) → permanece
+  `cancelled`, sem `started` sobrescrevendo o estado;
 - cancelar/consultar id desconhecido → `404`;
 - SSE emite `queued`/`started`/`progress`/`finished`, termina com `event: end`
   e faz replay quando o cliente conecta após o fim;
-- `args` acima do limite → `413`;
+- `Last-Event-ID` é honrado e eventos descartados pelo ring geram
+  `event: dropped`;
+- resultado acima de `MAX_RESULT_BYTES` vira `{"truncated":true}` no status e
+  no evento `finished`;
+- `args` acima do limite → `413`; nome de função acima de 256 bytes → `400`;
 - nono job concorrente → `429`;
+- quinto SSE do mesmo job e 65º SSE global → `429`;
 - timeout do job → `failed` com erro de timeout, sem travar o host;
+- panic do executor → job `failed` e slot liberado (novo job aceito);
+- falha do RNG → `500`, sem id previsível;
+- respostas `/jobs/*` têm `Cache-Control: no-store`;
+- bind não-loopback sem opt-in → erro; loopback continua permitido;
 - ring buffer de eventos limitado a `MAX_EVENTS_PER_JOB`;
 - feature desligada: rotas de job ausentes (`404`) e `/call` continua roteado
   (teste `job_routes_are_absent_without_streaming_feature`).

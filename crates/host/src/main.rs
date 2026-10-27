@@ -21,6 +21,9 @@ async fn main() -> Result<()> {
                     addr = v;
                 }
             }
+            "--allow-non-loopback" => {
+                std::env::set_var("OWASIDEA_ALLOW_NON_LOOPBACK", "1");
+            }
             other => {
                 manifests_dir = other.to_string();
             }

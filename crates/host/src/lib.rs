@@ -2429,7 +2429,10 @@ fn cors_layer() -> Result<CorsLayer> {
     Ok(CorsLayer::new()
         .allow_origin(AllowOrigin::list(origins))
         .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
-        .allow_headers([header::CONTENT_TYPE]))
+        .allow_headers([
+            header::CONTENT_TYPE,
+            header::HeaderName::from_static("last-event-id"),
+        ]))
 }
 
 fn default_val(ty: &Type) -> Val {
@@ -2951,6 +2954,36 @@ fn validate_ui_entry(entry: &str) -> Result<()> {
     Ok(())
 }
 
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .is_ok_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+}
+
+/// The host API is local by default. Binding to a non-loopback address (for
+/// example `0.0.0.0`) exposes every plugin route to the network and therefore
+/// requires an explicit opt-in.
+fn ensure_loopback_bind(addr: &str, allow_non_loopback: bool) -> Result<()> {
+    if allow_non_loopback {
+        return Ok(());
+    }
+    let parsed = if let Ok(parsed) = addr.parse::<SocketAddr>() {
+        parsed
+    } else if let Some(port) = addr
+        .strip_prefix("localhost:")
+        .and_then(|port| port.parse::<u16>().ok())
+    {
+        SocketAddr::from((Ipv4Addr::LOCALHOST, port))
+    } else {
+        anyhow::bail!("invalid bind address {addr:?}; expected host:port");
+    };
+    if !parsed.ip().is_loopback() {
+        anyhow::bail!(
+            "refusing to bind non-loopback address {addr}; pass --allow-non-loopback or set OWASIDEA_ALLOW_NON_LOOPBACK=1"
+        );
+    }
+    Ok(())
+}
+
 pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
     // Plain logs by default; OTLP export only when the `otel` feature is on and
     // OTEL_EXPORTER_OTLP_ENDPOINT is set (RL-05).
@@ -3196,8 +3229,15 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
 
     let app = build_router(state)?;
 
+    let allow_non_loopback = env_flag("OWASIDEA_ALLOW_NON_LOOPBACK");
+    ensure_loopback_bind(&addr, allow_non_loopback)?;
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     let local_addr = listener.local_addr()?;
+    if !allow_non_loopback && !local_addr.ip().is_loopback() {
+        anyhow::bail!(
+            "refusing to serve on non-loopback address {local_addr}; pass --allow-non-loopback or set OWASIDEA_ALLOW_NON_LOOPBACK=1"
+        );
+    }
     tracing::info!("listening on http://{}", local_addr);
     println!("host listening on http://{}", local_addr);
     axum::serve(listener, app)
@@ -3297,11 +3337,14 @@ fn build_router(state: AppState) -> Result<Router> {
 
     // Experimental long-call jobs (ADR-0005). Registered only with the feature.
     #[cfg(feature = "streaming")]
-    let app = app
-        .route("/plugin/{name}/call/jobs", post(jobs::create_job))
-        .route("/jobs/{id}", get(jobs::get_job))
-        .route("/jobs/{id}/events", get(jobs::job_events))
-        .route("/jobs/{id}/cancel", post(jobs::cancel_job));
+    let app = app.merge(
+        Router::new()
+            .route("/plugin/{name}/call/jobs", post(jobs::create_job))
+            .route("/jobs/{id}", get(jobs::get_job))
+            .route("/jobs/{id}/events", get(jobs::job_events))
+            .route("/jobs/{id}/cancel", post(jobs::cancel_job))
+            .layer(middleware::from_fn(jobs::no_store)),
+    );
 
     // W3C traceparent propagation: only compiled with the `otel` feature, and a
     // passthrough at runtime unless OTLP export is configured.
@@ -3518,6 +3561,16 @@ mod tests {
                 "{method} {uri} must not be routed without the streaming feature"
             );
         }
+    }
+
+    #[test]
+    fn non_loopback_bind_requires_explicit_opt_in() {
+        assert!(ensure_loopback_bind("127.0.0.1:8787", false).is_ok());
+        assert!(ensure_loopback_bind("[::1]:8787", false).is_ok());
+        assert!(ensure_loopback_bind("localhost:8787", false).is_ok());
+        assert!(ensure_loopback_bind("0.0.0.0:8787", false).is_err());
+        assert!(ensure_loopback_bind("[::]:8787", false).is_err());
+        assert!(ensure_loopback_bind("0.0.0.0:8787", true).is_ok());
     }
 
     #[test]
