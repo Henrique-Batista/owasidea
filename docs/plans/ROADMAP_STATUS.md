@@ -58,8 +58,8 @@ Status permitidos: `todo`, `doing`, `review`, `done`, `blocked`.
 | CT-07 | done | wt-ui | 4fda7b1 + 3e17d75 + d0f9547 (merge 22e5850) | Playwright raiz 11/11 + Shipyard 7/7 | SDK same-origin; board-svelte chama changelog-ts.render |
 | CT-08 | done | wt-host | bf344eb + 63b308f (merge 28cd8b1) | fmt/clippy/test + Shipyard build/smoke; SEC aprovado | schema_version/host_abi/min_host; legado aceito; semver |
 | AX-01 | done | wt-config | 6e79863 (merge d2326cf) | fmt/clippy/test | templates em `crates/cli/templates/`; main.rs sem strings grandes |
-| AX-02 | todo | — | — | — | — |
-| AX-03 | todo | — | — | — | — |
+| AX-02 | done | wt-config | 97e5b84 (merge 48b0b94) | fmt/clippy/test + scaffold Svelte build real | Svelte/React/Vue/Yew/Blazor/Uno; `ui_build`/base `./` |
+| AX-03 | done | wt-authoring | 4688d11 (merge 06f026f) | fmt/clippy/test | README com build/call/permissões/teste; WIT C# sem duplicação |
 | AX-04 | todo | — | — | — | — |
 | AX-05 | todo | — | — | — | — |
 | AX-06 | todo | — | — | — | — |
