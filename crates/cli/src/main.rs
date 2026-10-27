@@ -107,6 +107,15 @@ enum Commands {
         /// Overwrite an existing generated smoke file.
         #[arg(long)]
         force: bool,
+        /// Filter smoke calls/http/services by substring of plugin/function.
+        #[arg(long)]
+        filter: Option<String>,
+        /// Restrict smoke runs to a single plugin name.
+        #[arg(long)]
+        plugin: Option<String>,
+        /// Re-run tests when manifests/config/plugins change.
+        #[arg(long)]
+        watch: bool,
     },
     /// Build and run the configured API smoke checks.
     #[command(about = "Build and run the configured API smoke checks.")]
@@ -735,6 +744,9 @@ async fn main() -> anyhow::Result<()> {
             no_ui,
             generate,
             force,
+            filter,
+            plugin,
+            watch,
         } => {
             if generate {
                 let root = app_root(&cli.config);
@@ -746,10 +758,15 @@ async fn main() -> anyhow::Result<()> {
                 cmd_test(
                     &cli.config,
                     &cli.manifest_dir,
-                    !no_build,
-                    !no_smoke,
-                    !no_ui,
-                    cli.json,
+                    &TestOptions {
+                        build: !no_build,
+                        smoke: !no_smoke,
+                        ui: !no_ui,
+                        json: cli.json,
+                        filter: filter.as_deref(),
+                        plugin: plugin.as_deref(),
+                        watch,
+                    },
                 )
                 .await
             }
@@ -758,10 +775,15 @@ async fn main() -> anyhow::Result<()> {
             cmd_test(
                 &cli.config,
                 &cli.manifest_dir,
-                !no_build,
-                true,
-                false,
-                cli.json,
+                &TestOptions {
+                    build: !no_build,
+                    smoke: true,
+                    ui: false,
+                    json: cli.json,
+                    filter: None,
+                    plugin: None,
+                    watch: false,
+                },
             )
             .await
         }
@@ -4547,8 +4569,17 @@ async fn run_api_smoke(
     manifest_dir: &Path,
     cfg: &AppConfig,
     json: bool,
+    filter: Option<&str>,
+    plugin: Option<&str>,
 ) -> anyhow::Result<usize> {
     let root = app_root(config_path);
+    if let Some(plugin) = plugin {
+        let configured = cfg.plugins.clone().unwrap_or_default();
+        if !configured.contains_key(plugin) {
+            eprintln!("unknown plugin: {plugin}");
+            return Ok(1);
+        }
+    }
     let manifest_abs = std::fs::canonicalize(manifest_dir)
         .map_err(|_| anyhow::anyhow!("manifests not found at {}", manifest_dir.display()))?;
     let config_abs = std::fs::canonicalize(config_path)?;
@@ -4636,6 +4667,17 @@ async fn run_api_smoke(
 
     let smoke = cfg.smoke.clone().unwrap_or_default();
     for call in &smoke.calls {
+        if let Some(plugin) = plugin {
+            if call.plugin != plugin {
+                continue;
+            }
+        }
+        if let Some(filter) = filter {
+            let label = format!("{}.{}", call.plugin, call.function);
+            if !label.contains(filter) {
+                continue;
+            }
+        }
         let response = client
             .post(format!("{base}/plugin/{}/call", call.plugin))
             .json(&serde_json::json!({"function": call.function, "args": call.args}))
@@ -4703,6 +4745,16 @@ async fn run_api_smoke(
     }
 
     for service in &smoke.services {
+        if let Some(plugin) = plugin {
+            if service.plugin != plugin {
+                continue;
+            }
+        }
+        if let Some(filter) = filter {
+            if !service.plugin.contains(filter) {
+                continue;
+            }
+        }
         let plugin = &service.plugin;
         let started = client
             .post(format!("{base}/plugin/{plugin}/service/start"))
@@ -4775,28 +4827,55 @@ fn apply_signing_env_to(command: &mut std::process::Command, cfg: &AppConfig, ro
     );
 }
 
-async fn cmd_test(
-    config_path: &Path,
-    manifest_dir: &Path,
+#[derive(Clone, Copy)]
+struct TestOptions<'a> {
     build: bool,
     smoke: bool,
     ui: bool,
     json: bool,
+    filter: Option<&'a str>,
+    plugin: Option<&'a str>,
+    watch: bool,
+}
+
+async fn cmd_test(
+    config_path: &Path,
+    manifest_dir: &Path,
+    opts: &TestOptions<'_>,
 ) -> anyhow::Result<()> {
+    if opts.watch {
+        let mut inner = *opts;
+        inner.watch = false;
+        loop {
+            let _ = Box::pin(cmd_test(config_path, manifest_dir, &inner)).await;
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => { return Ok(()); }
+                _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+            }
+        }
+    }
     let root = app_root(config_path);
-    if build {
+    if opts.build {
         cmd_build(config_path, manifest_dir, true, false)?;
     }
     let cfg = read_app_config(config_path)?;
     let manifest_dir = app_path(&root, manifest_dir);
-    if !build {
+    if !opts.build {
         sign_all(&root, &manifest_dir, cfg.signing.as_ref())?;
     }
     let mut failures = 0usize;
-    if smoke {
-        failures += run_api_smoke(config_path, &manifest_dir, &cfg, json).await?;
+    if opts.smoke {
+        failures += run_api_smoke(
+            config_path,
+            &manifest_dir,
+            &cfg,
+            opts.json,
+            opts.filter,
+            opts.plugin,
+        )
+        .await?;
     }
-    if ui {
+    if opts.ui {
         let command = cfg
             .test
             .as_ref()
