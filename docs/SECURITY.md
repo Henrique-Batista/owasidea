@@ -102,3 +102,7 @@ configuration, not downloaded from the registry being checked.
    through deployment configuration.
 3. Preserve logs and the signed manifest for investigation.
 4. Publish a new immutable plugin version; do not replace an artifact in place.
+
+## Permission diffs (PX-01)
+
+`owasidea build` writes `permissions.lock.json` and `permissions.diff.json` in the manifest dir. Use `--fail-on-widen` to fail when a permission is added.

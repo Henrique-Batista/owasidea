@@ -258,6 +258,7 @@ struct AppState {
     dev_hot_reload: bool,
     dev_watch_paths: Vec<String>,
     dev_last_reload: Arc<std::sync::RwLock<std::collections::BTreeMap<String, ReloadStatus>>>,
+    manifests_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1135,6 +1136,17 @@ async fn plugin_manifest(
         .plugin(&name)
         .map(|p| Json(p.manifest.clone()))
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))
+}
+
+async fn permissions_diff(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let path = state.manifests_dir.join("permissions.diff.json");
+    let content = std::fs::read_to_string(&path)
+        .map_err(|_| (StatusCode::NOT_FOUND, "no permission diff".to_string()))?;
+    let v: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(v))
 }
 
 async fn plugin_logs(
@@ -2779,6 +2791,7 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
             .and_then(|raw| serde_json::from_str(&raw).ok())
             .unwrap_or_default(),
         dev_last_reload: Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
+        manifests_dir: manifests_dir.clone(),
     };
 
     async fn count_requests(
@@ -2832,6 +2845,7 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
         .route("/plugins", get(list_plugins))
         .route("/ui-plugins", get(list_ui_plugins))
         .route("/plugin/{name}/manifest", get(plugin_manifest))
+        .route("/permissions/diff", get(permissions_diff))
         .route("/plugin/{name}/logs", get(plugin_logs))
         .route("/plugin/{name}/logs/stream", get(plugin_logs_stream))
         .route("/plugin/{name}/reload", post(reload))

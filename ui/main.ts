@@ -94,9 +94,19 @@ async function renderPluginDetail(name: string) {
   const encodedName = encodeURIComponent(name);
   const manifest = await fetch(`${HOST}/plugin/${encodedName}/manifest`).then(r => r.json());
   const logs = await fetch(`${HOST}/plugin/${encodedName}/logs`).then(r => r.json()).catch(() => ({ logs: [] }));
+  const diff = await fetch(`${HOST}/permissions/diff`).then(r => r.json()).catch(() => ({ plugins: {} }));
   const exports = (manifest.exports || []).filter((exp: any) => exp.signature !== 'interface');
+  const pluginDiff = (diff.plugins || {})[name] || { added: [], removed: [] };
+  let diffHtml = '';
+  if ((pluginDiff.added || []).length || (pluginDiff.removed || []).length) {
+    diffHtml = `<div class="card"><h2>Permission changes</h2><ul>` +
+      (pluginDiff.added || []).map((x: string) => `<li style="color:#7f7">+ ${escapeHtml(x)}</li>`).join('') +
+      (pluginDiff.removed || []).map((x: string) => `<li style="color:#f77">- ${escapeHtml(x)}</li>`).join('') +
+      `</ul></div>`;
+  }
   let html = `<h1>Plugin: ${escapeHtml(name)}</h1>
     <button data-reload="1">reload plugin</button>
+    ${diffHtml}
     <div class="card"><h2>Manifest</h2><pre>${escapeHtml(JSON.stringify(manifest, null, 2))}</pre></div>
     <div class="card"><h2>Exports</h2>`;
   for (const exp of (manifest.exports || [])) {

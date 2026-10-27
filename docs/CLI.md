@@ -426,3 +426,7 @@ Skew detection (RF-08): the UI compares its runtime `build_id` (`window.__OWASID
 ## Error codes
 
 CLI errors may reference stable codes `OWASIDEA_E_*`. Use `owasidea explain <code>` (and `--json`) for details. Full catalog: `docs/ERRORS.md`.
+
+### Permission diff
+
+`owasidea build [--fail-on-widen]` compares effective permissions with `permissions.lock.json`.
