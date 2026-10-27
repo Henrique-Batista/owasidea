@@ -138,10 +138,9 @@ iframe with an integrity error.
 
 - The iframe uses `sandbox="allow-scripts allow-forms"`; it has an opaque origin
   and cannot read the parent DOM, cookies, or storage.
-- No host bridge is enabled by default. A UI plugin that needs live host data
-  must either be a main-dashboard view or opt into the planned allowlisted bridge
-  (ADR-0004, CT-05/CT-06/CT-07); the protocol remains least-privilege and
-  denied unless allowlisted.
+- Opt-in bridge: set `bridge = ["plugin.export"]` in `[plugins.<name>]`. `owasidea build`
+  validates each entry and writes `metadata.ui.bridge` (sorted, dedup). Parent creates
+  a `MessageChannel` only for UI plugins with non-empty bridge; protocol in ADR-0004.
 - UI plugins receive no WASI, KV, filesystem, socket, or native capabilities.
 - Keep each plugin's bundle self-contained: relative asset URLs (`base: './'`)
   and no cross-origin runtime fetches unless the Tauri CSP allows them.

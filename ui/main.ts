@@ -1,3 +1,4 @@
+import { attachBridge } from './bridge.ts';
 interface OwasideaRuntime {
   host?: string;
   app?: string;
@@ -306,6 +307,10 @@ async function renderUiPlugin(name: string) {
   frame.referrerPolicy = 'no-referrer';
   frame.style.cssText = 'width:100%;height:75vh;border:1px solid #8884;border-radius:8px';
   view.append(frame);
+
+  if (Array.isArray(plugin.bridge) && plugin.bridge.length > 0) {
+    attachBridge(frame, plugin, HOST);
+  }
 
   let currentKey = `${plugin.version ?? ''}:${plugin.sha256 ?? ''}`;
   uiPluginReloadTimer = window.setInterval(async () => {
