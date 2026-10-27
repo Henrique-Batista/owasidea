@@ -23,6 +23,7 @@ use std::{
 };
 use tokio::{sync::Mutex, task::JoinHandle};
 use tower_http::cors::{AllowOrigin, CorsLayer};
+use tracing::Instrument;
 use wasmtime::component::{Component, Linker, ResourceTable, Type, Val};
 use wasmtime::{Engine, Store};
 use wasmtime_wasi::{
@@ -30,6 +31,7 @@ use wasmtime_wasi::{
 };
 use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpCtxView, WasiHttpView};
 
+mod otel;
 mod plugin_metrics;
 
 // ---------------------------------------------------------------------------
@@ -1420,6 +1422,7 @@ async fn greet(
         .requests
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         + 1;
+    let span = otel::call_span(&name, "greet", "library");
     let work = async {
         let (mut store, instance) = instantiate(&state.engine, p.as_ref())
             .await
@@ -1433,11 +1436,15 @@ async fn greet(
             .await
             .map_err(internal)?;
         Ok::<_, (StatusCode, String)>(Json(OutputRes { output }))
-    };
-    match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), work).await {
-        Ok(r) => r,
-        Err(_) => Err((StatusCode::GATEWAY_TIMEOUT, "request timed out".to_string())),
     }
+    .instrument(span.clone());
+    let result =
+        match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), work).await {
+            Ok(r) => r,
+            Err(_) => Err((StatusCode::GATEWAY_TIMEOUT, "request timed out".to_string())),
+        };
+    otel::record_outcome(&span, result.is_ok());
+    result
 }
 
 async fn complete(
@@ -1454,6 +1461,7 @@ async fn complete(
         .requests
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         + 1;
+    let span = otel::call_span(&name, "complete", "library");
     let work = async {
         let (mut store, instance) = instantiate(&state.engine, p.as_ref())
             .await
@@ -1470,11 +1478,15 @@ async fn complete(
             Ok(s) => Ok::<_, (StatusCode, String)>(Json(OutputRes { output: s })),
             Err(e) => Err((StatusCode::BAD_REQUEST, e)),
         }
-    };
-    match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), work).await {
-        Ok(r) => r,
-        Err(_) => Err((StatusCode::GATEWAY_TIMEOUT, "request timed out".to_string())),
     }
+    .instrument(span.clone());
+    let result =
+        match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), work).await {
+            Ok(r) => r,
+            Err(_) => Err((StatusCode::GATEWAY_TIMEOUT, "request timed out".to_string())),
+        };
+    otel::record_outcome(&span, result.is_ok());
+    result
 }
 
 async fn call_export(
@@ -1498,6 +1510,7 @@ async fn call_export(
         .unwrap_or(1_000_000_000);
     let mut fuel_used = 0u64;
     let start = std::time::Instant::now();
+    let span = otel::call_span(&name, &req.function, "library");
     let work = async {
         let (mut store, instance) = instantiate(&state.engine, p.as_ref())
             .await
@@ -1558,12 +1571,14 @@ async fn call_export(
             serde_json::json!({ "results": json_results })
         };
         Ok::<_, (StatusCode, String)>(Json(body))
-    };
+    }
+    .instrument(span.clone());
     let result =
         match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), work).await {
             Ok(r) => r,
             Err(_) => Err((StatusCode::GATEWAY_TIMEOUT, "request timed out".to_string())),
         };
+    otel::record_outcome(&span, result.is_ok());
     record_plugin_metric(
         &state,
         &name,
@@ -1610,12 +1625,19 @@ async fn service_start_generic(
     } else {
         req.region_json
     };
-    match start_service_session(&state, &name, p, region_json).await? {
-        StartOutcome::Started(output) => Ok(Json(OutputRes { output })),
-        StartOutcome::AlreadyRunning => Ok(Json(OutputRes {
-            output: "already running".to_string(),
-        })),
+    let span = otel::call_span(&name, "start-service", "service");
+    let result = async {
+        match start_service_session(&state, &name, p, region_json).await? {
+            StartOutcome::Started(output) => Ok(Json(OutputRes { output })),
+            StartOutcome::AlreadyRunning => Ok(Json(OutputRes {
+                output: "already running".to_string(),
+            })),
+        }
     }
+    .instrument(span.clone())
+    .await;
+    otel::record_outcome(&span, result.is_ok());
+    result
 }
 
 /// Stop by dropping the instance, then start a fresh one (PX-08).
@@ -1642,26 +1664,33 @@ async fn service_restart_generic(
 
     // Drop the live instance exactly like `/service/stop`; the next start gets
     // fresh guest state and sockets.
+    let span = otel::call_span(&name, "restart-service", "service");
     let dropped = state.services.lock().await.remove(&name).is_some();
-    match start_service_session(&state, &name, p, region_json).await? {
-        StartOutcome::Started(_) => {}
-        StartOutcome::AlreadyRunning => {
-            return Err((
-                StatusCode::CONFLICT,
-                format!("plugin {name} was started concurrently; restart aborted"),
-            ));
+    let result = async {
+        match start_service_session(&state, &name, p, region_json).await? {
+            StartOutcome::Started(_) => {}
+            StartOutcome::AlreadyRunning => {
+                return Err((
+                    StatusCode::CONFLICT,
+                    format!("plugin {name} was started concurrently; restart aborted"),
+                ));
+            }
         }
-    }
-    {
-        let mut health = state.service_health.lock().await;
-        let entry = health.entry(name.clone()).or_default();
-        entry.last_error = None;
-        if dropped {
-            entry.restarts += 1;
+        {
+            let mut health = state.service_health.lock().await;
+            let entry = health.entry(name.clone()).or_default();
+            entry.last_error = None;
+            if dropped {
+                entry.restarts += 1;
+            }
         }
+        tracing::info!(plugin = %name, replaced = dropped, "service restarted");
+        service_status_impl(&state, &name).await
     }
-    tracing::info!(plugin = %name, replaced = dropped, "service restarted");
-    service_status_impl(&state, &name).await
+    .instrument(span.clone())
+    .await;
+    otel::record_outcome(&span, result.is_ok());
+    result
 }
 
 /// Instantiate and start one service instance. Records `last_error` for
@@ -1785,6 +1814,7 @@ async fn service_stop_generic(
     AxumPath(name): AxumPath<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let start = std::time::Instant::now();
+    let span = otel::call_span(&name, "stop-service", "service");
     let result = async {
         if state.plugin(&name).is_none() {
             return Err((StatusCode::NOT_FOUND, format!("unknown plugin {name}")));
@@ -1792,7 +1822,9 @@ async fn service_stop_generic(
         let stopped = state.services.lock().await.remove(&name).is_some();
         Ok::<_, (StatusCode, String)>(Json(serde_json::json!({"stopped": stopped})))
     }
+    .instrument(span.clone())
     .await;
+    otel::record_outcome(&span, result.is_ok());
     record_plugin_metric(
         &state,
         &name,
@@ -2676,6 +2708,8 @@ async fn proxy_app(
 
     use wasmtime_wasi_http::p2::bindings::http::types::Scheme;
     let start = std::time::Instant::now();
+    let operation = if path.is_empty() { "/" } else { path.as_str() };
+    let span = otel::call_span(&name, operation, "executable");
     let result = async {
         let mut store = create_store(&state.engine, p.as_ref())
             .await
@@ -2729,11 +2763,13 @@ async fn proxy_app(
         let (parts, body) = guest_response.into_parts();
         Ok::<_, (StatusCode, String)>(Response::from_parts(parts, Body::new(body)))
     }
+    .instrument(span.clone())
     .await;
     let success = result
         .as_ref()
         .map(|response| response.status().is_success())
         .unwrap_or(false);
+    otel::record_outcome(&span, success);
     record_plugin_metric(
         &state,
         &name,
@@ -2888,7 +2924,9 @@ fn validate_ui_entry(entry: &str) -> Result<()> {
 }
 
 pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
-    tracing_subscriber::fmt::init();
+    // Plain logs by default; OTLP export only when the `otel` feature is on and
+    // OTEL_EXPORTER_OTLP_ENDPOINT is set (RL-05).
+    let telemetry = otel::init_tracing();
 
     let loaded = load_manifests(&manifests_dir)?;
     if loaded.is_empty() {
@@ -3193,7 +3231,14 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
         .route("/plugin/{name}/echo-udp", post(echo_udp))
         .route("/app/{name}/{*path}", axum::routing::any(proxy_app))
         .route("/app/{name}/", axum::routing::any(proxy_app))
-        .route("/app/{name}", axum::routing::any(proxy_app))
+        .route("/app/{name}", axum::routing::any(proxy_app));
+
+    // W3C traceparent propagation: only compiled with the `otel` feature, and a
+    // passthrough at runtime unless OTLP export is configured.
+    #[cfg(feature = "otel")]
+    let app = app.layer(middleware::from_fn(otel::trace_context));
+
+    let app = app
         .layer(cors_layer()?)
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -3210,6 +3255,11 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
             let _ = tokio::signal::ctrl_c().await;
         })
         .await?;
+
+    // Flush buffered spans before the process exits.
+    if let Some(telemetry) = telemetry {
+        telemetry.shutdown();
+    }
     Ok(())
 }
 
