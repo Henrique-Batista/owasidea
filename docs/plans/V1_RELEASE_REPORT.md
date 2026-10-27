@@ -149,3 +149,71 @@ tag pré-existente é `v1.0.0-pre` (baseline da Fase 0).
 - [`../RELEASE.md`](../RELEASE.md) — checklist de release, perfis, segredos.
 - [`../../examples/shipyard/AGENTS.md`](../../examples/shipyard/AGENTS.md) —
   app de referência usado em build/smoke/Playwright/bundle.
+
+## 10. Atualização da release 1.0.0 (dashboard, exemplos, versão)
+
+Esta seção registra o que mudou depois do G5 e os gates reexecutados. Os
+números das seções 3–5 continuam válidos para o commit de G5; esta atualização
+os complementa.
+
+### 10.1 Escopo entregue
+
+- **Dashboard interativo** (`owasidea tui`; `owasidea dev` abre o dashboard em
+  TTY, `--no-tui` e saída sem TTY mantêm o log simples). Cliente da API HTTP do
+  host, sem Wasmtime no CLI. Código em `crates/cli/src/tui/`. Teclas e views em
+  [`CLI.md`](../CLI.md#tui).
+- **Exemplos mínimos** em `examples/`: `hello` (library Rust + UI TypeScript),
+  `notes` (KV do host, capability `kv`), `ticker` (serviço stateful). Índice em
+  [`examples/README.md`](../../examples/README.md). Runner:
+  `scripts/test-examples.sh`.
+- **Versão**: workspace `1.0.0` (antes `0.1.0`; `owasidea --version` agora
+  reporta `1.0.0`; `HOST_VERSION` e o SBOM acompanham).
+
+### 10.2 Defeitos achados pelos testes de ponta a ponta e corrigidos
+
+| Sintoma | Causa | Correção |
+| --- | --- | --- |
+| Teclas da TUI perdidas (`↓` ignorado em `dev`) | o Vite herdava o stdin do terminal e lia teclas (`r`, `o`, `q` são atalhos do Vite) | host, Vite e build recebem `stdin = null` no modo TUI |
+| Argumentos digitados e resultado da chamada apagados | `Done` disparava refetch do manifest, que resetava o formulário | refetch só após build/reload; args resetados apenas na primeira carga do plugin |
+| Lixo de texto no cabeçalho | o primeiro frame não limpava a tela | `Clear(All)` antes do loop (sem consulta de cursor) |
+| Linhas de log com escapes ANSI | saída do host/Vite é colorida | `strip_ansi` no `pipe_output` |
+| Export de interface (`poc:notes/api@…`) listada como chamável | `/call` só aceita funções | `callable_exports` filtra exports com `:` |
+
+### 10.3 Gates reexecutados nesta rodada (Linux x86_64)
+
+| Gate | Resultado |
+| --- | --- |
+| `cargo fmt --all -- --check` | pass |
+| `cargo clippy -p owasidea-cli -p owasidea-host --all-targets -- -D warnings` | pass, 0 warnings |
+| `cargo test -p owasidea-cli -p owasidea-host` | **CLI unit 178** (era 147), **CLI integração 44** (era 42), **host 34 + 3 + 3** (inalterado), 0 falhas |
+| Playwright da raiz (`npx playwright test`) | **40/40** |
+| `owasidea validate` (Shipyard) | OK, 11 manifests |
+| `scripts/test-examples.sh` | **hello** build + smoke 2/2 + UI 3/3; **notes** build + smoke 4/4 + UI 4/4; **ticker** build + smoke (start/status/stop) + UI 4/4 |
+| Ponto de capability (`notes` sem `kv`) | build rejeitado: `host-kv WIT import and configured kv permission must both be present` |
+| TUI em pty (`dev` no `hello`) | host e Vite capturados no Output; `r`, `R` (rebuild + reload), `s` (serviço `heartbeat`: running → stopped), chamada `notes.greet` com resultado, watcher com hot reload, `q` sem processos órfãos |
+
+### 10.4 Não verificado nesta rodada (limites explícitos)
+
+- **Shipyard `build`/`smoke`/`test` não foram reexecutados**: a máquina tem
+  `go` (`/usr/sbin/go`) sem `componentize-go` e sem `jco`. `validate` passa
+  porque lê os manifests já gerados. Rodar `owasidea build` aqui falha antes de
+  compilar os plugins Go.
+- **Windows**: não executado (igual ao G2).
+- **CI remoto**: não há remote configurado neste repositório
+  (`git remote -v` vazio). Por isso o push não foi possível (ver 10.5).
+- **Dashboard**: testado em pseudo-terminal (pyte) em Linux. Não há teste em
+  terminal Windows nem em terminais que não respondem consulta de cursor.
+
+### 10.5 Push
+
+Nenhum remote está configurado. O push de `release/1.0` e da tag `v1.0.0` precisa
+da URL do remote. Comando previsto, depois que o remote existir:
+
+```bash
+git remote add origin <url>
+git push -u origin release/1.0
+git push origin v1.0.0
+```
+
+A tag `v1.0.0` foi recriada no commit final desta release (antes apontava para
+`c4aaf80`, tag local nunca publicada).

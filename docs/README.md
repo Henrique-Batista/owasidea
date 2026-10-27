@@ -1,7 +1,9 @@
 # Owasidea documentation
 
 Index of the documentation set. Start with `GET_STARTED.md`; the reference app
-is `../examples/shipyard`.
+is `../examples/shipyard`. Small complete apps for learning and testing live in
+`../examples/` (see `../examples/README.md`); the interactive dashboard is
+described in `CLI.md` (`dev` and `tui`).
 
 ## Start here
 

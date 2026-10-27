@@ -76,6 +76,19 @@ First supported release. The `v1.0.0` tag is cut by the release gate
 
 ### Added
 
+- **Interactive dashboard** (`owasidea tui`, and `owasidea dev` in a terminal):
+  a ratatui client of the host HTTP API with plugin list, service state,
+  Overview / Manifest / Call / Logs / Output views, reload (`r`), service
+  start/stop (`s`), rebuild (`R`), open UI (`o`), an interactive call form with
+  JSON args, and a `?` help overlay. Works without a TTY by falling back to the
+  plain log; `--no-tui` forces it.
+- **Minimal example apps** under `examples/`: `hello` (Rust library + UI),
+  `notes` (host KV and the `kv` capability), `ticker` (service lifecycle and
+  the 409 reload rule). Each has smoke checks and Playwright tests;
+  `scripts/test-examples.sh` runs them all. Index: `examples/README.md`.
+- `owasidea tui` and `dev --no-tui` tests in `crates/cli/tests/cli.rs`; reducer
+  and render tests for the dashboard in `crates/cli/src/tui/`.
+
 - **Host runtime**: Wasmtime 50 Component Model, WASI 0.2 + 0.3, capability
   broker with deny-by-default host interfaces, per-call instances, fuel/memory/
   timeout limits, persistent KV (SQLite), filesystem preopens, HTTP allowlist,
@@ -105,6 +118,13 @@ First supported release. The `v1.0.0` tag is cut by the release gate
 
 ### Changed
 
+- `owasidea dev` opens the interactive dashboard when stdin and stdout are a
+  terminal. Scripts and CI keep the plain log. Use `--no-tui` to keep the log in
+  a terminal too. The host and UI output are captured in the dashboard instead
+  of printed.
+- Framework version is `1.0.0` (`owasidea --version`, `HOST_VERSION`, SBOM tool
+  version). It was `0.1.0` in the workspace manifest.
+
 - `wasm-app.toml` is the single source of truth for host/UI ports and origins;
   `config render` derives runtime, Playwright, and Tauri config from it.
 - Config validation rejects unknown keys instead of ignoring them.
@@ -125,6 +145,10 @@ First supported release. The `v1.0.0` tag is cut by the release gate
 least two host minors and six months; see `docs/ABI_POLICY.md`.
 
 ### Fixed
+
+- `owasidea dev` in a terminal no longer lets the UI dev server read keys from
+  the dashboard. Vite's own shortcuts (`r`, `o`, `q`) fired on the same keys.
+- The Output of the dashboard shows child logs without ANSI escape codes.
 
 - Stop-service drops the component instance instead of calling the guest stop
   path, which hung with pending async sockets.

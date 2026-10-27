@@ -51,7 +51,8 @@ owasidea plugin new ui    --lang yew --type ui
 # 4. Build everything (compiles + generates manifests)
 owasidea build
 
-# 5. Develop (host + UI + recursive hot-reload watcher)
+# 5. Develop: host + UI + hot-reload watcher in an interactive dashboard
+#    (press ? for keys: reload, start/stop services, call exports, rebuild)
 owasidea dev
 
 # Or build and run without watching
@@ -96,6 +97,22 @@ owasidea bundle          # Tauri package with plugins bundled
 See [Get Started](docs/GET_STARTED.md) for the full walkthrough and
 [AI Agent Playbook](docs/AI_AGENTS.md) for deterministic automation steps.
 
+## 🧭 Minimal example apps
+
+[`examples/`](examples/README.md) holds small complete apps, each with its own
+smoke checks and Playwright tests. They are the fastest way to learn the
+framework and the fixtures to run after a framework change:
+
+| App | Shows |
+|-----|-------|
+| [`hello`](examples/hello) | one Rust library and a TypeScript UI |
+| [`notes`](examples/notes) | host key/value store and the `kv` capability |
+| [`ticker`](examples/ticker) | stateful service lifecycle and reload rules |
+
+```bash
+scripts/test-examples.sh   # build + smoke + UI tests for every example
+```
+
 ## 🧩 More plugin examples
 
 The repository root also keeps smaller focused examples:
@@ -125,7 +142,8 @@ owasidea test            # build + API smoke + UI tests
 owasidea smoke           # build + API smoke only
 owasidea validate        # verify checksums & capabilities
 owasidea run             # run host (default 127.0.0.1:8787)
-owasidea dev             # build + host + UI dev server
+owasidea dev             # build + host + UI dev server + interactive dashboard (--no-tui for logs)
+owasidea tui             # dashboard for a running host (owasidea run)
 owasidea inspect <name>  # show manifest
 owasidea bundle          # build + sign + Tauri package
 ```

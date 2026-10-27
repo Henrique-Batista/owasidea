@@ -257,7 +257,7 @@ truth for host/port/CSP/dev URL):
 
 `--check` does not write; exits non-zero if files are missing or stale.
 
-### `dev [--no-build] [--desktop]`
+### `dev [--no-build] [--desktop] [--no-tui]`
 
 Build first, then start the host, the Vite dev server (if
 `<app-root>/ui/package.json` exists), and a recursive watcher. The UI port comes
@@ -280,6 +280,48 @@ The watcher hot-reloads stateless components by calling
 `POST /plugin/{name}/reload`. Stateful services require an explicit stop/reload;
 reload while running returns HTTP `409`. Source changes that require compilation
 print a message and require `owasidea build`.
+
+In an interactive terminal `dev` opens the **dashboard** (see below). The host
+and Vite run as child processes and their output is captured, so nothing is
+printed over the screen. Use `--no-tui` for the plain log, or run it without a
+TTY (CI, pipes, `--json`): the plain log is printed automatically. `--desktop`
+always uses the plain log.
+
+### `tui`
+
+Open the interactive dashboard for a host that is already running (for example
+`owasidea run`). The host address comes from `--http-addr`, then `[host].addr`,
+then `127.0.0.1:8787`. The command refuses to start without a terminal and
+points to `status --watch` or `--json` for scripts.
+
+The dashboard is a client of the host HTTP API and never links Wasmtime. It
+shows the host state, build id, watch/hot-reload flags, the plugin list with
+type, language, runtime and service state, and five views for the selected
+plugin:
+
+| View | Shows |
+| --- | --- |
+| Overview | type, language, runtime, served path, exports, service address/restarts/last error, the last reloads |
+| Manifest | the generated manifest (JSON), scrollable with PgUp/PgDn |
+| Call | the callable exports; `←`/`→` choose one, `Enter` edits the args as a JSON array, `Enter` runs it, `Esc` stops editing; the result is shown below |
+| Logs | the plugin's ring-buffer log, newest at the bottom |
+| Output | build, host, UI, watcher and reload messages (`dev` only) |
+
+Keys (press `?` in the dashboard to see them):
+
+| Key | Action |
+| --- | --- |
+| `↑` / `↓`, `j` / `k` | select plugin |
+| `Tab`, `Shift+Tab`, `1`-`5` | switch view |
+| `r` | reload the selected plugin (`POST /plugin/{name}/reload`) |
+| `s` | start or stop the selected service |
+| `R` | rebuild the app (`owasidea build`), then reload the stateless plugins |
+| `o` | open the UI (or the host) in the browser |
+| `?` | toggle help |
+| `q`, `Ctrl+C` | quit; `dev` also stops the host and the UI |
+
+In `dev`, `R` rebuilds through the same CLI and streams its output to the Output
+view. A running service still refuses reload with HTTP 409; stop it first.
 
 ### `run`
 
