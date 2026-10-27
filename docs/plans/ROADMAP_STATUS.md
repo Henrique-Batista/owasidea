@@ -72,9 +72,9 @@ Status permitidos: `todo`, `doing`, `review`, `done`, `blocked`.
 | PX-05 | done | wt-authoring | 24fce84 + 0038e64 (merge 2fe869e) | fmt/clippy/test (16 CLI) | `verify <dist>`; manifests/componentes/assinaturas/UI; `--json` |
 | PX-06 | done | wt-host | 2b2a1b6 + d438898 (merge 30f9a66) | fmt/clippy/test (host 6+2 integração) | LogEntry ts/level/plugin/request_id/fields; SSE JSON; compat `logs` |
 | PX-07 | done | wt-host | d1f1ae6 (merge b21bbfc) | fmt/clippy/test (host 12+2) | métricas por plugin requests/errors/latency/fuel em `/metrics` |
-| PX-08 | todo | — | — | — | — |
+| PX-08 | done | wt-host | 2bb0044 (merge 01834d3) | fmt/clippy/test + Playwright 12/12 | `/service/restart`; last_error/restarts; UI restart |
 | PX-09 | done | wt-config | e60d558 (merge 13a11e8) | fmt/clippy/test | shell helper cmd/sh; paths/temp; CI Windows fmt/clippy/test; docs |
-| RL-01 | todo | — | — | — | — |
+| RL-01 | done | wt-config | d5ec289 (merge 9c38779) | fmt/clippy/test (86 unit + 17 CLI) | `--profile`; overlays `wasm-app.<profile>.toml`; dist/<profile> |
 | RL-02 | todo | — | — | — | — |
 | RL-03 | todo | — | — | — | — |
 | RL-04 | todo | — | — | — | — |
