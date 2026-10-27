@@ -7048,7 +7048,13 @@ mod dev_tests {
         let path =
             crate::config_render::write_tauri_dev_config(&config_path, "http://127.0.0.1:5199")
                 .unwrap();
-        assert_eq!(path, desktop.join("tauri.dev.conf.json"));
+        assert_eq!(
+            path,
+            root.canonicalize()
+                .unwrap()
+                .join("desktop")
+                .join("tauri.dev.conf.json")
+        );
         let value: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(value["build"]["devUrl"], "http://127.0.0.1:5199");
