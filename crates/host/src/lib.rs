@@ -39,6 +39,10 @@ mod plugin_metrics;
 #[cfg(feature = "streaming")]
 mod jobs;
 
+// Resource-limit coverage (FIX-01): fuel, timeout, memory and instance slots.
+#[cfg(test)]
+mod resource_limits_tests;
+
 // ---------------------------------------------------------------------------
 // Host ABI version (CT-08)
 // ---------------------------------------------------------------------------
