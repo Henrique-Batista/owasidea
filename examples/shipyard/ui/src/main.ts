@@ -265,10 +265,26 @@ async function refreshHost(): Promise<void> {
   try {
     const [health, overview] = await Promise.all([
       fetch(`${HOST}/health`).then(response => response.ok ? response.text() : Promise.reject(new Error('offline'))),
-      api<Overview>('/overview'),
+      api<Overview & { build_id?: string | null }>('/overview'),
     ]);
     hostPill.className = 'pill online';
     hostPill.innerHTML = `<span class="pulse"></span><span>host ${escapeHtml(health)} · ${overview.plugins} plugins</span>`;
+    // RF-08: skew detector.
+    const runtimeBid = OWASIDEA_BUILD_ID;
+    const hostBid = overview.build_id ?? null;
+    let banner = document.getElementById('build-skew-banner');
+    if (runtimeBid && hostBid && runtimeBid !== hostBid) {
+      if (!banner) {
+        banner = document.createElement('div');
+        banner.id = 'build-skew-banner';
+        banner.className = 'build-skew-banner';
+        banner.setAttribute('role', 'alert');
+        document.body.insertBefore(banner, document.body.firstChild);
+      }
+      banner.textContent = `UI bundle anterior ao host (UI: ${runtimeBid}, host: ${hostBid})`;
+    } else if (banner) {
+      banner.remove();
+    }
     const recovered = !hostOnline;
     hostOnline = true;
     // The host starts after the webview in the Tauri shell. If it was not

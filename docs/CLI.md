@@ -148,7 +148,10 @@ truth for host/port/CSP/dev URL):
 - `runtime` -> `<ui>/.owasidea/runtime.json`
 - `playwright` -> `<ui>/.owasidea/playwright.json`
 - `tauri` -> `<desktop>/tauri.generated.conf.json` (copies base `tauri.conf.json`,
-  overriding `build.devUrl` and ensuring the host origin is in `connect-src`)
+  overriding `build.devUrl` and ensuring the host origin is in `connect-src`).
+  The generated CSP contains exactly the configured host origin (no wildcard);
+  `*` and `null` are rejected. `bundle` always renders this file and passes it
+  to `cargo tauri build --config`.
 
 `--check` does not write; exits non-zero if files are missing or stale.
 
@@ -159,7 +162,9 @@ Build first, then start the host, the Vite dev server (if
 from `[dev].ui_addr` when set; otherwise the first free port in 5173..=5273.
 A busy configured port falls back to the next free port. `dev` also writes
 `<desktop>/tauri.dev.conf.json` (merged from the base `tauri.conf.json`, with
-`build.devUrl` set to the reserved UI URL) for `dev --desktop` (DL-01). Prints:
+`build.devUrl` set to the reserved UI URL) for `dev --desktop` (DL-01). In dev
+mode the generated CSP additionally allows `http://127.0.0.1:*` (wildcard port)
+alongside the exact host origin. Prints:
 
 - UI URL
 - host URL
@@ -389,3 +394,5 @@ line/column. All supported fields:
 ## Build id (RF-07)
 
 `owasidea build` computes a deterministic `build_id` and records it in every manifest (`metadata.build_id`), `owasidea.runtime.json`, and exposes it via `OWASIDEA_BUILD_ID`. Override with `OWASIDEA_BUILD_ID`; for reproducible builds set `SOURCE_DATE_EPOCH`. Format: `<git-short-sha>-<epoch>`.
+
+Skew detection (RF-08): the UI compares its runtime `build_id` (`window.__OWASIDEA__.build_id`) with the host `/overview` `build_id`; when both are present and differ it renders a "UI bundle anterior ao host" banner. `owasidea dev` prints a warning when the UI runtime bundle build id differs from (or is missing vs) the host manifest build id.

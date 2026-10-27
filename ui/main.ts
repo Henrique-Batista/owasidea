@@ -64,8 +64,14 @@ async function renderOverview() {
   let health = 'unreachable';
   try { health = await fetch(`${HOST}/health`).then(r => r.text()); } catch {}
   const ov = await fetch(`${HOST}/overview`).then(r => r.json()).catch(() => ({}));
-  const buildId = OWASIDEA_BUILD_ID ?? ov.build_id ?? null;
-  view.innerHTML = `<h1>Overview</h1>
+  const runtimeBuildId = OWASIDEA_BUILD_ID;
+  const hostBuildId = (ov.build_id ?? null) as string | null;
+  let skewBanner = '';
+  if (runtimeBuildId && hostBuildId && runtimeBuildId !== hostBuildId) {
+    skewBanner = `<div class="build-skew-banner" role="alert">UI bundle anterior ao host (UI: ${escapeHtml(runtimeBuildId)}, host: ${escapeHtml(hostBuildId)})</div>`;
+  }
+  const buildId = runtimeBuildId ?? hostBuildId ?? null;
+  view.innerHTML = `${skewBanner}<h1>Overview</h1>
     <div class="card">
       <p>host: ${health}</p>
       <p>plugins: ${ov.plugins ?? 0} (libraries: ${ov.libraries ?? 0}, executables: ${ov.executables ?? 0}, services: ${ov.services ?? 0})</p>

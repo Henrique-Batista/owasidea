@@ -43,7 +43,11 @@
 - **Webview UI:** UI plugins are webview-only and run in iframes without
   same-origin/top-navigation/popup privileges. Tauri CSP restricts scripts,
   frames, workers, and network destinations. Host CORS allows only Tauri and
-  local Vite origins by default.
+  local Vite origins by default. CSP `connect-src` is generated from
+  `[host].addr` by `config render --target tauri`; bundle mode rejects a
+  generated config whose CSP does not allow the exact host origin. The dev
+  config additionally allows `http://127.0.0.1:*`. Bare `*` and `null` are
+  never emitted.
 
 ## Desktop packaging
 

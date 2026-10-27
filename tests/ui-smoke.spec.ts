@@ -122,3 +122,27 @@ test('UI plugin bundle integrity verified before sandboxed iframe loads', async 
   await expect(frame).toBeVisible();
   await expect(frame).toHaveAttribute('sandbox', 'allow-scripts allow-forms');
 });
+
+test('build skew banner shown when UI and host build ids differ', async ({ page }) => {
+  await page.addInitScript(() => {
+    (window as any).__OWASIDEA__ = { host: 'http://127.0.0.1:8787', app: 'Test', version: '1', build_id: 'old' };
+  });
+  await page.route('http://127.0.0.1:8787/health', route => route.fulfill({ status: 200, body: 'ok' }));
+  await page.route('http://127.0.0.1:8787/plugins', route => route.fulfill({ status: 200, contentType: 'application/json', body: '[]' }));
+  await page.route('http://127.0.0.1:8787/overview', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ plugins: 0, libraries: 0, executables: 0, services: 0, runtimes: [], build_id: 'new' }) }));
+  await page.goto('/');
+  await expect(page.locator('body')).toContainText('old');
+  await expect(page.locator('body')).toContainText('new');
+  await expect(page.locator('body')).toContainText('anterior');
+});
+
+test('no build skew banner when ids match', async ({ page }) => {
+  await page.addInitScript(() => {
+    (window as any).__OWASIDEA__ = { host: 'http://127.0.0.1:8787', app: 'Test', version: '1', build_id: 'same' };
+  });
+  await page.route('http://127.0.0.1:8787/health', route => route.fulfill({ status: 200, body: 'ok' }));
+  await page.route('http://127.0.0.1:8787/plugins', route => route.fulfill({ status: 200, contentType: 'application/json', body: '[]' }));
+  await page.route('http://127.0.0.1:8787/overview', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ plugins: 0, libraries: 0, executables: 0, services: 0, runtimes: [], build_id: 'same' }) }));
+  await page.goto('/');
+  await expect(page.locator('body')).not.toContainText('anterior');
+});

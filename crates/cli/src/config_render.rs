@@ -60,60 +60,182 @@ fn app_version(cfg: &AppConfig) -> String {
         .unwrap_or_else(|| "0.1.0".to_string())
 }
 
-fn ui_dir(root: &Path, cfg: &AppConfig) -> PathBuf {
+pub fn safe_resolve(root: &Path, raw: &str) -> anyhow::Result<PathBuf> {
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let p = Path::new(raw);
+    let resolved = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        root.join(p)
+    };
+    let mut normalized = PathBuf::new();
+    for comp in resolved.components() {
+        match comp {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !normalized.pop() {
+                    anyhow::bail!("path escapes app root: {}", raw);
+                }
+            }
+            other => normalized.push(other),
+        }
+    }
+    if !p.is_absolute() && !normalized.starts_with(&root) {
+        anyhow::bail!("path escapes app root: {}", raw);
+    }
+    if normalized.exists() {
+        let canon = normalized.canonicalize().unwrap_or(normalized.clone());
+        if !p.is_absolute() && !canon.starts_with(&root) {
+            anyhow::bail!("path escapes app root: {}", raw);
+        }
+        Ok(canon)
+    } else {
+        Ok(normalized)
+    }
+}
+
+fn ui_dir(root: &Path, cfg: &AppConfig) -> anyhow::Result<PathBuf> {
     let ui = cfg
         .desktop
         .as_ref()
         .and_then(|d| d.ui.clone())
         .unwrap_or_else(|| "ui".to_string());
-    if Path::new(&ui).is_absolute() {
-        PathBuf::from(ui)
-    } else {
-        root.join(ui)
-    }
+    safe_resolve(root, &ui)
 }
 
-fn desktop_dir(root: &Path, cfg: &AppConfig) -> PathBuf {
+fn desktop_dir(root: &Path, cfg: &AppConfig) -> anyhow::Result<PathBuf> {
     let path = cfg.desktop.as_ref().and_then(|d| d.path.clone());
     match path {
-        Some(p) => {
-            let pb = PathBuf::from(&p);
-            if pb.is_absolute() {
-                pb
-            } else {
-                root.join(pb)
-            }
-        }
+        Some(p) => safe_resolve(root, &p),
         None => {
             if root.join("desktop/Cargo.toml").is_file() {
-                root.join("desktop")
+                Ok(root.join("desktop"))
             } else {
-                root.join("crates/desktop")
+                Ok(root.join("crates/desktop"))
             }
         }
     }
 }
 
-fn add_origin_to_csp(csp: &str, origin: &str) -> String {
+/// CSP helper: returns true when `origin` is allowed by `connect-src` (or
+/// `default-src`) of `csp`. Supports exact origins and a wildcard port
+/// (`http://127.0.0.1:*`).
+pub fn csp_allows_origin(csp: &str, origin: &str) -> bool {
+    fn matches(source: &str, origin: &str) -> bool {
+        let source = source.trim_end_matches('/');
+        if source == "*" || source == origin {
+            return true;
+        }
+        match source.strip_suffix(":*") {
+            Some(prefix) => {
+                origin.starts_with(prefix) && origin.as_bytes().get(prefix.len()) == Some(&b':')
+            }
+            None => false,
+        }
+    }
+    let mut connect_src = None;
+    let mut default_src = None;
+    for directive in csp.split(';') {
+        let directive = directive.trim();
+        for (name, slot) in [
+            ("connect-src", &mut connect_src),
+            ("default-src", &mut default_src),
+        ] {
+            if let Some(rest) = directive.strip_prefix(name) {
+                if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+                    *slot = Some(rest.trim());
+                }
+            }
+        }
+    }
+    let sources = connect_src.or(default_src).unwrap_or("");
+    sources
+        .split_whitespace()
+        .any(|source| matches(source, origin))
+}
+
+/// Bundle CSP must not contain `*`, `null`, or wildcard ports (`:*`).
+pub fn csp_is_strict(csp: &str) -> bool {
+    for token in csp.split_whitespace() {
+        if token == "*" || token == "null" || token.contains('*') || token.contains(":*") {
+            return false;
+        }
+    }
+    true
+}
+
+/// Number of `connect-src` directives in a CSP string.
+pub fn csp_connect_src_count(csp: &str) -> usize {
+    csp.split(';')
+        .filter(|d| d.trim().starts_with("connect-src"))
+        .count()
+}
+
+/// Add `origin` to `connect-src` without duplicating it. `dev` additionally
+/// allows the local wildcard port `http://127.0.0.1:*` (dev mode only).
+pub fn add_origin_to_csp(csp: &str, origin: &str) -> String {
+    add_origin_to_csp_inner(csp, origin, false)
+}
+
+/// Dev-mode variant: also permits `http://127.0.0.1:*`.
+pub fn add_dev_origin_to_csp(csp: &str, origin: &str) -> String {
+    add_origin_to_csp_inner(csp, origin, true)
+}
+
+fn add_origin_to_csp_inner(csp: &str, origin: &str, dev: bool) -> String {
+    let origin = origin.trim_end_matches('/').to_string();
+    // Never emit bare wildcards or null origins.
+    if origin.is_empty() || origin == "*" || origin == "null" || origin.contains('*') {
+        return csp.to_string();
+    }
+    if csp.trim().is_empty() {
+        let mut tokens = vec![origin.clone()];
+        if dev {
+            tokens.push("http://127.0.0.1:*".to_string());
+        }
+        return format!("connect-src {}", tokens.join(" "));
+    }
     let mut directives: Vec<String> = csp.split(';').map(str::trim).map(String::from).collect();
     let mut found = false;
     for d in directives.iter_mut() {
         if let Some(rest) = d.strip_prefix("connect-src") {
             if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-                let tokens: Vec<&str> = rest.split_whitespace().collect();
+                let mut tokens: Vec<String> = rest.split_whitespace().map(String::from).collect();
                 if !tokens.iter().any(|t| t.trim_end_matches('/') == origin) {
-                    if rest.trim().is_empty() {
-                        *d = format!("connect-src {}", origin);
-                    } else {
-                        *d = format!("connect-src {} {}", rest.trim(), origin);
+                    tokens.push(origin.clone());
+                }
+                if dev {
+                    let wildcard = "http://127.0.0.1:*".to_string();
+                    if !tokens.iter().any(|t| t == &wildcard) {
+                        tokens.push(wildcard);
                     }
                 }
+                // Bundle mode must never carry a wildcard port; drop any leaked `:*`.
+                if !dev {
+                    tokens.retain(|t| !t.contains(":*"));
+                }
+                // de-duplicate preserving order
+                let mut unique: Vec<String> = Vec::new();
+                for t in tokens {
+                    if !unique.contains(&t) {
+                        unique.push(t);
+                    }
+                }
+                *d = if unique.is_empty() {
+                    "connect-src".to_string()
+                } else {
+                    format!("connect-src {}", unique.join(" "))
+                };
                 found = true;
             }
         }
     }
     if !found {
-        directives.push(format!("connect-src {}", origin));
+        let mut tokens = vec![origin.clone()];
+        if dev {
+            tokens.push("http://127.0.0.1:*".to_string());
+        }
+        directives.push(format!("connect-src {}", tokens.join(" ")));
     }
     directives.join("; ")
 }
@@ -179,7 +301,7 @@ fn playwright_content(cfg: &AppConfig) -> serde_json::Value {
 }
 
 fn tauri_content(root: &Path, cfg: &AppConfig) -> anyhow::Result<serde_json::Value> {
-    let dd = desktop_dir(root, cfg);
+    let dd = desktop_dir(root, cfg)?;
     let base_path = dd.join("tauri.conf.json");
     let raw = std::fs::read_to_string(&base_path)
         .map_err(|e| anyhow::anyhow!("cannot read {}: {}", base_path.display(), e))?;
@@ -200,21 +322,31 @@ fn tauri_content(root: &Path, cfg: &AppConfig) -> anyhow::Result<serde_json::Val
     }
     let origin = host_url(cfg);
     let origin = origin.trim_end_matches('/');
-    if let Some(csp) = value
+    let csp = value
         .get("app")
         .and_then(|a| a.get("security"))
         .and_then(|s| s.get("csp"))
         .and_then(|c| c.as_str())
+        .ok_or_else(|| anyhow::anyhow!("tauri.conf.json missing app.security.csp"))?;
+    let new_csp = add_origin_to_csp(csp, origin);
+    if !csp_allows_origin(&new_csp, origin) {
+        anyhow::bail!("generated CSP does not allow host origin {}", origin);
+    }
+    if !csp_is_strict(&new_csp) {
+        anyhow::bail!("generated CSP is not strict (contains * or null or wildcard port)");
+    }
+    if csp_connect_src_count(&new_csp) != 1 {
+        anyhow::bail!("generated CSP must contain exactly one connect-src directive");
+    }
+    if let Some(csp_slot) = value
+        .get_mut("app")
+        .and_then(|a| a.get_mut("security"))
+        .and_then(|s| s.as_object_mut())
+        .and_then(|o| o.get_mut("csp"))
     {
-        let new_csp = add_origin_to_csp(csp, origin);
-        if let Some(csp_slot) = value
-            .get_mut("app")
-            .and_then(|a| a.get_mut("security"))
-            .and_then(|s| s.as_object_mut())
-            .and_then(|o| o.get_mut("csp"))
-        {
-            *csp_slot = serde_json::Value::String(new_csp);
-        }
+        *csp_slot = serde_json::Value::String(new_csp);
+    } else {
+        anyhow::bail!("tauri.conf.json missing app.security.csp slot");
     }
     Ok(value)
 }
@@ -226,7 +358,7 @@ pub fn tauri_dev_content(
     cfg: &AppConfig,
     dev_url: &str,
 ) -> anyhow::Result<serde_json::Value> {
-    let dd = desktop_dir(root, cfg);
+    let dd = desktop_dir(root, cfg)?;
     let base_path = dd.join("tauri.conf.json");
     let raw = std::fs::read_to_string(&base_path)
         .map_err(|e| anyhow::anyhow!("cannot read {}: {}", base_path.display(), e))?;
@@ -247,6 +379,25 @@ pub fn tauri_dev_content(
             .ok_or_else(|| anyhow::anyhow!("tauri.conf.json root must be object"))?
             .insert("build".to_string(), serde_json::Value::Object(build));
     }
+    // Dev mode: also permit the local wildcard port in connect-src.
+    let origin = host_url(cfg);
+    let origin = origin.trim_end_matches('/');
+    if let Some(csp) = value
+        .get("app")
+        .and_then(|a| a.get("security"))
+        .and_then(|s| s.get("csp"))
+        .and_then(|c| c.as_str())
+    {
+        let new_csp = add_dev_origin_to_csp(csp, origin);
+        if let Some(csp_slot) = value
+            .get_mut("app")
+            .and_then(|a| a.get_mut("security"))
+            .and_then(|s| s.as_object_mut())
+            .and_then(|o| o.get_mut("csp"))
+        {
+            *csp_slot = serde_json::Value::String(new_csp);
+        }
+    }
     Ok(value)
 }
 
@@ -254,7 +405,7 @@ pub fn write_tauri_dev_config(config_path: &Path, dev_url: &str) -> anyhow::Resu
     let cfg = read_app_config(config_path)?;
     cfg.validate()?;
     let root = config_dir(config_path);
-    let dd = desktop_dir(&root, &cfg);
+    let dd = desktop_dir(&root, &cfg)?;
     let value = tauri_dev_content(&root, &cfg, dev_url)?;
     let path = dd.join("tauri.dev.conf.json");
     let bytes = serde_json::to_vec_pretty(&value)?;
@@ -288,7 +439,8 @@ pub fn render_targets(
     for t in targets.drain(..) {
         let (path, content_bytes) = match t {
             RenderTarget::Runtime => {
-                let p = ui_dir(&root, &cfg).join(".owasidea").join("runtime.json");
+                let ui = ui_dir(&root, &cfg)?;
+                let p = ui.join(".owasidea").join("runtime.json");
                 let build_id = resolve_build_id(&root);
                 let bytes = serde_json::to_vec_pretty(&runtime_content(&cfg, build_id))?;
                 let mut b = bytes;
@@ -296,16 +448,15 @@ pub fn render_targets(
                 (p, b)
             }
             RenderTarget::Playwright => {
-                let p = ui_dir(&root, &cfg)
-                    .join(".owasidea")
-                    .join("playwright.json");
+                let ui = ui_dir(&root, &cfg)?;
+                let p = ui.join(".owasidea").join("playwright.json");
                 let bytes = serde_json::to_vec_pretty(&playwright_content(&cfg))?;
                 let mut b = bytes;
                 b.push(b'\n');
                 (p, b)
             }
             RenderTarget::Tauri => {
-                let dd = desktop_dir(&root, &cfg);
+                let dd = desktop_dir(&root, &cfg)?;
                 let p = dd.join("tauri.generated.conf.json");
                 let value = tauri_content(&root, &cfg)?;
                 let bytes = serde_json::to_vec_pretty(&value)?;
