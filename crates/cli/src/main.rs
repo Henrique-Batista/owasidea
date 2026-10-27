@@ -10,6 +10,7 @@ mod dev_next_steps;
 mod doctor;
 mod errors;
 mod logs;
+mod permissions;
 mod status;
 mod templates;
 mod type_parser;
@@ -675,7 +676,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Build {
             no_sign,
             fail_on_widen,
-        } => cmd_build(&cli.config, &cli.manifest_dir, !no_sign, *fail_on_widen),
+        } => cmd_build(&cli.config, &cli.manifest_dir, !no_sign, fail_on_widen),
         Commands::Test {
             no_build,
             no_smoke,
@@ -2190,60 +2191,15 @@ fn cmd_build(
     {
         use serde_json::json;
         use sha2::{Digest, Sha256};
-        use std::collections::BTreeSet;
         let mut new_plugins = serde_json::Map::new();
-        for (name, _p) in &plugins {
+        for name in plugins.keys() {
             let manifest_path = manifest_dir.join(format!("{}.manifest.json", name));
             if !manifest_path.exists() {
                 continue;
             }
             let m: serde_json::Value =
                 serde_json::from_str(&std::fs::read_to_string(&manifest_path)?)?;
-            let mut perms: Vec<String> = Vec::new();
-            if let Some(fs) = m["permissions"]["filesystem"].as_array() {
-                for e in fs {
-                    perms.push(format!(
-                        "fs:{}:{}",
-                        e["access"].as_str().unwrap_or(""),
-                        e["path"].as_str().unwrap_or("")
-                    ));
-                }
-            }
-            if !m["permissions"]["kv"].is_null() {
-                let kv = &m["permissions"]["kv"];
-                perms.push(format!(
-                    "kv:{}:{}",
-                    kv["access"].as_str().unwrap_or(""),
-                    kv["namespace"].as_str().unwrap_or("")
-                ));
-            }
-            if let Some(arr) = m["permissions"]["http"]["outbound"].as_array() {
-                for h in arr {
-                    perms.push(format!("http:outbound:{}", h.as_str().unwrap_or("")));
-                }
-            }
-            if let Some(arr) = m["permissions"]["network"]["outbound"].as_array() {
-                for h in arr {
-                    perms.push(format!("network:outbound:{}", h.as_str().unwrap_or("")));
-                }
-            }
-            if let Some(arr) = m["permissions"]["network"]["inbound"].as_array() {
-                for h in arr {
-                    perms.push(format!("network:inbound:{}", h.as_str().unwrap_or("")));
-                }
-            }
-            if let Some(arr) = m["imports"]["host"].as_array() {
-                for h in arr {
-                    perms.push(format!("import:host:{}", h.as_str().unwrap_or("")));
-                }
-            }
-            if let Some(arr) = m["imports"]["wasi"].as_array() {
-                for w in arr {
-                    perms.push(format!("import:wasi:{}", w.as_str().unwrap_or("")));
-                }
-            }
-            perms.sort();
-            perms.dedup();
+            let perms = permissions::effective_permissions(&m);
             let mut hasher = Sha256::new();
             hasher.update(perms.join("\n").as_bytes());
             let hash = format!("{:x}", hasher.finalize());
@@ -2275,10 +2231,7 @@ fn cmd_build(
                                 .collect()
                         })
                         .unwrap_or_default();
-                    let old_set: BTreeSet<String> = old_perms.into_iter().collect();
-                    let new_set: BTreeSet<String> = new_perms.into_iter().collect();
-                    let added: Vec<String> = new_set.difference(&old_set).cloned().collect();
-                    let removed: Vec<String> = old_set.difference(&new_set).cloned().collect();
+                    let (added, removed) = permissions::diff(&old_perms, &new_perms);
                     if !added.is_empty() {
                         widened = true;
                     }
