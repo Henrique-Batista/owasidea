@@ -2912,60 +2912,6 @@ fn cli_signature_payload(
     Ok(payload)
 }
 
-fn csp_allows_origin(csp: &str, origin: &str) -> bool {
-    fn matches(source: &str, origin: &str) -> bool {
-        let source = source.trim_end_matches('/');
-        if source == "*" || source == origin {
-            return true;
-        }
-        // CSP allows a wildcard port: http://127.0.0.1:*
-        match source.strip_suffix(":*") {
-            Some(prefix) => {
-                origin.starts_with(prefix) && origin.as_bytes().get(prefix.len()) == Some(&b':')
-            }
-            None => false,
-        }
-    }
-    let mut connect_src = None;
-    let mut default_src = None;
-    for directive in csp.split(';') {
-        let directive = directive.trim();
-        for (name, slot) in [
-            ("connect-src", &mut connect_src),
-            ("default-src", &mut default_src),
-        ] {
-            if let Some(rest) = directive.strip_prefix(name) {
-                if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-                    *slot = Some(rest.trim());
-                }
-            }
-        }
-    }
-    let sources = connect_src.or(default_src).unwrap_or("");
-    sources
-        .split_whitespace()
-        .any(|source| matches(source, origin))
-}
-
-fn warn_csp_mismatch(desktop_dir: &Path, host_url: &str) {
-    let Ok(raw) = std::fs::read_to_string(desktop_dir.join("tauri.conf.json")) else {
-        return;
-    };
-    let Ok(config) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return;
-    };
-    let Some(csp) = config["app"]["security"]["csp"].as_str() else {
-        return;
-    };
-    let origin = host_url.trim_end_matches('/');
-    if csp.trim().is_empty() || csp_allows_origin(csp, origin) {
-        return;
-    }
-    eprintln!(
-        "warning: tauri.conf.json connect-src does not allow {origin}; add it to app.security.csp or the packaged UI cannot reach the host"
-    );
-}
-
 fn isolated_bundle_command(
     workdir: &Path,
     extra_masks: &[PathBuf],
@@ -3041,10 +2987,14 @@ fn cmd_bundle(
         sign_all(&root, &app_path(&root, manifest_dir), cfg.signing.as_ref())?;
     }
     let desktop = cfg.desktop.unwrap_or_default();
-    let ui_dir = app_path(&root, desktop.ui.as_deref().unwrap_or("ui"));
+    let ui_dir = if let Some(ui) = desktop.ui.as_deref() {
+        crate::config_render::safe_resolve(&root, ui)?
+    } else {
+        root.join("ui")
+    };
 
     let desktop_dir = match desktop.path {
-        Some(path) => app_path(&root, path),
+        Some(path) => crate::config_render::safe_resolve(&root, &path)?,
         None if root.join("desktop/Cargo.toml").is_file() => root.join("desktop"),
         None => root.join("crates/desktop"),
     };
@@ -3071,9 +3021,47 @@ fn cmd_bundle(
     // default, otherwise changing [host].addr silently breaks the bundle.
     let host_url = format!(
         "http://{}",
-        read_host_addr(config).unwrap_or_else(|| "127.0.0.1:8790".to_string())
+        read_host_addr(config).unwrap_or_else(|| "127.0.0.1:8787".to_string())
     );
-    warn_csp_mismatch(&desktop_dir, &host_url);
+    // Render the generated Tauri config from [host].addr so the bundle uses
+    // the generated CSP (RF-05). Fail loudly if it cannot be created.
+    let generated_config = crate::config_render::render_targets(
+        config,
+        crate::config_render::RenderScope::Single(crate::config_render::RenderTarget::Tauri),
+        false,
+    )
+    .map_err(|e| anyhow::anyhow!("failed to render tauri.generated.conf.json: {e}"))?
+    .into_iter()
+    .next()
+    .ok_or_else(|| anyhow::anyhow!("config render did not produce tauri.generated.conf.json"))?;
+    if !generated_config.is_file() {
+        anyhow::bail!(
+            "generated Tauri config not found at {}",
+            generated_config.display()
+        );
+    }
+    let generated_raw = std::fs::read_to_string(&generated_config)?;
+    let generated_value: serde_json::Value = serde_json::from_str(&generated_raw)?;
+    let generated_csp = generated_value
+        .get("app")
+        .and_then(|a| a.get("security"))
+        .and_then(|s| s.get("csp"))
+        .and_then(|c| c.as_str())
+        .unwrap_or("");
+    if !crate::config_render::csp_allows_origin(generated_csp, &host_url) {
+        anyhow::bail!(
+            "generated Tauri config CSP does not allow host origin {}; refusing to bundle",
+            host_url
+        );
+    }
+    if !crate::config_render::csp_is_strict(generated_csp) {
+        anyhow::bail!(
+            "generated Tauri config CSP is not strict (contains * or null or wildcard port)"
+        );
+    }
+    if crate::config_render::csp_connect_src_count(generated_csp) != 1 {
+        anyhow::bail!("generated Tauri config CSP must contain exactly one connect-src directive");
+    }
     println!("Building UI in {}...", ui_dir.display());
     let status = external_command("npm")
         .args(["run", "build"])
@@ -3099,6 +3087,8 @@ fn cmd_bundle(
     let mut tauri_args = vec![
         std::ffi::OsString::from("tauri"),
         std::ffi::OsString::from("build"),
+        std::ffi::OsString::from("--config"),
+        generated_config.as_os_str().to_os_string(),
     ];
     if !requested.is_empty() {
         tauri_args.push(std::ffi::OsString::from("--bundles"));
@@ -4967,7 +4957,10 @@ mod dev_tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(value["build"]["devUrl"], "http://127.0.0.1:5199");
         assert_eq!(value["productName"], "Demo");
-        assert_eq!(value["app"]["security"]["csp"], "default-src 'self'");
+        assert_eq!(
+            value["app"]["security"]["csp"],
+            "default-src 'self'; connect-src http://127.0.0.1:8787 http://127.0.0.1:*"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

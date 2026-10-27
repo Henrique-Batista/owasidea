@@ -148,7 +148,10 @@ truth for host/port/CSP/dev URL):
 - `runtime` -> `<ui>/.owasidea/runtime.json`
 - `playwright` -> `<ui>/.owasidea/playwright.json`
 - `tauri` -> `<desktop>/tauri.generated.conf.json` (copies base `tauri.conf.json`,
-  overriding `build.devUrl` and ensuring the host origin is in `connect-src`)
+  overriding `build.devUrl` and ensuring the host origin is in `connect-src`).
+  The generated CSP contains exactly the configured host origin (no wildcard);
+  `*` and `null` are rejected. `bundle` always renders this file and passes it
+  to `cargo tauri build --config`.
 
 `--check` does not write; exits non-zero if files are missing or stale.
 
@@ -159,7 +162,9 @@ Build first, then start the host, the Vite dev server (if
 from `[dev].ui_addr` when set; otherwise the first free port in 5173..=5273.
 A busy configured port falls back to the next free port. `dev` also writes
 `<desktop>/tauri.dev.conf.json` (merged from the base `tauri.conf.json`, with
-`build.devUrl` set to the reserved UI URL) for `dev --desktop` (DL-01). Prints:
+`build.devUrl` set to the reserved UI URL) for `dev --desktop` (DL-01). In dev
+mode the generated CSP additionally allows `http://127.0.0.1:*` (wildcard port)
+alongside the exact host origin. Prints:
 
 - UI URL
 - host URL
