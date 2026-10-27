@@ -177,6 +177,67 @@ async fn integration_smoke() {
             .unwrap();
         let body: serde_json::Value = r.json().await.unwrap();
         assert_eq!(body["running"], true);
+        assert_eq!(body["last_error"], serde_json::Value::Null);
+        assert_eq!(body["restarts"], 0);
+
+        // PX-08: explicit restart drops the instance and starts a new one.
+        let metrics_before: String = client
+            .get(format!("{}/metrics", base))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        let requests_before = metric_value(
+            &metrics_before,
+            "owasidea_plugin_requests_total",
+            "heartbeat",
+        )
+        .expect("heartbeat requests metric");
+        let r = client
+            .post(format!("{}/plugin/heartbeat/service/restart", base))
+            .send()
+            .await
+            .unwrap();
+        assert!(r.status().is_success(), "restart failed: {}", r.status());
+        let body: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(body["running"], true);
+        assert_eq!(body["address"], serde_json::Value::Null);
+        assert_eq!(body["last_error"], serde_json::Value::Null);
+        assert_eq!(body["restarts"], 1);
+
+        let body: serde_json::Value = client
+            .get(format!("{}/plugin/heartbeat/service/status", base))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(body["running"], true);
+        assert_eq!(body["last_error"], serde_json::Value::Null);
+        assert_eq!(body["restarts"], 1);
+
+        // Restart counts as one PX-07 operation; the status probe is another.
+        let metrics_after: String = client
+            .get(format!("{}/metrics", base))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(
+            metric_value(
+                &metrics_after,
+                "owasidea_plugin_requests_total",
+                "heartbeat"
+            )
+            .expect("heartbeat requests metric")
+                >= requests_before + 2.0,
+            "restart/status did not increment plugin metrics: {metrics_after}"
+        );
 
         let r = client
             .post(format!("{}/plugin/heartbeat/reload", base))
@@ -233,6 +294,14 @@ async fn integration_smoke() {
             .unwrap();
         assert!(r.status().is_success());
     }
+
+    // PX-08: restart is only valid for stateful services.
+    let r = client
+        .post(format!("{}/plugin/notes/service/restart", base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), reqwest::StatusCode::CONFLICT);
 
     // greet
     let r = client
@@ -547,6 +616,136 @@ async fn structured_logs_endpoint_and_request_id() {
         assert!(e.get("request_id").is_some());
         assert!(e.get("message").is_some());
     }
+}
+
+/// Copy the manifest dir and add a `service` manifest whose component has no
+/// `start-service` export, to exercise the PX-08 failure path.
+fn failing_service_manifests(manifests: &std::path::Path) -> Option<std::path::PathBuf> {
+    let (mut failing, component) = ["notes", "chat-go"].iter().find_map(|name| {
+        let raw = std::fs::read_to_string(manifests.join(format!("{name}.manifest.json"))).ok()?;
+        let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+        let component = manifests.join(value["component"].as_str()?);
+        component.exists().then_some((value, component))
+    })?;
+    let dir = std::env::temp_dir().join(format!("owasidea-px08-manifests-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).ok()?;
+    for entry in std::fs::read_dir(manifests).ok()? {
+        let path = entry.ok()?.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let raw = std::fs::read_to_string(&path).ok()?;
+        let mut value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+        // The temp dir has no sibling `plugins/`, so pin component paths.
+        if let Some(component) = value.get("component").and_then(|v| v.as_str()) {
+            let absolute = manifests.join(component);
+            value["component"] = json!(absolute.to_string_lossy());
+        }
+        std::fs::write(
+            dir.join(path.file_name()?),
+            serde_json::to_vec_pretty(&value).ok()?,
+        )
+        .ok()?;
+    }
+    failing["name"] = json!("failing-service");
+    failing["type"] = json!("service");
+    failing["component"] = json!(component.to_string_lossy());
+    if let Some(metadata) = failing
+        .get_mut("metadata")
+        .and_then(|value| value.as_object_mut())
+    {
+        for key in ["signature", "signature_format", "sha256"] {
+            metadata.remove(key);
+        }
+    }
+    std::fs::write(
+        dir.join("failing-service.manifest.json"),
+        serde_json::to_vec_pretty(&failing).ok()?,
+    )
+    .ok()?;
+    Some(dir)
+}
+
+#[tokio::test]
+async fn restart_reports_failure_reason_and_keeps_state() {
+    let Some(manifests) = manifests_dir() else {
+        eprintln!("skipping: manifests not found");
+        return;
+    };
+    let Some(temp_manifests) = failing_service_manifests(&manifests) else {
+        eprintln!("skipping: notes/chat-go component not built");
+        return;
+    };
+    let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+        .expect("reserve ephemeral port")
+        .local_addr()
+        .expect("read ephemeral port")
+        .port();
+    let base = format!("http://127.0.0.1:{}", port);
+    let child = Command::new(env!("CARGO_BIN_EXE_owasidea-host"))
+        .arg(&temp_manifests)
+        .arg("--addr")
+        .arg(format!("127.0.0.1:{}", port))
+        .spawn()
+        .expect("spawn host");
+    let guard = HostGuard { child };
+    wait_ready(&base).await;
+    let client = reqwest::Client::new();
+
+    let body: serde_json::Value = client
+        .get(format!("{}/plugin/failing-service/service/status", base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(body["running"], false);
+    assert_eq!(body["last_error"], serde_json::Value::Null);
+    assert_eq!(body["restarts"], 0);
+
+    // The component has no start-service export: the start fails and the reason
+    // is kept for the next status call.
+    let r = client
+        .post(format!("{}/plugin/failing-service/service/restart", base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), reqwest::StatusCode::NOT_FOUND);
+    let text = r.text().await.unwrap();
+    assert!(text.contains("start-service"), "unexpected error: {text}");
+
+    let body: serde_json::Value = client
+        .get(format!("{}/plugin/failing-service/service/status", base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(body["running"], false);
+    assert!(body["last_error"]
+        .as_str()
+        .expect("last_error after failed start")
+        .contains("start-service"));
+    assert_eq!(body["restarts"], 0);
+
+    let metrics = client
+        .get(format!("{}/metrics", base))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert_eq!(
+        metric_value(&metrics, "owasidea_plugin_errors_total", "failing-service"),
+        Some(1.0)
+    );
+
+    drop(guard);
+    let _ = std::fs::remove_dir_all(&temp_manifests);
 }
 
 /// Read the value of a labelled Prometheus sample, e.g.

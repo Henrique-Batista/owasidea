@@ -150,7 +150,7 @@ async function renderPluginDetail(name: string) {
   }
   if (!exports.length) html += `<p>No callable exports.</p>`;
   html += `</div>
-    <div class="card"><h2>Logs</h2><pre>${escapeHtml(((logs.entries || logs.logs || []).map((e: any) => typeof e === 'string' ? e : `${e.ts} ${e.level} [${e.request_id}] ${e.message}`).join('\n'))}</pre>
+    <div class="card"><h2>Logs</h2><pre>${escapeHtml(((logs.entries || logs.logs || []).map((e: any) => typeof e === 'string' ? e : `${e.ts} ${e.level} [${e.request_id}] ${e.message}`).join('\n')))}</pre>
       <button id="showlogs">refresh logs</button></div>`;
   view.innerHTML = html;
 
@@ -273,7 +273,7 @@ async function renderPluginDetail(name: string) {
     showLogs.addEventListener('click', async () => {
       const r = await fetch(`${HOST}/plugin/${encodedName}/logs`).then(x => x.json());
       const pre = view.querySelector('.card:last-child pre') as HTMLPreElement;
-      if (pre) pre.textContent = ((r.entries || r.logs || []).map((e: any) => typeof e === 'string' ? e : `${e.ts} ${e.level} [${e.request_id}] ${e.message}`).join('\n');
+      if (pre) pre.textContent = ((r.entries || r.logs || []).map((e: any) => typeof e === 'string' ? e : `${e.ts} ${e.level} [${e.request_id}] ${e.message}`).join('\n'));
     });
   }
 }
@@ -370,6 +370,25 @@ async function verifyUiPluginAssets(plugin: any) {
   if (digest !== plugin.sha256) throw new Error('bundle digest mismatch');
 }
 
+function renderServiceState(name: string, body: any) {
+  const state = view.querySelector(`p[data-svc-state="${CSS.escape(name)}"]`) as HTMLParagraphElement | null;
+  if (!state) return;
+  if (body && typeof body === 'object' && 'error' in body) {
+    state.textContent = `failed: ${String(body.error)}`;
+    return;
+  }
+  const parts: string[] = [];
+  if (body && typeof body === 'object' && 'stopped' in body) {
+    parts.push(body.stopped ? 'stopped' : 'was not running');
+  } else if (body && typeof body === 'object' && 'running' in body) {
+    parts.push(body.running ? 'running' : 'stopped');
+    if (body.address) parts.push(`address: ${body.address}`);
+    if (body.last_error) parts.push(`last error: ${body.last_error}`);
+    parts.push(`restarts: ${body.restarts ?? 0}`);
+  }
+  state.textContent = parts.join(' · ');
+}
+
 async function renderServices() {
   const plugins = await fetch(`${HOST}/plugins`).then(r => r.json());
   const services = plugins.filter((p: any) => p.type === 'service' || p.type === 'hybrid');
@@ -377,9 +396,11 @@ async function renderServices() {
     `<div class="card"><h2>${escapeHtml(p.name)}</h2>
       <button data-start="${escapeHtml(p.name)}">start</button>
       <button data-stop="${escapeHtml(p.name)}">stop</button>
+      <button data-restart="${escapeHtml(p.name)}">restart</button>
       <button data-status="${escapeHtml(p.name)}">status</button>
+      <p data-svc-state="${escapeHtml(p.name)}">unknown</p>
       <pre data-svc="${escapeHtml(p.name)}"></pre></div>`).join('') : '<p>No service plugins.</p>');
-  const updateService = async (name: string, action: 'start' | 'stop' | 'status') => {
+  const updateService = async (name: string, action: 'start' | 'stop' | 'restart' | 'status') => {
     const encoded = encodeURIComponent(name);
     const method = action === 'status' ? 'GET' : 'POST';
     const res = await fetch(`${HOST}/plugin/${encoded}/service/${action}`, {
@@ -390,19 +411,24 @@ async function renderServices() {
       } : {}),
     }).then(async response => {
       const body = await response.json().catch(() => response.text());
-      if (!response.ok) throw new Error(JSON.stringify(body));
+      if (!response.ok) throw new Error(typeof body === 'string' ? body : JSON.stringify(body));
       return body;
     }).catch(error => ({ error: String(error) }));
     const output = view.querySelector(`pre[data-svc="${CSS.escape(name)}"]`) as HTMLPreElement;
     if (output) output.textContent = JSON.stringify(res, null, 2);
+    renderServiceState(name, res);
   };
-  for (const action of ['start', 'stop', 'status'] as const) {
+  for (const action of ['start', 'stop', 'restart', 'status'] as const) {
     view.querySelectorAll(`button[data-${action}]`).forEach(button => {
       button.addEventListener('click', () => {
         const name = (button as HTMLElement).getAttribute(`data-${action}`)!;
         void updateService(name, action);
       });
     });
+  }
+  // Show current lifecycle state (including a previous failure reason) on load.
+  for (const service of services) {
+    void updateService(service.name, 'status');
   }
 }
 
