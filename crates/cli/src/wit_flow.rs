@@ -138,6 +138,23 @@ fn resolve(plugin_dir: &Path, dir: &Path) -> PathBuf {
     }
 }
 
+/// Removes generated `.wit` files left by an earlier world name. Only called
+/// for artifact directories; hand-written `wit/` trees are never pruned.
+fn prune_generated(dir: &Path, keep: &str) -> Result<()> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Ok(());
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) == Some("wit")
+            && path.file_name().and_then(|name| name.to_str()) != Some(keep)
+        {
+            std::fs::remove_file(&path)?;
+        }
+    }
+    Ok(())
+}
+
 fn drift_error(name: &str, path: &Path) -> anyhow::Error {
     anyhow::anyhow!(
         "plugin {name}: source attributes diverge from {}; \
@@ -207,6 +224,9 @@ pub fn generate(plugin_dir: &Path, name: &str, language: &str, version: &str) ->
     let rendered = crate::render_wit_source(plugin_dir, &world, &version)?
         .with_context(|| format!("no attribute markers found in {}", plugin_dir.display()))?;
     let changed = crate::write_wit(&dir, &rendered)?;
+    if language == "rust" {
+        prune_generated(&dir, &format!("{}.wit", rendered.world))?;
+    }
     Ok(Prepared {
         mode: WitSource::Attributes,
         world: rendered.world,
@@ -236,7 +256,11 @@ fn prepare_rust(plugin_dir: &Path, name: &str, explicit: Option<&str>) -> Result
     let target_dir = resolve(plugin_dir, &target.dir);
     let rendered = crate::render_wit_source(plugin_dir, &target.world, &target.version)?;
     let has = has_wit(&target_dir);
+    let artifact = is_artifact_dir(&target.dir);
     let mode = match requested {
+        // Files under .owasidea/wit are ours: when markers exist, regenerate
+        // instead of mistaking a previous build for a hand-written contract.
+        WitSource::Auto if artifact && rendered.is_some() => WitSource::Attributes,
         WitSource::Auto if has => WitSource::Wit,
         WitSource::Auto if rendered.is_some() => WitSource::Attributes,
         WitSource::Auto => WitSource::Wit,
@@ -265,6 +289,7 @@ fn prepare_rust(plugin_dir: &Path, name: &str, explicit: Option<&str>) -> Result
                 );
             }
             let changed = crate::write_wit(&target_dir, &rendered)?;
+            prune_generated(&target_dir, &format!("{}.wit", rendered.world))?;
             Ok(Some(Prepared {
                 mode,
                 world: rendered.world,
@@ -429,6 +454,21 @@ mod tests {
         let generated = std::fs::read_to_string(dir.join(".owasidea/wit/demo.wit")).unwrap();
         assert!(generated.contains("export start-service: func() -> bool;"));
         assert_eq!(prepared.exports, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn renames_prune_the_old_generated_world() {
+        let dir = temp("rename");
+        cargo(&dir, ".owasidea/wit", "demo");
+        source(&dir);
+        write(
+            &dir.join(".owasidea/wit/old.wit"),
+            "package poc:old@0.1.0;\n",
+        );
+        prepare(&dir, "demo", "rust", None, "0.1.0").unwrap();
+        assert!(!dir.join(".owasidea/wit/old.wit").exists());
+        assert!(dir.join(".owasidea/wit/demo.wit").is_file());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
