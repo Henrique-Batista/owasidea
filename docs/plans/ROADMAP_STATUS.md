@@ -86,7 +86,7 @@ Status permitidos: `todo`, `doing`, `review`, `done`, `blocked`.
 | G2 | done | main (release/1.0) | d337025 + a4cd9ad (merge 1035a3a) | Linux verde: fmt/clippy/test + Playwright 40/40 + Shipyard 7/7 + build/smoke + deb + `verify dist` 11; Windows **não executado** | CI remoto não executado; matriz em `V1_RELEASE_REPORT.md` §3 |
 | G3 | done | main (release/1.0) | 19a5222 | startup p95 117 ms; ping 1.1 ms; TS 1.8 ms; build 8.9 s; deb 23.6 s/25.4 MB — todos dentro do orçamento | `docs/plans/PERFORMANCE.md`; cold start 1× |
 | G4 | done | main (release/1.0) | 79724a8 | link checker: 180 links, 0 broken; docs index; claims audit | `docs/README.md`; GET_STARTED/API/CLI/UI_PLUGINS/PLUGIN_AUTHORING/WINDOWS/REGISTRY/ROADMAP/SECURITY/ABI_POLICY/MIGRATION/CODE_SIGNING/UPDATER/RELEASE/ERRORS/OPTIONAL_TOOLCHAINS/plans linkados |
-| G5 | done | main (release/1.0) | este commit | 0 blockers; relatório final; tag `v1.0.0` local **não criada** (push exige aprovação) | `docs/plans/V1_RELEASE_REPORT.md`; G0/G1 aprovados; G2 Linux verde/Windows não; G3/G4 done |
+| G5 | done | main (release/1.0) | 5af2140 + este commit | 0 blockers; relatório final; tag `v1.0.0` local criada; push não realizado | `docs/plans/V1_RELEASE_REPORT.md`; G0/G1 aprovados; G2 Linux verde/Windows não; G3/G4 done |
 
 ## FIX — gaps da auditoria v1.0 (B0.4)
 

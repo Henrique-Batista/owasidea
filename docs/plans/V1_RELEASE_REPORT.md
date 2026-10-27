@@ -132,15 +132,14 @@ Política: [`docs/ABI_POLICY.md`](../ABI_POLICY.md); changelog:
 
 ## 8. Tag `v1.0.0`
 
-A tag é **local**. Criar somente com aprovação explícita:
+A tag **local** `v1.0.0` foi criada neste commit:
 
 ```bash
 git tag -a v1.0.0 -m "Owasidea 1.0.0"
 ```
 
-**Push exige aprovação** (`git push origin v1.0.0`). Este commit **não** cria a
-tag; o orquestrador cria após revisar este relatório. A tag pré-existente é
-`v1.0.0-pre` (baseline da Fase 0).
+**Push exige aprovação** (`git push origin v1.0.0`); nenhum push foi feito. A
+tag pré-existente é `v1.0.0-pre` (baseline da Fase 0).
 
 ## 9. Evidências
 
