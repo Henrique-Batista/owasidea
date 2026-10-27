@@ -112,30 +112,49 @@ function createBridge(port, nonce) {
   return { call, cancel, port };
 }
 
+let _initResolve = null;
+let _initPromise = new Promise((res) => { _initResolve = res; });
+let _initReceived = null;
+
+function _handleInit(e) {
+  const data = e && e.data;
+  if (!data || data.type !== 'owasidea:bridge:init') return;
+  const p = e.ports && e.ports[0];
+  if (!p || _initReceived) return;
+  _initReceived = { port: p, nonce: data.nonce };
+  if (_initResolve) _initResolve(_initReceived);
+}
+if (typeof window !== 'undefined') {
+  window.addEventListener('message', _handleInit);
+}
+
 export function connect() {
   return new Promise((resolve, reject) => {
     let settled = false;
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
-      window.removeEventListener('message', onMessage);
       reject(new BridgeError('BRIDGE_DISABLED', 'handshake timeout'));
     }, BRIDGE_HANDSHAKE_TIMEOUT_MS);
 
-    function onMessage(e) {
-      if (settled) return;
-      const data = e && e.data;
-      if (!data || data.type !== 'owasidea:bridge:init') return;
-      const p = e.ports && e.ports[0];
-      if (!p) return;
-      settled = true;
-      clearTimeout(timer);
-      window.removeEventListener('message', onMessage);
-      const bridge = createBridge(p, data.nonce);
-      resolve(bridge);
-    }
-
-    window.addEventListener('message', onMessage);
+    (async () => {
+      try {
+        const init = _initReceived || await Promise.race([
+          _initPromise,
+          new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), BRIDGE_HANDSHAKE_TIMEOUT_MS)),
+        ]);
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        const bridge = createBridge(init.port, init.nonce);
+        resolve(bridge);
+      } catch {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(new BridgeError('BRIDGE_DISABLED', 'handshake timeout'));
+      }
+    })();
   });
 }
 

@@ -1026,6 +1026,8 @@ struct UiPluginInfo {
     entry: String,
     sha256: String,
     files: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    bridge: Vec<String>,
 }
 
 async fn health() -> &'static str {
@@ -2674,6 +2676,16 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
                 entry: format!("plugins/{}/{}", manifest.name, entry),
                 sha256,
                 files,
+                bridge: ui
+                    .get("bridge")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(serde_json::Value::as_str)
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             });
             tracing::info!(
                 "skipping js-wasm plugin {} (served by the webview UI, not Wasmtime)",

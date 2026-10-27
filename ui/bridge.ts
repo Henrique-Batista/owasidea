@@ -208,16 +208,26 @@ export function attachBridge(frame: HTMLIFrameElement, plugin: BridgePlugin, hos
       }
     };
 
-    try {
-      (frame.contentWindow as any)?.postMessage(
-        { type: 'owasidea:bridge:init', version: 1, nonce, port: port2 },
-        '*',
-        [port2]
-      );
-    } catch {
-      window.clearTimeout(handshakeTimer);
-      disposePort();
-    }
+    let attempts = 0;
+    const sendInit = () => {
+      if (disposed || helloReceived) return;
+      try {
+        (frame.contentWindow as any)?.postMessage(
+          { type: 'owasidea:bridge:init', version: 1, nonce, port: port2 },
+          '*',
+          [port2]
+        );
+      } catch {
+        window.clearTimeout(handshakeTimer);
+        disposePort();
+        return;
+      }
+      if (!helloReceived && attempts < 25) {
+        attempts++;
+        window.setTimeout(sendInit, 200);
+      }
+    };
+    window.setTimeout(sendInit, 500);
   };
 
   frame.addEventListener('load', handleLoad);

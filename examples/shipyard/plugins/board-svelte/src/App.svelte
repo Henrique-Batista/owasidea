@@ -16,6 +16,20 @@
     { id: 5, label: 'Webhook smoke test', column: 'blocked' },
   ];
 
+  // Preload bridge SDK so the parent handshake can complete.
+  if (typeof document !== 'undefined') {
+    const s = document.createElement('script');
+    s.type = 'module';
+    s.src = './owasidea-bridge.js';
+    s.onload = () => {
+      const m = (window as any).OwasideaBridge;
+      if (m && ! (window as any).__owasideaBridge) {
+        m.connect().then((b: any) => { (window as any).__owasideaBridge = b; }).catch(() => {});
+      }
+    };
+    document.head.appendChild(s);
+  }
+
   let items: Item[] = load();
   let draft = '';
 
@@ -28,17 +42,17 @@
     bridgeError = '';
     bridgeResult = '';
     try {
-      if (!(window as any).OwasideaBridge) {
-        await new Promise((resolve, reject) => {
-          const s = document.createElement('script');
-          s.type = 'module';
-          s.src = './owasidea-bridge.js';
-          s.onload = () => resolve(true);
-          s.onerror = () => reject(new Error('failed to load bridge sdk'));
-          document.head.appendChild(s);
-        });
+      // wait for SDK module to load
+      for (let i = 0; i < 50 && !(window as any).OwasideaBridge; i++) {
+        await new Promise(r => setTimeout(r, 100));
       }
-      const bridge = await (window as any).OwasideaBridge.connect();
+      const m = (window as any).OwasideaBridge;
+      if (!m) throw new Error('bridge sdk not loaded');
+      let bridge = (window as any).__owasideaBridge;
+      if (!bridge) {
+        bridge = await m.connect();
+        (window as any).__owasideaBridge = bridge;
+      }
       const result = await bridge.call('changelog-ts', 'render', ['v1.0.0', ['feat: add']]);
       bridgeResult = String(result ?? '');
     } catch (e: any) {
