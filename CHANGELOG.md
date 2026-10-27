@@ -22,6 +22,10 @@ below; see [`docs/UPDATER.md`](docs/UPDATER.md).
 
 ### Fixed
 
+- `owasidea init --preset full` (the default) now scaffolds `ui/bridge.ts`
+  alongside `ui/main.ts`, so `vite build` on a freshly scaffolded app resolves
+  `./bridge.ts` instead of failing with "Could not resolve" (G0). Unknown
+  presets are rejected, and the `minimal` preset still writes no `ui/`.
 - Typed POC routes (`dial-tcp`, `start-server`, `bind-udp`, `tls-probe`,
   `dial-echo`, `echo-udp`, `parse-address`) run under the manifest
   `timeout_ms` (default 10 s), answer `504` instead of hanging, and release the

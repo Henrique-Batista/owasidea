@@ -1143,6 +1143,9 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn cmd_init(dir: Option<PathBuf>, preset: &str, yes: bool, json: bool) -> anyhow::Result<()> {
+    if !matches!(preset, "minimal" | "desktop" | "full") {
+        anyhow::bail!("unknown preset {preset:?}: expected minimal, desktop, or full");
+    }
     let interactive = !json && !yes && std::io::stdin().is_terminal();
     let target_dir = match dir {
         Some(d) => d,
@@ -1185,6 +1188,9 @@ fn cmd_init(dir: Option<PathBuf>, preset: &str, yes: bool, json: bool) -> anyhow
             ("package.json", include_str!("../../../ui/package.json")),
             ("index.html", include_str!("../../../ui/index.html")),
             ("main.ts", include_str!("../../../ui/main.ts")),
+            // `main.ts` imports `./bridge.ts`; scaffold both or `vite build` fails
+            // with "Could not resolve ./bridge.ts" (G0).
+            ("bridge.ts", include_str!("../../../ui/bridge.ts")),
             ("vite.config.ts", include_str!("../../../ui/vite.config.ts")),
             ("tsconfig.json", include_str!("../../../ui/tsconfig.json")),
         ] {

@@ -207,6 +207,15 @@ owasidea doctor
 The generated UI is the generic Owasidea dashboard; replace `ui/` when you want a
 product-specific frontend.
 
+`--preset` selects what gets scaffolded: `full` (default) and `desktop` write the
+Vite dashboard (`ui/package.json`, `index.html`, `main.ts`, `bridge.ts`,
+`vite.config.ts`, `tsconfig.json`); `minimal` writes no `ui/` at all. The
+dashboard UI builds out of the box:
+
+```bash
+cd my-app/ui && npm install && npm run build
+```
+
 ### 4.1 Configure the app
 
 ```toml

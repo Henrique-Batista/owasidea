@@ -255,6 +255,135 @@ fn init_scaffolds_working_ui_and_plugin_new_registers_plugin() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn init_scaffolds_ui_bridge_and_minimal_stays_ui_free() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    fn temp_root(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "owasidea-init-{tag}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    // G0: `main.ts` imports `./bridge.ts`, so `init` must scaffold both.
+    let full = temp_root("full");
+    let mut init = Command::cargo_bin("owasidea").unwrap();
+    init.args(["init", "--preset", "full", "--yes"])
+        .arg(&full)
+        .assert()
+        .success();
+    let main_ts = std::fs::read_to_string(full.join("ui/main.ts")).unwrap();
+    let bridge_ts = std::fs::read_to_string(full.join("ui/bridge.ts"))
+        .expect("init --preset full must scaffold ui/bridge.ts");
+    assert!(!bridge_ts.trim().is_empty());
+    assert!(main_ts.contains("from './bridge.ts'"));
+    let repo_bridge = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ui/bridge.ts"),
+    )
+    .unwrap();
+    assert_eq!(
+        bridge_ts, repo_bridge,
+        "scaffolded ui/bridge.ts must match the root dashboard bridge"
+    );
+    for line in main_ts.lines() {
+        let Some(rest) = line.split("from '").nth(1) else {
+            continue;
+        };
+        let Some(spec) = rest.split('\'').next() else {
+            continue;
+        };
+        if spec.starts_with('.') {
+            let resolved = full.join("ui").join(spec);
+            assert!(
+                resolved.is_file(),
+                "ui/main.ts imports {spec}, but init did not scaffold {resolved:?}"
+            );
+        }
+    }
+    std::fs::remove_dir_all(&full).unwrap();
+
+    // The minimal preset has no UI, so it must not write bridge.ts either.
+    let minimal = temp_root("minimal");
+    let mut init = Command::cargo_bin("owasidea").unwrap();
+    init.args(["init", "--preset", "minimal", "--yes"])
+        .arg(&minimal)
+        .assert()
+        .success();
+    assert!(!minimal.join("ui").exists());
+    assert!(minimal.join("wasm-app.toml").is_file());
+    std::fs::remove_dir_all(&minimal).unwrap();
+
+    let unknown = temp_root("unknown");
+    let mut init = Command::cargo_bin("owasidea").unwrap();
+    init.args(["init", "--preset", "bogus", "--yes"])
+        .arg(&unknown)
+        .assert()
+        .failure();
+    let _ = std::fs::remove_dir_all(&unknown);
+}
+
+// G0: the scaffolded UI must actually build, not only exist. Needs node/npm and
+// network access for `npm install`; skips when the toolchain is missing.
+#[test]
+fn init_full_preset_ui_builds() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let has_npm = std::process::Command::new("npm")
+        .args(["--version"])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false);
+    let has_node = std::process::Command::new("node")
+        .args(["--version"])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false);
+    if !has_npm || !has_node {
+        eprintln!("skipping init_full_preset_ui_builds: missing node/npm");
+        return;
+    }
+
+    let root = std::env::temp_dir().join(format!(
+        "owasidea-init-ui-build-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let mut init = Command::cargo_bin("owasidea").unwrap();
+    init.args(["init", "--preset", "full", "--yes"])
+        .arg(&root)
+        .assert()
+        .success();
+    let ui = root.join("ui");
+
+    let install = std::process::Command::new("npm")
+        .args(["install", "--no-audit", "--no-fund"])
+        .current_dir(&ui)
+        .status()
+        .expect("run npm install in the scaffolded ui");
+    assert!(install.success(), "npm install failed in {ui:?}");
+
+    let build = std::process::Command::new("npm")
+        .args(["run", "build"])
+        .current_dir(&ui)
+        .env("OWASIDEA_HOST", "http://127.0.0.1:8787")
+        .output()
+        .expect("run npm run build in the scaffolded ui");
+    assert!(
+        build.status.success(),
+        "vite build failed for the scaffolded ui: {}{}",
+        String::from_utf8_lossy(&build.stdout),
+        String::from_utf8_lossy(&build.stderr)
+    );
+    assert!(ui.join("dist/index.html").is_file());
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
 // FIX-03: the scaffolds must compile, not only register their files.
 // Heavy by design: opt in with OWASIDEA_TEMPLATE_BUILD=1 (CI runs the same
 // script in the fast job). Missing toolchains skip the test with a message.
