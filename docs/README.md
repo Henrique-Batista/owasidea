@@ -43,6 +43,7 @@ is `../examples/shipyard`.
 
 - [plans/ROADMAP_IMPLEMENTATION_PLAN.md](plans/ROADMAP_IMPLEMENTATION_PLAN.md) — scope, phases, gates.
 - [plans/ROADMAP_STATUS.md](plans/ROADMAP_STATUS.md) — item-by-item tracker and gate status.
+- [plans/V1_RELEASE_REPORT.md](plans/V1_RELEASE_REPORT.md) — G5 release report: test matrix, benchmarks, SBOM hashes, residual risks, tag.
 - [plans/PERFORMANCE.md](plans/PERFORMANCE.md) — G3 startup/call/build/bundle measurements and limits.
 - [plans/AUDIT_V1.md](plans/AUDIT_V1.md) — v0–v1.0 audit and FIX gaps.
 - [plans/BLOCKERS.md](plans/BLOCKERS.md) — blocker log template and entries.

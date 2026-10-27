@@ -1,6 +1,6 @@
 # Roadmap 1.0 — Status tracker
 
-Status do plano: **em execução**
+Status do plano: **concluído** (release local; tag/push com aprovação)
 Última atualização: 2026-10-27
 Fonte de escopo: [`ROADMAP_IMPLEMENTATION_PLAN.md`](ROADMAP_IMPLEMENTATION_PLAN.md)
 
@@ -81,12 +81,12 @@ Status permitidos: `todo`, `doing`, `review`, `done`, `blocked`.
 | RL-05 | done | wt-host | b6b1a66 (merge 434383d) | fmt/clippy/test com e sem feature `otel`; teste live OTLP | spans `plugin.call`/`http.request`; endpoint OTLP; desligado sem feature/env |
 | RL-06 | done | wt-host | 5ce286c + 4b5e8d0 (merge 8fcea64) | fmt/clippy/test com/sem `streaming` (32 streaming); SEC aprovado | ADR-0005; jobs/SSE/cancel; limites/panic/bind; ressalvas menores |
 | RL-07 | done | wt-authoring | 48f8f66 (merge 9a90578) | fmt/clippy/test (124 unit + 26 CLI) | ABI_POLICY + migration 0.x→1.0 + CHANGELOG; validate warns legacy |
-| G0 | todo | — | — | — | — |
-| G1 | todo | — | — | — | — |
-| G2 | todo | — | — | — | — |
-| G3 | todo | — | — | — | — |
-| G4 | done | main (release/1.0) | — | link checker 0 broken; docs index; claims audit | `docs/README.md`; GET_STARTED/API/CLI/UI_PLUGINS/PLUGIN_AUTHORING/WINDOWS/REGISTRY/ROADMAP/SECURITY/ABI_POLICY/MIGRATION/CODE_SIGNING/UPDATER/RELEASE/ERRORS/OPTIONAL_TOOLCHAINS/plans linkados |
-| G5 | todo | — | — | — | — |
+| G0 | done | main (release/1.0) | 38b2b9c + 1565d1b + 6ac48c9 (merge 6b8589a) | REV aprovado; sem blocker aberto | docs bridge/client/ADR reconciliados; `init` gera `bridge.ts`; handshake endurecido no Shipyard |
+| G1 | done | main (release/1.0) | 65b3e6d + 6ac48c9 (merge b76ad6d) | SEC aprovado; sem crítico/alto | timeouts POC + headers saneados; bridge fail-closed; CSP/updater/registry/capabilities revisados |
+| G2 | done | main (release/1.0) | d337025 + a4cd9ad (merge 1035a3a) | Linux verde: fmt/clippy/test + Playwright 40/40 + Shipyard 7/7 + build/smoke + deb + `verify dist` 11; Windows **não executado** | CI remoto não executado; matriz em `V1_RELEASE_REPORT.md` §3 |
+| G3 | done | main (release/1.0) | 19a5222 | startup p95 117 ms; ping 1.1 ms; TS 1.8 ms; build 8.9 s; deb 23.6 s/25.4 MB — todos dentro do orçamento | `docs/plans/PERFORMANCE.md`; cold start 1× |
+| G4 | done | main (release/1.0) | 79724a8 | link checker: 180 links, 0 broken; docs index; claims audit | `docs/README.md`; GET_STARTED/API/CLI/UI_PLUGINS/PLUGIN_AUTHORING/WINDOWS/REGISTRY/ROADMAP/SECURITY/ABI_POLICY/MIGRATION/CODE_SIGNING/UPDATER/RELEASE/ERRORS/OPTIONAL_TOOLCHAINS/plans linkados |
+| G5 | done | main (release/1.0) | este commit | 0 blockers; relatório final; tag `v1.0.0` local **não criada** (push exige aprovação) | `docs/plans/V1_RELEASE_REPORT.md`; G0/G1 aprovados; G2 Linux verde/Windows não; G3/G4 done |
 
 ## FIX — gaps da auditoria v1.0 (B0.4)
 
