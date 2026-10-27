@@ -430,7 +430,95 @@ pub(crate) fn tauri_content_for(
             eprintln!("warning: updater config not rendered: {error}");
         }
     }
+    apply_signing_env(&mut value)?;
     Ok(value)
+}
+
+/// RL-03: project non-secret code-signing settings from the environment into
+/// the generated Tauri config.
+///
+/// Only identifiers and commands are copied. Certificates, passwords and API
+/// keys are **never** written here: Tauri reads those from its own environment
+/// variables at bundle time (`APPLE_CERTIFICATE`, ...). CI derives the values
+/// from secrets and `docs/CODE_SIGNING.md` lists the supported names.
+fn apply_signing_env(value: &mut serde_json::Value) -> anyhow::Result<()> {
+    let env = |name: &str| {
+        std::env::var(name)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+
+    let sign_command = env("OWASIDEA_WINDOWS_SIGN_COMMAND");
+    let thumbprint = env("OWASIDEA_WINDOWS_CERT_THUMBPRINT");
+    if sign_command.is_some() && thumbprint.is_some() {
+        anyhow::bail!(
+            "set either OWASIDEA_WINDOWS_SIGN_COMMAND or OWASIDEA_WINDOWS_CERT_THUMBPRINT, not both"
+        );
+    }
+
+    let mut windows = serde_json::Map::new();
+    if let Some(command) = sign_command {
+        windows.insert(
+            "signCommand".to_string(),
+            serde_json::Value::String(command),
+        );
+    }
+    if let Some(thumbprint) = thumbprint {
+        windows.insert(
+            "certificateThumbprint".to_string(),
+            serde_json::Value::String(thumbprint),
+        );
+    }
+    for (variable, key) in [
+        ("OWASIDEA_WINDOWS_DIGEST_ALGORITHM", "digestAlgorithm"),
+        ("OWASIDEA_WINDOWS_TIMESTAMP_URL", "timestampUrl"),
+    ] {
+        if let Some(value) = env(variable) {
+            windows.insert(key.to_string(), serde_json::Value::String(value));
+        }
+    }
+
+    let macos_identity = env("OWASIDEA_MACOS_SIGNING_IDENTITY");
+
+    if windows.is_empty() && macos_identity.is_none() {
+        return Ok(());
+    }
+
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("tauri.conf.json root must be object"))?;
+    let bundle = object
+        .entry("bundle".to_string())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    if !bundle.is_object() {
+        anyhow::bail!("tauri.conf.json bundle must be object");
+    }
+    let bundle = bundle.as_object_mut().unwrap();
+    if !windows.is_empty() {
+        let target = bundle
+            .entry("windows".to_string())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        if !target.is_object() {
+            anyhow::bail!("tauri.conf.json bundle.windows must be object");
+        }
+        for (key, value) in windows {
+            target.as_object_mut().unwrap().insert(key, value);
+        }
+    }
+    if let Some(identity) = macos_identity {
+        let target = bundle
+            .entry("macOS".to_string())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        if !target.is_object() {
+            anyhow::bail!("tauri.conf.json bundle.macOS must be object");
+        }
+        target.as_object_mut().unwrap().insert(
+            "signingIdentity".to_string(),
+            serde_json::Value::String(identity),
+        );
+    }
+    Ok(())
 }
 
 /// Merge-based content for `tauri.dev.conf.json`: clone the base `tauri.conf.json`
@@ -821,6 +909,64 @@ mod tests {
             value["plugins"]["updater"]["dangerousInsecureTransportProtocol"],
             false
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn tauri_content_injects_signing_env_without_secret_values() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let keys = [
+            "OWASIDEA_WINDOWS_SIGN_COMMAND",
+            "OWASIDEA_WINDOWS_CERT_THUMBPRINT",
+            "OWASIDEA_WINDOWS_DIGEST_ALGORITHM",
+            "OWASIDEA_WINDOWS_TIMESTAMP_URL",
+            "OWASIDEA_MACOS_SIGNING_IDENTITY",
+        ];
+        for key in keys {
+            std::env::remove_var(key);
+        }
+        let root = profile_root("signing");
+        std::env::set_var("OWASIDEA_WINDOWS_CERT_THUMBPRINT", "A1B2C3");
+        std::env::set_var("OWASIDEA_WINDOWS_DIGEST_ALGORITHM", "sha256");
+        std::env::set_var("OWASIDEA_WINDOWS_TIMESTAMP_URL", "http://timestamp.example");
+        std::env::set_var(
+            "OWASIDEA_MACOS_SIGNING_IDENTITY",
+            "Developer ID Application: Example",
+        );
+
+        let cfg = AppConfig {
+            desktop: Some(crate::config::DesktopSection {
+                path: Some("desktop".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let value = tauri_content_for(&root, &cfg, None).unwrap();
+        assert_eq!(
+            value["bundle"]["windows"]["certificateThumbprint"],
+            "A1B2C3"
+        );
+        assert_eq!(value["bundle"]["windows"]["digestAlgorithm"], "sha256");
+        assert_eq!(
+            value["bundle"]["windows"]["timestampUrl"],
+            "http://timestamp.example"
+        );
+        assert_eq!(
+            value["bundle"]["macOS"]["signingIdentity"],
+            "Developer ID Application: Example"
+        );
+        // Certificate content, passwords and API keys are never rendered.
+        let rendered = serde_json::to_string(&value).unwrap();
+        assert!(!rendered.contains("WINDOWS_CERTIFICATE"));
+        assert!(!rendered.contains("APPLE_CERTIFICATE"));
+
+        std::env::set_var("OWASIDEA_WINDOWS_SIGN_COMMAND", "artifact-signing-cli %1");
+        let error = tauri_content_for(&root, &cfg, None).unwrap_err();
+        assert!(error.to_string().contains("not both"));
+
+        for key in keys {
+            std::env::remove_var(key);
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 }

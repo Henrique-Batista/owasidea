@@ -137,6 +137,7 @@ owasidea bundle          # build + sign + Tauri package
 - [`docs/WINDOWS.md`](docs/WINDOWS.md) — native Windows support and cross-compilation boundaries
 - [`docs/APPIMAGE.md`](docs/APPIMAGE.md) — AppImage packaging and clean-build requirements
 - [`docs/UPDATER.md`](docs/UPDATER.md) — Tauri updater, latest.json, channels, local testing
+- [`docs/CODE_SIGNING.md`](docs/CODE_SIGNING.md) — Windows Authenticode and macOS Developer ID/notarization, CI secrets and safe skip
 - [`docs/RELEASE.md`](docs/RELEASE.md) — release checklist: gates, profiles, signing, CI secrets
 - [`docs/CLEAN_BUILD.md`](docs/CLEAN_BUILD.md) — bubblewrap isolation and clean Arch/Debian chroot builds
 - [`llms.txt`](llms.txt) — compact AI index

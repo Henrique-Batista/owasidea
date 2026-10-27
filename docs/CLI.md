@@ -436,6 +436,15 @@ Requires `[updater].endpoint` and `[updater].pubkey` (or
 `OWASIDEA_UPDATER_ENDPOINT`/`OWASIDEA_UPDATER_PUBKEY`). See
 [`UPDATER.md`](UPDATER.md) and `scripts/gen-latest-json.sh`.
 
+### `signing plan [--platform windows|macos|linux] [--require] [--json]`
+
+Read-only code-signing planner (RL-03). It reports `mode` (`skip`,
+`windows-pfx`, `windows-trusted-signing`, `macos-developer-id`, `invalid`),
+whether the bundle will sign/notarize, and the **names** of missing variables.
+Secret values are never printed or serialized. `--require` exits non-zero when
+nothing is configured; an `invalid` plan always exits non-zero. The default
+platform is the current host. See [`CODE_SIGNING.md`](CODE_SIGNING.md).
+
 ### `wit generate [path]`
 
 Regenerate WIT from source annotations (`owasidea::*` in Rust, `// owasidea:`

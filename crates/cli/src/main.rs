@@ -13,6 +13,7 @@ mod logs;
 mod permissions;
 mod profile;
 mod registry_lock;
+mod signing;
 mod smoke_gen;
 mod status;
 mod templates;
@@ -294,6 +295,12 @@ enum Commands {
         #[arg(help = "Dist directory.")]
         dist: PathBuf,
     },
+    /// Plan Windows/macOS code signing and notarization from CI secrets.
+    #[command(about = "Plan Windows/macOS code signing and notarization from CI secrets.")]
+    Signing {
+        #[command(subcommand)]
+        cmd: SigningCmd,
+    },
     /// Explain an OWASIDEA_E_* error code.
     #[command(about = "Explain an OWASIDEA_E_* error code.")]
     Explain {
@@ -414,6 +421,20 @@ enum PluginCmd {
         registry: Option<String>,
         #[arg(long)]
         version: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum SigningCmd {
+    /// Report whether signing/notarization will run, without revealing secrets.
+    #[command(about = "Report whether signing/notarization will run, without revealing secrets.")]
+    Plan {
+        /// Target platform (default: the current host).
+        #[arg(long, value_name = "PLATFORM")]
+        platform: Option<String>,
+        /// Exit non-zero when no signing credentials are configured.
+        #[arg(long)]
+        require: bool,
     },
 }
 
@@ -615,6 +636,17 @@ fn wasi_toolchain() -> (Option<PathBuf>, Option<PathBuf>) {
     (sdk, adapter)
 }
 
+/// Release asset platform for wasi-sdk (`windows`, `macos`, `linux`).
+fn wasi_sdk_platform() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "linux"
+    }
+}
+
 async fn install_wasi_sdk() -> anyhow::Result<PathBuf> {
     let dest = std::env::var_os("WASI_SDK_DIR")
         .map(PathBuf::from)
@@ -640,7 +672,7 @@ async fn install_wasi_sdk() -> anyhow::Result<PathBuf> {
         other => anyhow::bail!("wasi-sdk download is not configured for architecture {other}"),
     };
     let release = version.split('.').next().unwrap_or("34");
-    let platform = if cfg!(windows) { "windows" } else { "linux" };
+    let platform = wasi_sdk_platform();
     let url = format!(
         "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-{release}/wasi-sdk-{version}-{arch}-{platform}.tar.gz"
     );
@@ -986,6 +1018,11 @@ async fn main() -> anyhow::Result<()> {
         Commands::Validate => cmd_validate(&cli.config, &cli.manifest_dir),
         Commands::Verify { dist } => verify::cmd_verify(&dist, cli.json),
         Commands::Explain { code } => errors::cmd_explain(&code, cli.json),
+        Commands::Signing { cmd } => match cmd {
+            SigningCmd::Plan { platform, require } => {
+                signing::cmd_signing_plan(platform.as_deref(), cli.json, require)
+            }
+        },
         Commands::Client {
             lang,
             output,
@@ -4665,6 +4702,10 @@ fn clear_bundle_artifacts(destination: &Path) -> anyhow::Result<()> {
     for entry in std::fs::read_dir(destination)? {
         let entry = entry?;
         let path = entry.path();
+        if is_app_bundle(&path) {
+            std::fs::remove_dir_all(&path)?;
+            continue;
+        }
         if !path.is_file() {
             continue;
         }
@@ -4689,7 +4730,13 @@ fn copy_tree_files(source: &Path, destination: &Path) -> anyhow::Result<()> {
         let entry = entry?;
         let path = entry.path();
         if path.is_dir() {
-            copy_tree_files(&path, destination)?;
+            // macOS `.app` is a directory bundle: copy it whole, otherwise the
+            // extension filter below would drop the executable and Info.plist.
+            if is_app_bundle(&path) {
+                copy_dir_all(&path, &destination.join(entry.file_name()))?;
+            } else {
+                copy_tree_files(&path, destination)?;
+            }
         } else if path.is_file() {
             let extension = path
                 .extension()
@@ -4708,6 +4755,14 @@ fn copy_tree_files(source: &Path, destination: &Path) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+fn is_app_bundle(path: &Path) -> bool {
+    path.is_dir()
+        && path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
 }
 
 struct TestHost {
@@ -6334,6 +6389,54 @@ fn base64_decode(s: &str) -> anyhow::Result<Vec<u8>> {
     base64::engine::general_purpose::STANDARD
         .decode(s)
         .map_err(|e| anyhow::anyhow!("base64 decode failed: {e}"))
+}
+
+#[cfg(test)]
+mod bundle_copy_tests {
+    use super::*;
+
+    #[test]
+    fn wasi_sdk_platform_matches_the_host() {
+        let expected = if cfg!(target_os = "windows") {
+            "windows"
+        } else if cfg!(target_os = "macos") {
+            "macos"
+        } else {
+            "linux"
+        };
+        assert_eq!(wasi_sdk_platform(), expected);
+    }
+
+    #[test]
+    fn macos_app_bundle_is_copied_whole_and_cleared() {
+        let root =
+            std::env::temp_dir().join(format!("owasidea-bundle-copy-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let bundle_dir = root.join("target/release/bundle");
+        let app = bundle_dir.join("macos/Shipyard.app");
+        std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
+        std::fs::write(app.join("Contents/Info.plist"), b"<plist/>").unwrap();
+        std::fs::write(app.join("Contents/MacOS/shipyard"), b"binary").unwrap();
+        std::fs::create_dir_all(bundle_dir.join("dmg")).unwrap();
+        std::fs::write(bundle_dir.join("dmg/Shipyard.dmg"), b"dmg").unwrap();
+        let destination = root.join("dist");
+
+        copy_selected_bundles(&bundle_dir, &destination, &["app", "dmg"]).unwrap();
+        assert!(destination
+            .join("Shipyard.app/Contents/MacOS/shipyard")
+            .is_file());
+        assert!(destination
+            .join("Shipyard.app/Contents/Info.plist")
+            .is_file());
+        assert!(destination.join("Shipyard.dmg").is_file());
+
+        // A stale `.app` must not survive the next bundle.
+        clear_bundle_artifacts(&destination).unwrap();
+        assert!(!destination.join("Shipyard.app").exists());
+        assert!(!destination.join("Shipyard.dmg").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 
 #[cfg(test)]

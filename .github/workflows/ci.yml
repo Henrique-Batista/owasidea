@@ -80,6 +80,9 @@ jobs:
       - name: Put owasidea on PATH
         run: echo "$PWD/target/debug" >> "$GITHUB_PATH"
 
+      - name: Code-signing planner checks (RL-03)
+        run: scripts/test-signing-plan.sh
+
       - name: owasidea doctor --json
         run: owasidea doctor --json
 
@@ -276,6 +279,14 @@ jobs:
   windows:
     name: Windows (host/cli, plugins, NSIS)
     runs-on: windows-latest
+    # RL-03: non-secret signing settings. The PFX and its password are passed
+    # only to the plan/import steps, and Azure credentials only to the bundle
+    # step. Secrets are never printed. See docs/CODE_SIGNING.md.
+    env:
+      OWASIDEA_WINDOWS_CERT_THUMBPRINT: ${{ vars.OWASIDEA_WINDOWS_CERT_THUMBPRINT }}
+      OWASIDEA_WINDOWS_SIGN_COMMAND: ${{ vars.OWASIDEA_WINDOWS_SIGN_COMMAND }}
+      OWASIDEA_WINDOWS_DIGEST_ALGORITHM: ${{ vars.OWASIDEA_WINDOWS_DIGEST_ALGORITHM }}
+      OWASIDEA_WINDOWS_TIMESTAMP_URL: ${{ vars.OWASIDEA_WINDOWS_TIMESTAMP_URL }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -335,6 +346,46 @@ jobs:
         shell: bash
         run: echo "$PWD/target/debug" >> "$GITHUB_PATH"
 
+      - name: Plan code signing (Windows, optional)
+        id: signing
+        shell: bash
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          plan="$(owasidea signing plan --platform windows --json)"
+          printf '%s\n' "$plan"
+          {
+            echo "mode=$(jq -r '.mode' <<<"$plan")"
+            echo "sign=$(jq -r '.sign' <<<"$plan")"
+            echo "import_certificate=$(jq -r '.import_certificate' <<<"$plan")"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Import Windows signing certificate (PFX)
+        if: ${{ steps.signing.outputs.import_certificate == 'true' }}
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $pfx = Join-Path $env:RUNNER_TEMP "owasidea-codesign.pfx"
+          try {
+            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+            $password = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -Force -AsPlainText
+            $certificate = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password
+            "OWASIDEA_WINDOWS_CERT_THUMBPRINT=$($certificate.Thumbprint)" |
+              Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            Write-Host "Imported the code-signing certificate into the current-user store."
+          } finally {
+            Remove-Item $pfx -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Install Azure Artifact Signing CLI
+        if: ${{ steps.signing.outputs.mode == 'windows-trusted-signing' && contains(env.OWASIDEA_WINDOWS_SIGN_COMMAND, 'artifact-signing-cli') }}
+        run: cargo install artifact-signing-cli --locked
+
       - name: owasidea doctor --json (optional toolchains)
         continue-on-error: true
         run: owasidea doctor --json
@@ -347,4 +398,209 @@ jobs:
       - name: Bundle NSIS
         working-directory: examples/shipyard
         continue-on-error: true
+        env:
+          # Only needed when OWASIDEA_WINDOWS_SIGN_COMMAND uses Azure Artifact
+          # Signing. The PFX certificate is already in the runner store.
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
         run: owasidea bundle --no-build --bundles nsis
+
+      - name: Verify Authenticode signatures (optional)
+        if: ${{ steps.signing.outputs.sign == 'true' }}
+        shell: pwsh
+        working-directory: examples/shipyard
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installers = @(Get-ChildItem -Path dist -Recurse -Include *.exe,*.msi -File -ErrorAction SilentlyContinue)
+          if ($installers.Count -eq 0) {
+            Write-Host "No Windows installers were produced; nothing to verify."
+            exit 0
+          }
+          $invalid = @()
+          foreach ($file in $installers) {
+            $signature = Get-AuthenticodeSignature -FilePath $file.FullName
+            Write-Host "$($file.Name): $($signature.Status)"
+            if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
+              $invalid += $file.FullName
+            }
+          }
+          if ($invalid.Count -gt 0) {
+            throw "Unsigned or invalid Authenticode signature: $($invalid -join ', ')"
+          }
+
+      - name: Code signing skipped (no Windows certificate)
+        if: ${{ steps.signing.outputs.mode == 'skip' }}
+        run: |
+          echo "Windows installers stay unsigned: set the WINDOWS_CERTIFICATE and"
+          echo "WINDOWS_CERTIFICATE_PASSWORD secrets, or OWASIDEA_WINDOWS_SIGN_COMMAND"
+          echo "for Azure Artifact Signing. See docs/CODE_SIGNING.md."
+
+  macos:
+    name: macOS (app/dmg, sign + notarize optional)
+    needs: fast
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/release/1.0' || startsWith(github.ref, 'refs/tags/'))
+    runs-on: macos-latest
+    # RL-03: macOS packaging is newly wired and cannot be validated on the
+    # Linux dev host; keep it out of the blocking matrix. Signing steps still
+    # fail loudly when credentials are present but incomplete.
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.1"
+          cache: true
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: |
+            package-lock.json
+            examples/shipyard/ui/package-lock.json
+            examples/shipyard/plugins/board-svelte/package-lock.json
+            examples/shipyard/plugins/map-react/package-lock.json
+
+      - name: Setup .NET (C# plugin, best effort)
+        continue-on-error: true
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Cache cargo registry/git
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-reg-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-reg-
+
+      - name: Cache cargo target
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-target-
+
+      - name: Install cargo-component and wasm-tools
+        run: |
+          cargo install cargo-component --locked
+          cargo install wasm-tools --locked
+
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Build owasidea CLI
+        run: cargo build -p owasidea-cli
+
+      - name: Put owasidea on PATH
+        run: echo "$PWD/target/debug" >> "$GITHUB_PATH"
+
+      - name: Install macOS plugin prerequisites (best effort)
+        continue-on-error: true
+        run: |
+          sudo dotnet workload install wasi-experimental
+          owasidea doctor --install-wasi-sdk
+
+      - name: Plan code signing (macOS, optional)
+        id: signing
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_PATH: ${{ secrets.APPLE_API_KEY_PATH }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          plan="$(owasidea signing plan --platform macos --json)"
+          printf '%s\n' "$plan"
+          {
+            echo "mode=$(jq -r '.mode' <<<"$plan")"
+            echo "sign=$(jq -r '.sign' <<<"$plan")"
+            echo "notarize=$(jq -r '.notarize' <<<"$plan")"
+            echo "materialize_api_key=$(jq -r '.materialize_api_key' <<<"$plan")"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Materialize App Store Connect API key (optional)
+        if: ${{ steps.signing.outputs.materialize_api_key == 'true' }}
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          key_path="$RUNNER_TEMP/owasidea-AuthKey.p8"
+          umask 077
+          printf '%s\n' "$APPLE_API_KEY_P8" > "$key_path"
+          echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
+
+      - name: Shipyard build (Rust/Go/TS; C#/C/C++ optional)
+        working-directory: examples/shipyard
+        continue-on-error: true
+        run: owasidea build
+
+      - name: Bundle app and dmg (optional signing/notarization)
+        working-directory: examples/shipyard
+        continue-on-error: true
+        env:
+          # Tauri imports APPLE_CERTIFICATE into a temporary keychain, signs
+          # with codesign and notarizes with notarytool (then staples).
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: owasidea bundle --no-build --bundles app,dmg
+
+      - name: Verify code signatures (optional)
+        if: ${{ steps.signing.outputs.sign == 'true' }}
+        working-directory: examples/shipyard
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          apps=(dist/*.app)
+          if [ ${#apps[@]} -eq 0 ]; then
+            echo "No .app artifacts were produced; nothing to verify."
+            exit 0
+          fi
+          for app in "${apps[@]}"; do
+            codesign --verify --deep --strict --verbose=2 "$app"
+            codesign -dv --verbose=4 "$app" 2>&1 | grep -E "Identifier|Authority|TeamIdentifier" || true
+          done
+
+      - name: Verify notarization ticket (optional)
+        if: ${{ steps.signing.outputs.notarize == 'true' }}
+        working-directory: examples/shipyard
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          artifacts=(dist/*.app dist/*.dmg)
+          if [ ${#artifacts[@]} -eq 0 ]; then
+            echo "No macOS artifacts were produced; nothing to validate."
+            exit 0
+          fi
+          for artifact in "${artifacts[@]}"; do
+            xcrun stapler validate "$artifact"
+          done
+
+      - name: Code signing skipped (no Apple credentials)
+        if: ${{ steps.signing.outputs.mode == 'skip' }}
+        run: |
+          echo "macOS artifacts stay unsigned: set APPLE_CERTIFICATE,"
+          echo "APPLE_CERTIFICATE_PASSWORD and APPLE_SIGNING_IDENTITY, plus one"
+          echo "notarization credential set. See docs/CODE_SIGNING.md."
