@@ -428,6 +428,24 @@ fn external_command_path(path: &Path) -> std::process::Command {
     std::process::Command::new(path)
 }
 
+/// Run a shell command string on the current platform. Uses `cmd /C` on
+/// Windows and `sh -c` elsewhere. Keeps doctor install commands working on
+/// both OSes without a Unix shell dependency.
+fn shell_command(command: &str) -> std::process::Command {
+    #[cfg(windows)]
+    {
+        let mut cmd = std::process::Command::new("cmd");
+        cmd.args(["/C", command]);
+        return cmd;
+    }
+    #[cfg(not(windows))]
+    {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", command]);
+        cmd
+    }
+}
+
 fn sdk_has_clang(path: &Path) -> bool {
     path.join("bin/clang").is_file() || path.join("bin/clang.exe").is_file()
 }
@@ -1087,7 +1105,7 @@ async fn cmd_doctor(
             if let Some(c) = cmd {
                 if yes && !c.contains("sudo") {
                     println!("running: {}", c);
-                    let _ = std::process::Command::new("sh").arg("-c").arg(&c).status();
+                    let _ = shell_command(&c).status();
                 } else {
                     println!("install (dry-run): {}", c);
                 }
@@ -6225,5 +6243,21 @@ mod dl08_tests {
             ui_plugin_name_for_path(&plugins.join("foo/target/debug/x"), &plugins),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod windows_parity_tests {
+    use super::*;
+
+    #[test]
+    fn shell_command_program_is_platform_appropriate() {
+        let cmd = shell_command("echo hi");
+        let prog = cmd.get_program().to_string_lossy().to_string();
+        if cfg!(windows) {
+            assert_eq!(prog, "cmd");
+        } else {
+            assert_eq!(prog, "sh");
+        }
     }
 }

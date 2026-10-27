@@ -138,3 +138,11 @@ also needs MSYS2 `make` or a `build` override.
   on Windows (`PathBuf` normalizes them).
 - `OWASIDEA_DATA_DIR`, manifests, components and UI assets are resolved with
   `PathBuf`; no POSIX shell is required by the CLI.
+
+## PX-09 parity notes
+
+- External command shims (`npm`/`npx`/etc.) route through `cmd /C` on Windows via `external_command`/`external_command_path`.
+- Shell command strings (doctor install) use `cmd /C` on Windows and `sh -c` on Unix via `shell_command`.
+- Tool lookup uses `where` on Windows and `which` on Unix.
+- Temp paths use `std::env::temp_dir()` (never hardcoded `/tmp`).
+- CI runs `windows-latest` job: fmt, clippy, host/cli tests, build, optional Shipyard build/bundle.
