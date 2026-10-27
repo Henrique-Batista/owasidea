@@ -78,6 +78,48 @@ explicit per-plugin allowlist; do not add `Origin: null` to CORS.
 - `GET /dev/status` → dev-mode flag, watched paths, and most recent reload
   result by plugin (for example `{"active":true,"hot_reload":true,...}`).
 
+## Metrics
+
+`GET /metrics` returns the Prometheus text exposition format. Global counters
+are always present:
+
+```
+# TYPE owasidea_requests_total counter
+owasidea_requests_total 42
+# TYPE owasidea_errors_total counter
+owasidea_errors_total 3
+```
+
+Per-plugin counters carry a `plugin` label and are emitted only for plugins
+currently loaded by the host:
+
+```
+# TYPE owasidea_plugin_requests_total counter
+owasidea_plugin_requests_total{plugin="notes"} 5
+# TYPE owasidea_plugin_errors_total counter
+owasidea_plugin_errors_total{plugin="notes"} 1
+# TYPE owasidea_plugin_latency_ms_sum counter
+owasidea_plugin_latency_ms_sum{plugin="notes"} 87
+# TYPE owasidea_plugin_latency_ms_count counter
+owasidea_plugin_latency_ms_count{plugin="notes"} 5
+# TYPE owasidea_plugin_fuel_total counter
+owasidea_plugin_fuel_total{plugin="notes"} 24510
+```
+
+- Instrumented paths: `POST /plugin/{name}/call`, `POST /plugin/{name}/service/start`,
+  `GET /plugin/{name}/service/status`, `POST /plugin/{name}/service/stop`, and
+  `* /app/{name}` (executable `wasi:http` plugins).
+- `requests` counts every instrumented operation, including failed ones;
+  `errors` counts non-2xx responses, dispatcher errors, and guest failures.
+- `latency_ms_sum` / `latency_ms_count` are a counter pair, so average latency is
+  `sum / count` over any window in Prometheus.
+- `fuel_total` is Wasmtime fuel consumed, measured as
+  `resources.max_fuel - store fuel remaining`. It is `0` for paths that do not
+  execute guest code (service stop) and for executable plugins proxied through
+  `wasi:http` (the store is owned by the spawned guest task).
+- Label values are escaped (`\`, `"`, newline) and families are sorted by plugin
+  name for stable scrapes.
+
 ## Plugins
 
 - `GET /plugins` → list of plugin summaries:

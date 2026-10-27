@@ -375,6 +375,51 @@ async fn integration_smoke() {
     let text = r.text().await.unwrap();
     assert!(text.contains("owasidea_requests_total"));
 
+    // per-plugin metrics (PX-07): the generic call above hit notes.
+    assert!(text.contains("# TYPE owasidea_plugin_requests_total counter"));
+    let notes_requests = metric_value(&text, "owasidea_plugin_requests_total", "notes")
+        .expect("notes requests metric");
+    assert!(notes_requests >= 1.0, "notes requests: {notes_requests}");
+    assert!(
+        metric_value(&text, "owasidea_plugin_latency_ms_count", "notes")
+            .expect("notes latency count")
+            >= 1.0
+    );
+    assert!(
+        metric_value(&text, "owasidea_plugin_latency_ms_sum", "notes").expect("notes latency sum")
+            >= 0.0
+    );
+    assert!(
+        metric_value(&text, "owasidea_plugin_fuel_total", "notes").expect("notes fuel") > 0.0,
+        "fuel should be metered for library calls"
+    );
+    // Only loaded plugins are labelled; an error call bumps the error counter.
+    assert!(metric_value(&text, "owasidea_plugin_requests_total", "ghost").is_none());
+    let r = client
+        .post(format!("{}/plugin/notes/call", base))
+        .json(&json!({"function": "does-not-exist", "args": []}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), reqwest::StatusCode::NOT_FOUND);
+    let r = client
+        .get(format!("{}/metrics", base))
+        .send()
+        .await
+        .unwrap();
+    let text = r.text().await.unwrap();
+    assert!(
+        metric_value(&text, "owasidea_plugin_errors_total", "notes").expect("notes errors") >= 1.0
+    );
+    assert!(
+        metric_value(&text, "owasidea_plugin_requests_total", "notes").expect("notes requests")
+            >= notes_requests + 1.0
+    );
+    assert!(
+        metric_value(&text, "owasidea_plugin_requests_total", "chat-go").expect("chat-go requests")
+            >= 1.0
+    );
+
     // Tampering either host or WASI imports must fail manifest validation.
     let manifest_path = manifests.join("notes.manifest.json");
     if manifest_path.exists() {
@@ -502,4 +547,12 @@ async fn structured_logs_endpoint_and_request_id() {
         assert!(e.get("request_id").is_some());
         assert!(e.get("message").is_some());
     }
+}
+
+/// Read the value of a labelled Prometheus sample, e.g.
+/// `owasidea_plugin_requests_total{plugin="notes"} 3`.
+fn metric_value(text: &str, metric: &str, plugin: &str) -> Option<f64> {
+    let needle = format!("{metric}{{plugin=\"{plugin}\"}}");
+    text.lines()
+        .find_map(|line| line.strip_prefix(&needle)?.trim().parse::<f64>().ok())
 }
