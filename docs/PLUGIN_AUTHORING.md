@@ -187,3 +187,15 @@ curl -X POST localhost:8790/plugin/core-rust/call \
 If you add host KV to WIT but forget `kv` in config, `owasidea build` fails
 intentionally. If you add a permission without the corresponding WIT import,
 the manifest will advertise a capability the component never uses; remove it.
+
+## UI scaffolds (AX-02)
+
+`owasidea plugin new <name> --lang svelte|react|vue|yew|blazor|uno --type ui` generates a
+webview UI plugin with `base: './'`, `ui_entry = "index.html"`, and a matching `ui_build`.
+
+- Svelte/React/Vue: Vite-based, `ui_build = ["npm", "run", "build"]`.
+- Yew: Trunk, `ui_build = ["trunk", "build", "--release"]` (requires Rust + trunk).
+- Blazor: `ui_build = ["dotnet", "publish", "-c", "Release", "-o", "dist"]` (requires .NET).
+- Uno: `ui_build = ["dotnet", "build"]` (requires .NET).
+
+Use `window.__OWASIDEA_HOST__` (or `OWASIDEA_HOST`) instead of hardcoding host URLs.
