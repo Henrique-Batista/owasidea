@@ -12,6 +12,7 @@ mod errors;
 mod logs;
 mod permissions;
 mod registry_lock;
+mod smoke_gen;
 mod status;
 mod templates;
 mod type_parser;
@@ -99,6 +100,12 @@ enum Commands {
         /// Skip the configured UI test command.
         #[arg(long)]
         no_ui: bool,
+        /// Generate smoke test calls from plugin manifests into a separate file.
+        #[arg(long)]
+        generate: bool,
+        /// Overwrite an existing generated smoke file.
+        #[arg(long)]
+        force: bool,
     },
     /// Build and run the configured API smoke checks.
     #[command(about = "Build and run the configured API smoke checks.")]
@@ -700,16 +707,26 @@ async fn main() -> anyhow::Result<()> {
             no_build,
             no_smoke,
             no_ui,
+            generate,
+            force,
         } => {
-            cmd_test(
-                &cli.config,
-                &cli.manifest_dir,
-                !no_build,
-                !no_smoke,
-                !no_ui,
-                cli.json,
-            )
-            .await
+            if generate {
+                let root = app_root(&cli.config);
+                let manifest_dir = app_path(&root, &cli.manifest_dir);
+                let n = smoke_gen::write_generated(&root, &manifest_dir, force)?;
+                println!("generated {} smoke call(s)", n);
+                Ok(())
+            } else {
+                cmd_test(
+                    &cli.config,
+                    &cli.manifest_dir,
+                    !no_build,
+                    !no_smoke,
+                    !no_ui,
+                    cli.json,
+                )
+                .await
+            }
         }
         Commands::Smoke { no_build } => {
             cmd_test(

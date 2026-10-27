@@ -129,6 +129,13 @@ Run the full framework test flow:
 
 Build and run only the API smoke checks (steps 1–4 above). Useful in CI.
 
+### `test --generate [--force]`
+
+Generate a separate `smoke.generated.toml` (and `tests/smoke.generated.toml`
+when a `tests/` directory exists) from each plugin manifest's exports, using
+type-default argument values. Never modifies `wasm-app.toml`. Fails if the
+target file exists unless `--force` is given.
+
 ### `validate`
 
 Check generated manifests against `wasm-app.toml`:
