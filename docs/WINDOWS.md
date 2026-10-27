@@ -28,6 +28,7 @@
 | Tauri shell | supported; NSIS `.exe` | **not supported** by `owasidea bundle` |
 | Signed NSIS/MSI (Authenticode) | supported with a code-signing certificate (PFX or Azure Artifact Signing) | **not supported**: signing must run on Windows |
 | UI plugins / Vite | supported | n/a |
+| UI plugin bridge (WebView2) | **not validated**; must fail closed (`BRIDGE_DISABLED`, iframe stays isolated) | n/a |
 | `owasidea dev/test` | supported (Playwright on Windows) | n/a |
 
 ## Native Windows prerequisites
@@ -171,6 +172,12 @@ also needs MSYS2 `make` or a `build` override.
 
 ## Known platform-specific limits
 
+- **UI plugin bridge on WebView2 is not validated.** The bridge handshake
+  (ADR-0004) is validated on Chromium and WebKit only. There is no fallback
+  implementation: if WebView2 rejects the `MessagePort` transfer or blocks the
+  control message, `connect()` must reject with `BRIDGE_DISABLED` and the iframe
+  must stay isolated (fail-closed). Do not claim Windows UI-bridge support until
+  a WebView2 run passes the CT-06 gate.
 - The optional tailcat integration has Linux network hints
   (`/proc/net/route`, Linux gateway detection). It is not the core framework and
   is not required by Shipyard.

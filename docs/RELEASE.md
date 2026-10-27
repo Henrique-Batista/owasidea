@@ -13,7 +13,7 @@ steps performed by a maintainer.
 
 1. Set the version once in `wasm-app.toml` (`[app].version`) — it drives the
    Tauri `version`, the runtime descriptor, and `latest.json`.
-2. Update release notes (`CHANGELOG.md`, `docs/RELEASE_NOTES.md`, or
+2. Update release notes (`CHANGELOG.md` or the file set in
    `[updater].notes_file`). The ABI section of the changelog follows
    `docs/ABI_POLICY.md`.
 3. Run the gates:

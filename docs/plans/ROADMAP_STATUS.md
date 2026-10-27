@@ -85,7 +85,7 @@ Status permitidos: `todo`, `doing`, `review`, `done`, `blocked`.
 | G1 | todo | — | — | — | — |
 | G2 | todo | — | — | — | — |
 | G3 | todo | — | — | — | — |
-| G4 | todo | — | — | — | — |
+| G4 | done | main (release/1.0) | — | link checker 0 broken; docs index; claims audit | `docs/README.md`; GET_STARTED/API/CLI/UI_PLUGINS/PLUGIN_AUTHORING/WINDOWS/REGISTRY/ROADMAP/SECURITY/ABI_POLICY/MIGRATION/CODE_SIGNING/UPDATER/RELEASE/ERRORS/OPTIONAL_TOOLCHAINS/plans linkados |
 | G5 | todo | — | — | — | — |
 
 ## FIX — gaps da auditoria v1.0 (B0.4)

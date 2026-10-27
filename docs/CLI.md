@@ -113,7 +113,7 @@ persistent = true
 Build outputs must be named `<plugin-name>.component.wasm`. C/C++ Makefiles must
 honor that convention (the WIT world name is not enough).
 
-### `test [--no-build] [--no-smoke] [--no-ui]`
+### `test [--no-build] [--no-smoke] [--no-ui] [--generate] [--force] [--filter <substr>] [--plugin <name>] [--watch]`
 
 Run the full framework test flow:
 
@@ -125,6 +125,10 @@ Run the full framework test flow:
 4. Stop the host.
 5. Run `[test].ui` as an argv array in the app root, with `OWASIDEA_BIN` pointing
    at the current CLI. The example uses Playwright.
+
+`--filter` matches a substring of plugin/function in smoke calls, HTTP checks and
+services; `--plugin` restricts the run to one plugin; `--watch` re-runs when
+manifests, config or plugin outputs change.
 
 ### `smoke [--no-build]`
 

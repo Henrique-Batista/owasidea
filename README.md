@@ -65,7 +65,8 @@ owasidea run
 cockpit that runs one release through six language runtimes, a composed
 Go→Rust pipeline, host KV + filesystem persistence, a persistent service, an
 executable `wasi:http` plugin, two isolated UI frameworks (Svelte + React), and
-Tauri packages (`.deb` on Linux, NSIS `.exe` on Windows).
+Tauri packages (`.deb` on Linux; NSIS `.exe` on Windows when built on a Windows
+host).
 
 ![Shipyard release workbench](examples/shipyard/docs/workbench.png)
 
@@ -131,6 +132,7 @@ owasidea bundle          # build + sign + Tauri package
 
 ## 📚 Documentation
 
+- [`docs/README.md`](docs/README.md) — documentation index and status of 1.0 claims
 - [`docs/GET_STARTED.md`](docs/GET_STARTED.md) — full human walkthrough, zero to Tauri
 - [`docs/GET_STARTED.pt-BR.md`](docs/GET_STARTED.pt-BR.md) — guia em português
 - [`docs/AI_AGENTS.md`](docs/AI_AGENTS.md) — deterministic agent playbook
@@ -141,20 +143,27 @@ owasidea bundle          # build + sign + Tauri package
 - [`docs/CODE_SIGNING.md`](docs/CODE_SIGNING.md) — Windows Authenticode and macOS Developer ID/notarization, CI secrets and safe skip
 - [`docs/RELEASE.md`](docs/RELEASE.md) — release checklist: gates, profiles, signing, CI secrets
 - [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md) — semver, breaking changes, deprecation window, warning vs error
+- [`docs/ABI.md`](docs/ABI.md) — manifest `schema_version`, `host_abi`, `min_host`
+- [`docs/ERRORS.md`](docs/ERRORS.md) — stable `OWASIDEA_E_*` error codes and `owasidea explain`
 - [`docs/MIGRATION_0_X_TO_1_0.md`](docs/MIGRATION_0_X_TO_1_0.md) — upgrading a 0.x app to 1.0
 - [`CHANGELOG.md`](CHANGELOG.md) — what shipped in each release
 - [`docs/CLEAN_BUILD.md`](docs/CLEAN_BUILD.md) — bubblewrap isolation and clean Arch/Debian chroot builds
 - [`llms.txt`](llms.txt) — compact AI index
-- `docs/USAGE.md` — setup and running
-- `docs/CLI.md` — CLI reference
-- `docs/API.md` — HTTP API
-- `docs/ARCHITECTURE.md` — architecture
-- `docs/PLUGIN_AUTHORING.md` — writing plugins
-- `docs/SOURCE_GENERATORS.md` — source generators
-- `docs/SECURITY.md` — security model
-- `docs/UI_PLUGINS.md` — Yew/Blazor/Uno webview UI bundles
-- `docs/REGISTRY.md` — signed HTTPS registry format and install flow
-- `docs/ROADMAP.md` — roadmap
+- [`docs/USAGE.md`](docs/USAGE.md) — setup and running
+- [`docs/CLI.md`](docs/CLI.md) — CLI reference
+- [`docs/API.md`](docs/API.md) — HTTP API
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — architecture
+- [`docs/PLUGIN_AUTHORING.md`](docs/PLUGIN_AUTHORING.md) — writing plugins
+- [`docs/SOURCE_GENERATORS.md`](docs/SOURCE_GENERATORS.md) — source generators
+- [`docs/SECURITY.md`](docs/SECURITY.md) — security model
+- [`docs/UI_PLUGINS.md`](docs/UI_PLUGINS.md) — Yew/Blazor/Uno webview UI bundles
+- [`docs/REGISTRY.md`](docs/REGISTRY.md) — signed HTTPS registry format and install flow
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) — roadmap
+- [`docs/plans/ROADMAP_STATUS.md`](docs/plans/ROADMAP_STATUS.md) — 1.0 item tracker and gate status
+- [`docs/plans/PERFORMANCE.md`](docs/plans/PERFORMANCE.md) — G3 startup/call/build/bundle measurements
+- [`docs/plans/ROADMAP_IMPLEMENTATION_PLAN.md`](docs/plans/ROADMAP_IMPLEMENTATION_PLAN.md) — 1.0 scope, phases and gates
+- [`docs/plans/AUDIT_V1.md`](docs/plans/AUDIT_V1.md) — v0–v1.0 audit and FIX gaps
+- [`docs/adr/`](docs/adr) — architecture decision records (runtime, bridge, streaming jobs)
 
 ## 📄 License
 

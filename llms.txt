@@ -9,6 +9,7 @@
 
 - [Get Started](docs/GET_STARTED.md): full human walkthrough from install to Tauri bundle.
 - [Get Started pt-BR](docs/GET_STARTED.pt-BR.md): guia em português.
+- [Docs index](docs/README.md): all docs, plans, ADRs, and the status of 1.0 claims.
 - [AI agent playbook](docs/AI_AGENTS.md): deterministic commands, invariants, API, acceptance checks.
 - [Windows support](docs/WINDOWS.md): native Windows flow, NSIS packaging, cross-compilation limits.
 - [Optional toolchains](docs/OPTIONAL_TOOLCHAINS.md): jco, componentize-dotnet/.NET 10, wasi-sdk, C/C++, trunk, doctor --fix/tools.lock, CI behavior.
@@ -17,6 +18,8 @@
 - [Code signing](docs/CODE_SIGNING.md): Windows Authenticode, macOS Developer ID/notarization, CI secrets, safe skip without a certificate.
 - [Release](docs/RELEASE.md): gates, profiles, signing keys, CI secrets, publish/rollback.
 - [ABI policy](docs/ABI_POLICY.md): semver rules, breaking changes, deprecation window, warning vs error.
+- [ABI fields](docs/ABI.md): manifest schema_version, host_abi, min_host.
+- [Errors](docs/ERRORS.md): stable OWASIDEA_E_* codes and `owasidea explain`.
 - [Migration 0.x to 1.0](docs/MIGRATION_0_X_TO_1_0.md): config, manifest, bridge, updater, ABI and CLI steps.
 - [Changelog](CHANGELOG.md): what shipped in each release.
 - [Clean build environments](docs/CLEAN_BUILD.md): bubblewrap isolation for AppImage, plus Arch devtools/Debian debootstrap chroots without Docker.
@@ -25,8 +28,23 @@
 - [CLI](docs/CLI.md): commands and flags.
 - [HTTP API](docs/API.md): endpoints and JSON call contract.
 - [Plugin authoring](docs/PLUGIN_AUTHORING.md): language-specific build outputs.
-- [UI plugins](docs/UI_PLUGINS.md): static bundles and sandboxing.
+- [UI plugins](docs/UI_PLUGINS.md): static bundles, sandboxing, bridge SDK.
 - [Security](docs/SECURITY.md): trust boundaries and production policy.
+- [Registry](docs/REGISTRY.md): signed HTTPS index, install, lockfile.
+- [Roadmap](docs/ROADMAP.md): shipped milestones and remaining backlog.
+- [1.0 plan](docs/plans/ROADMAP_IMPLEMENTATION_PLAN.md): phases, gates and budgets.
+- [1.0 status](docs/plans/ROADMAP_STATUS.md): item and gate tracker.
+- [Performance report](docs/plans/PERFORMANCE.md): G3 measurements and limits.
+- [Audit v1](docs/plans/AUDIT_V1.md): audit evidence and FIX gaps.
+
+## Status of 1.0 claims
+
+- Typed TypeScript client (CT-03) is implemented: `owasidea client --lang ts`.
+- UI plugin bridge (ADR-0004) is implemented and opt-in via `bridge`.
+- Streaming jobs (RL-06) are experimental and require `--features streaming`.
+- WebView2 is **not validated**; unsupported engines must fail closed with
+  `BRIDGE_DISABLED` and keep the iframe isolated.
+- Performance budgets are defined but not yet measured (G3).
 
 ## Reference commands
 
@@ -44,4 +62,5 @@ owasidea bundle
 - Manifests are generated from real WIT; never hand-edit them.
 - Headless plugins are WASI components; `js-wasm` is webview-only.
 - Permissions are deny-by-default and least-privilege.
-- Tauri bundles include manifests and component `.wasm` files only.
+- Tauri bundles include generated manifests, component `.wasm` files, the trust
+  key and the runtime descriptor; the webview UI is embedded via `frontendDist`.

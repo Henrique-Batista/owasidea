@@ -8,7 +8,8 @@ talks to the host over HTTP and never links Wasmtime.
 The reference application is [`examples/shipyard`](../examples/shipyard). It is a
 real end-to-end app: Rust, Go, TypeScript, C#, C, and C++ components, build-time
 composition, two isolated UI frameworks, persistence, a stateful service, an
-executable `wasi:http` plugin, and Tauri packages (`.deb` / NSIS `.exe`).
+executable `wasi:http` plugin, and Tauri packages (`.deb` on Linux; NSIS `.exe`
+when built on a Windows host).
 
 Start here if you want to understand the whole system. The example README is the
 short tour; this document is the manual.
@@ -404,7 +405,8 @@ Rules:
 ## 5. Isolated UI plugins
 
 UI plugins are static browser bundles. The Rust host never instantiates them and
-the webview never gets a privileged bridge.
+the webview never gets a privileged host bridge (only the opt-in, allowlisted
+bridge described below).
 
 ```toml
 [plugins.my-board]

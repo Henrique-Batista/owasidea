@@ -214,6 +214,15 @@ Bridge timeout: the dashboard uses 10 s by default, or the manifest's
 `permissions.resources.timeout_ms` / `metadata.ui.timeout_ms` when present,
 capped at 30 s.
 
+### Engine support
+
+The handshake is validated on Chromium (Linux) and WebKit (Playwright/Linux).
+**WebView2 (Tauri on Windows) is not validated.** There is no fallback
+implementation: on an engine that rejects the `MessagePort` transfer or blocks
+the control message, `connect()` must reject with `BRIDGE_DISABLED` and the
+iframe stays isolated (fail-closed). See [`WINDOWS.md`](WINDOWS.md) and the
+validation matrix in ADR-0004.
+
 ### Allowlist
 
 Only entries listed in `bridge` (and validated at build time against the

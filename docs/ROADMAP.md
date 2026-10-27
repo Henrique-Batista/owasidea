@@ -77,46 +77,54 @@ Limite do piloto: a sandbox WASI reduz capabilities, mas não substitui isolamen
 de processo/usuário do sistema operacional nem auditoria de vulnerabilidades do
 runtime. Ver `docs/SECURITY.md`.
 
-## Backlog de DX e hardening para 1.0 (proposto)
+## Backlog de DX e hardening 1.0 — entregue
 
-O slice funcional está pronto. O que falta para 1.0 é reduzir o custo de
-configuração e o tempo entre "editei o plugin" e "vi o resultado".
+Este backlog foi entregue na 1.0. O detalhe por item (worktree, commit, gates)
+está em [`plans/ROADMAP_STATUS.md`](plans/ROADMAP_STATUS.md).
 
-### P0 — bloqueadores de experiência
+### P0 — experiência
 
-| Item | Problema hoje | Proposta |
-| --- | --- | --- |
-| Fonte única de configuração | `[host].addr`, CSP do Tauri, Vite, Playwright e `devUrl` repetem portas e origens | `owasidea` gera `runtime-config.json` e injeta `window.__OWASIDEA__` no webview; CSP e `devUrl` derivados de `wasm-app.toml` |
-| `owasidea dev --desktop` | `dev` sobe host + Vite, mas não o Tauri; o binário pode ficar velho em relação aos manifests | iniciar `cargo tauri dev` com a URL correta, logs unificados e `--open` para browser |
-| `owasidea call` / `owasidea logs` | testar um export exige `curl` ou a UI; logs só no navegador | `owasidea call <plugin>.<fn> --args '<json>'` e `owasidea logs <plugin> --follow` |
-| Invocação genérica na UI | o workbench é escrito à mão por plugin | gerar formulário a partir de `exports[].signature` (string, número, lista, record) com validação e snippet `fetch`/`curl` |
-| Client tipado | cada frontend reescreve nomes e tipos de argumentos | `owasidea client --lang ts` gera funções e tipos a partir dos manifests/WIT |
-| Bridge para UI plugin | iframe isolado não tem como chamar o host (CORS `Origin: null`) | `bridge = ["changelog-ts.render"]` no config; painel cria `MessageChannel`, valida allowlist/aridade e faz proxy |
-| Scaffolds reais | `plugin new --lang svelte` gera um HTML placeholder | gerar projeto Vite/Svelte/React/Vue com `base: './'`, demo e `ui_build` já configurado |
-| Erros acionáveis | erros crus de Wasmtime/CSP/assinatura | códigos `OWASIDEA_E_*`, dica de correção, link para doc e `owasidea explain <code>` |
+- [x] Fonte única de configuração: `runtime.json`, `window.__OWASIDEA__`, CSP e `devUrl` derivados de `wasm-app.toml`.
+- [x] `owasidea dev --desktop` com Tauri, logs unificados e `--open`.
+- [x] `owasidea call <plugin>.<fn>` e `owasidea logs <plugin> --follow`.
+- [x] Invocação genérica na UI a partir de `exports[].params/results`, com snippet `fetch`/`curl`.
+- [x] Client tipado `owasidea client --lang ts` com `createClient` e `CallError`.
+- [x] Bridge opt-in para UI plugin (`bridge = ["plugin.export"]`), `MessageChannel` + nonce + allowlist.
+- [x] Scaffolds reais Vite/Svelte/React/Vue e bundles Yew/Blazor/Uno com `base: './'`.
+- [x] Erros acionáveis `OWASIDEA_E_*`, dica, link de doc e `owasidea explain`.
 
 ### P1 — produtividade
 
-- Diff de permissões entre builds; falhar por padrão quando uma capability for ampliada.
-- Hot reload de UI plugin: rebuild + refresh do iframe quando `dist/` ou `ui-plugins.json` mudar.
-- `owasidea test --generate`: smoke a partir das assinaturas WIT, com valores default e overrides.
-- `owasidea test --filter <plugin> --watch`.
-- `owasidea doctor --fix` com versões pinadas e `tools.lock`.
-- JSON Schema de `wasm-app.toml` e `owasidea schema` para autocomplete no editor.
-- `owasidea verify dist/` para checar assinaturas/checksums no CI.
-- Registry com lockfile (`plugins.lock`), `registry update` e `outdated`.
-- Selo de build no app: `build_id` no host, UI e manifests; avisar "UI bundle anterior ao host".
+- [x] Diff de permissões (`permissions.lock.json`, `--fail-on-widen`).
+- [x] Hot reload de UI plugin (rebuild + iframe novo quando `dist/`/`ui-plugins.json` muda).
+- [x] `owasidea test --generate`, `--filter`, `--plugin` e `--watch`.
+- [x] `owasidea doctor --fix` com versões pinadas e `tools.lock`.
+- [x] JSON Schema de `wasm-app.toml` e `owasidea schema`.
+- [x] `owasidea verify dist/` para assinaturas/checksums no CI.
+- [x] Registry com lockfile (`plugins.lock`), `registry update` e `outdated`.
+- [x] Selo de build (`build_id` em host, UI e manifests) com aviso de UI anterior ao host.
 
 ### P2 — operação e release
 
-- Métricas por plugin: latência, erros, fuel, memória de pico; export OpenTelemetry.
-- Logs estruturados com nível e request id; filtro `--level`.
-- Assinatura de código Windows/macOS, updater Tauri e canais de release.
-- SBOM, builds reproduzíveis e provenance.
-- Política de depreciação do ABI (`schema_version`, `host_abi`, `min_host`).
-  Done: [`ABI_POLICY.md`](ABI_POLICY.md) + [`MIGRATION_0_X_TO_1_0.md`](MIGRATION_0_X_TO_1_0.md);
+- [x] Métricas por plugin (latência, erros, fuel) e export OpenTelemetry opt-in (`--features otel`).
+- [x] Logs estruturados com nível e request id; filtro `--level`.
+- [x] Assinatura de código Windows/macOS, updater Tauri e canais stable/beta.
+- [x] SBOM (CycloneDX/SPDX), builds reproduzíveis e provenance.
+- [x] Política de depreciação do ABI (`schema_version`, `host_abi`, `min_host`):
+  [`ABI_POLICY.md`](ABI_POLICY.md) + [`MIGRATION_0_X_TO_1_0.md`](MIGRATION_0_X_TO_1_0.md);
   `owasidea validate` avisa manifestos legados.
-- Bridges opcionais para streaming/progresso em chamadas longas.
+- [ ] Bridge com streaming/progresso em chamadas longas. Hoje a API de jobs/SSE é
+  experimental e host-only (`--features streaming`, ADR-0005); o bridge de UI
+  continua request/response.
+
+## Pendências conhecidas para depois da 1.0
+
+- Jobs/SSE são experimentais e exigem `--features streaming`; não há fila nem
+  persistência entre reinícios do host.
+- WebView2 (Tauri Windows) não foi validado para o bridge de UI; engines sem
+  suporte devem falhar fechado (`BRIDGE_DISABLED`, iframe isolado).
+- Orçamentos de performance do gate G3 estão definidos, mas ainda não medidos.
+- Release notes finais e tag `v1.0.0` pertencem ao gate G5.
 
 ### Anti-metas
 

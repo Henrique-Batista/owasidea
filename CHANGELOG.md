@@ -13,6 +13,10 @@ below; see [`docs/UPDATER.md`](docs/UPDATER.md).
 
 ### Added
 
+- `docs/README.md` is the documentation index (guides, reference, operations,
+  plans, ADRs) with an explicit status table for 1.0 claims: bridge and typed
+  client implemented, jobs experimental, WebView2 not validated/fail-closed,
+  performance budgets not yet measured (G4).
 - `docs/OPTIONAL_TOOLCHAINS.md` documents jco, componentize-dotnet/.NET 10,
   trunk, wasi-sdk, C/C++ and Tauri packaging: versions, per-OS install commands,
   `doctor --fix` / `tools.lock` semantics and limitations (FIX-06).
