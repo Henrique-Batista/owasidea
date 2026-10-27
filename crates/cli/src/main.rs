@@ -2253,30 +2253,41 @@ fn cmd_build(
             }
             "go" => {
                 let _ = generate_wit(&plugin_dir);
-                let world_arg = go_build::world_arg(&plugin_dir);
-                go_build::ensure_bindings(&plugin_dir, world_arg.as_deref())?;
-                let mut cmd = std::process::Command::new("go");
-                cmd.current_dir(&plugin_dir);
-                if let Some(wa) = &world_arg {
-                    cmd.args([
-                        "tool",
-                        "componentize-go",
-                        "-d",
-                        "wit",
-                        "-w",
-                        wa,
-                        "build",
-                        "-o",
-                        "main.wasm",
-                    ]);
-                } else {
-                    cmd.args(["tool", "componentize-go", "build"]);
-                }
-                let status = cmd.status()?;
-                if !status.success() {
-                    anyhow::bail!("go build failed for {}", name);
-                }
-                let src = plugin_dir.join("main.wasm");
+                let src = match go_build::component_source(&plugin_dir, name)? {
+                    go_build::ComponentSource::Prebuilt(src) => {
+                        println!(
+                            "    warning: using prebuilt main.wasm (no WIT source) for {name}: {}",
+                            src.display()
+                        );
+                        src
+                    }
+                    go_build::ComponentSource::Build => {
+                        let world_arg = go_build::world_arg(&plugin_dir);
+                        go_build::ensure_bindings(&plugin_dir, world_arg.as_deref())?;
+                        let mut cmd = std::process::Command::new("go");
+                        cmd.current_dir(&plugin_dir);
+                        if let Some(wa) = &world_arg {
+                            cmd.args([
+                                "tool",
+                                "componentize-go",
+                                "-d",
+                                "wit",
+                                "-w",
+                                wa,
+                                "build",
+                                "-o",
+                                "main.wasm",
+                            ]);
+                        } else {
+                            cmd.args(["tool", "componentize-go", "build"]);
+                        }
+                        let status = cmd.status()?;
+                        if !status.success() {
+                            anyhow::bail!("go build failed for {}", name);
+                        }
+                        plugin_dir.join("main.wasm")
+                    }
+                };
                 let dst = plugin_dir.join(format!("{}.component.wasm", name));
                 std::fs::copy(&src, &dst)?;
             }

@@ -9,6 +9,41 @@ use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// How `build` obtains a Go plugin's component.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ComponentSource {
+    /// Compile the plugin's `wit/` world with `componentize-go`.
+    Build,
+    /// Reuse an existing `main.wasm` because the plugin has no WIT source.
+    ///
+    /// Executable `wasi:http` plugins (e.g. `webhook-go`) are plain Go
+    /// programs whose world is implied by `go.wasmcloud.dev/component`; there
+    /// is no `wit/` directory to compile, so `componentize-go` would fail with
+    /// `failed to read path for WIT [wit]`.
+    Prebuilt(PathBuf),
+}
+
+/// Decide whether to compile a Go plugin or reuse a prebuilt `main.wasm`.
+///
+/// A missing `wit/` is only acceptable when a component already exists; a
+/// plugin with neither must fail with an actionable message instead of the
+/// opaque `componentize-go` error.
+pub fn component_source(plugin_dir: &Path, name: &str) -> Result<ComponentSource> {
+    let wit_dir = plugin_dir.join("wit");
+    if wit_dir.is_dir() {
+        return Ok(ComponentSource::Build);
+    }
+    let prebuilt = plugin_dir.join("main.wasm");
+    if prebuilt.is_file() {
+        return Ok(ComponentSource::Prebuilt(prebuilt));
+    }
+    bail!(
+        "go plugin {name} has no wit/ directory and no prebuilt main.wasm at {}; \
+         add wit/*.wit (package + world) or build the component and keep it as main.wasm",
+        prebuilt.display()
+    )
+}
+
 /// Derive `<package>/<world>` from the plugin's `wit/*.wit`.
 pub fn world_arg(plugin_dir: &Path) -> Option<String> {
     let wit_dir = plugin_dir.join("wit");
@@ -116,4 +151,48 @@ fn bindings_dir() -> PathBuf {
         "owasidea-go-bindings-{}-{nanos}",
         std::process::id()
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prebuilt_component_is_reused_without_wit() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = dir.path().join("webhook-go");
+        std::fs::create_dir_all(&plugin).unwrap();
+        std::fs::write(plugin.join("main.wasm"), b"\0asm").unwrap();
+
+        assert_eq!(
+            component_source(&plugin, "webhook-go").unwrap(),
+            ComponentSource::Prebuilt(plugin.join("main.wasm"))
+        );
+    }
+
+    #[test]
+    fn wit_source_wins_over_a_stale_prebuilt_component() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = dir.path().join("notes");
+        std::fs::create_dir_all(plugin.join("wit")).unwrap();
+        std::fs::write(plugin.join("wit/notes.wit"), "package poc:notes;\n").unwrap();
+        std::fs::write(plugin.join("main.wasm"), b"\0asm").unwrap();
+
+        assert_eq!(
+            component_source(&plugin, "notes").unwrap(),
+            ComponentSource::Build
+        );
+    }
+
+    #[test]
+    fn missing_wit_and_component_fails_with_actionable_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = dir.path().join("broken");
+        std::fs::create_dir_all(&plugin).unwrap();
+
+        let error = component_source(&plugin, "broken").unwrap_err().to_string();
+        assert!(error.contains("wit/"), "{error}");
+        assert!(error.contains("main.wasm"), "{error}");
+        assert!(error.contains("broken"), "{error}");
+    }
 }
