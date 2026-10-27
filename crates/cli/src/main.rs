@@ -6,6 +6,7 @@ mod client_gen;
 mod config;
 mod config_render;
 mod dev_desktop;
+mod logs;
 mod status;
 mod type_parser;
 mod wit_types;
@@ -111,6 +112,19 @@ enum Commands {
     Status {
         #[arg(long)]
         watch: bool,
+    },
+    /// Show plugin logs.
+    #[command(about = "Show plugin logs.")]
+    Logs {
+        /// Plugin name.
+        #[arg(help = "Plugin name.")]
+        plugin: String,
+        /// Follow log stream (SSE).
+        #[arg(long)]
+        follow: bool,
+        /// Filter by level.
+        #[arg(long)]
+        level: Option<String>,
     },
     /// Inspect a plugin manifest (WIT imports/exports, permissions).
     #[command(about = "Inspect a plugin manifest (WIT imports/exports, permissions).")]
@@ -639,6 +653,25 @@ async fn main() -> anyhow::Result<()> {
                 .or_else(|| read_host_addr(&cli.config))
                 .unwrap_or_else(|| "127.0.0.1:8787".to_string());
             status::cmd_status(&addr, watch, cli.json).await
+        }
+        Commands::Logs {
+            plugin,
+            follow,
+            level,
+        } => {
+            let addr = cli
+                .http_addr
+                .clone()
+                .or_else(|| read_host_addr(&cli.config));
+            logs::run_logs(
+                &plugin,
+                follow,
+                level.as_deref(),
+                cli.json,
+                addr.as_deref(),
+                None,
+            )
+            .await
         }
         Commands::Inspect { plugin } => cmd_inspect(&manifest_dir, &plugin, cli.json),
         Commands::Call {
