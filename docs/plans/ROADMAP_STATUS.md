@@ -95,7 +95,7 @@ Status permitidos: `todo`, `doing`, `review`, `done`, `blocked`.
 | FIX-01 | done | wt-host | 7d56647 (merge 35f77ad) | fmt/clippy/test (26 host) | testes WAT: fuel/memória/timeout/max_instances; CPU-bound gap documentado |
 | FIX-02 | done | wt-config | 864057f (merge 292667b) | fmt/clippy/test (136 unit + 34 CLI) | `validate --json` estável; warnings ABI; texto preservado |
 | FIX-03 | todo | — | — | — | P1: compilar templates Rust/Go/TS nos testes (mapear em AX-03) |
-| FIX-04 | todo | — | — | — | P2: teste e2e de hot reload/409 e SSE (mapear em DL-05/PX-06) |
+| FIX-04 | done | wt-host | 26a625f | fmt/clippy/test (26 unit + 3 e2e `reload_sse`) | e2e: reload de library 200 + chamada, serviço rodando 409, SSE JSON com histórico único; fixtures shipyard (skip se não buildado) |
 | FIX-05 | todo | — | — | — | P2: verificar bundle Tauri deb/rpm/AppImage no CI (mapear em RL/CI) |
 | FIX-06 | todo | — | — | — | P2: documentar toolchains opcionais ausentes (mapear em AX-06) |
 | FIX-07 | done | wt-host | 40b1c02 (merge 975855d) | fmt/clippy/test + Shipyard host assinado + Playwright 7/7 | verificação de assinatura sobre JSON cru; interop CLI/host |

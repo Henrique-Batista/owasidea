@@ -148,7 +148,7 @@ Base URL is `[host].addr` or `--http-addr`.
 | List UI plugins | `GET /ui-plugins` |
 | Manifest | `GET /plugin/{name}/manifest` |
 | Logs | `GET /plugin/{name}/logs` |
-| Log stream | `GET /plugin/{name}/logs/stream` (SSE, plain text data) |
+| Log stream | `GET /plugin/{name}/logs/stream` (SSE, structured JSON data: `event: log`, `data: {...}`) |
 | Reload | `POST /plugin/{name}/reload` |
 | Generic call | `POST /plugin/{name}/call` `{ "function": "...", "args": [...] }` |
 | Service start | `POST /plugin/{name}/service/start` `{ "region_json": "" }` |
