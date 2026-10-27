@@ -54,6 +54,29 @@ function escapeHtml(value: unknown): string {
   })[ch]!);
 }
 
+function formatCallError(status: number, text: string): string {
+  let parsed: any = text;
+  try { parsed = JSON.parse(text); } catch {}
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    const code = parsed.code ? `[${parsed.code}] ` : '';
+    const message = parsed.message ? String(parsed.message) : `HTTP ${status}: ${JSON.stringify(parsed)}`;
+    const hint = parsed.hint ? `\nhint: ${parsed.hint}` : '';
+    const docs = parsed.docs ? `\ndocs: ${parsed.docs}` : '';
+    return `${code}${message}${hint}${docs}`.trim();
+  }
+  const raw = typeof parsed === 'string' ? parsed : JSON.stringify(parsed);
+  // Host errors are usually plain text. Keep the body and lift optional
+  // `hint:`/`docs:` lines so the hint path works without a JSON envelope.
+  const body: string[] = [];
+  const extras: string[] = [];
+  for (const line of raw.split(/\r?\n/)) {
+    if (/^\s*(hint|docs):/i.test(line)) extras.push(line.trim());
+    else body.push(line);
+  }
+  const head = body.join('\n').trim() || 'request failed';
+  return [`HTTP ${status}: ${head}`, ...extras].join('\n');
+}
+
 function route() {
   cleanupUiPlugin();
   const hash = location.hash || '#/overview';
@@ -252,18 +275,7 @@ async function renderPluginDetail(name: string) {
         if (latEl) latEl.textContent = `${ms} ms`;
         if (!response.ok) {
           if (out) out.textContent = '';
-          let msg = `HTTP ${response.status}: ${typeof parsed === 'string' ? parsed : JSON.stringify(parsed)}`;
-          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-            const code = parsed.code ? ` [${parsed.code}]` : '';
-            const message = parsed.message ? parsed.message : '';
-            const hint = parsed.hint ? `\nhint: ${parsed.hint}` : '';
-            const docs = parsed.docs ? `\ndocs: ${parsed.docs}` : '';
-            if (message || hint || docs) {
-              msg = `${code ? code.trim() + ' ' : ''}${message || msg}${hint}${docs}`.trim();
-              if (!message) msg = `HTTP ${response.status}: ${msg}`;
-            }
-          }
-          if (errEl) errEl.textContent = msg;
+          if (errEl) errEl.textContent = formatCallError(response.status, text);
           return;
         }
         if (out) out.textContent = JSON.stringify(parsed, null, 2);

@@ -142,13 +142,13 @@ const pluginMeta: Record<string, { role: string; why: string; detail: string }> 
   },
   'board-svelte': {
     role: 'Svelte UI bundle',
-    why: 'A separate Vite/Svelte build. It runs only in the webview, in a sandboxed iframe, after its asset hashes are verified.',
-    detail: 'webview only · js-wasm · no host bridge',
+    why: 'A separate Vite/Svelte build. It runs only in the webview, in a sandboxed iframe, after its asset hashes are verified, and calls the allowlisted changelog-ts.render through the parent bridge.',
+    detail: 'webview only · js-wasm · bridge: changelog-ts.render',
   },
   'map-react': {
     role: 'React UI bundle',
     why: 'A separate Vite/React build. It visualizes the architecture and runs only in the webview, isolated from the dashboard.',
-    detail: 'webview only · js-wasm · no host bridge',
+    detail: 'webview only · js-wasm · no bridge declared',
   },
 };
 
@@ -740,7 +740,7 @@ async function renderIsolatedUi(): Promise<void> {
     view.innerHTML = `${pageHeader('micro-frontends', 'Isolated UI plugins', 'Each panel is a separate Svelte or React build. The dashboard verifies every asset hash before mounting it in a sandboxed iframe.')}
     <section class="notice">
       <strong>Verification and isolation flow</strong>
-      <p><b>1.</b> Read <code>ui-plugins.json</code> from the same bundle as the assets · <b>2.</b> fetch every listed asset · <b>3.</b> verify per-file SHA-256 and the aggregate bundle hash · <b>4.</b> mount only after success. The iframe has no host bridge, no same-origin access, and no WASI capabilities.</p>
+      <p><b>1.</b> Read <code>ui-plugins.json</code> from the same bundle as the assets · <b>2.</b> fetch every listed asset · <b>3.</b> verify per-file SHA-256 and the aggregate bundle hash · <b>4.</b> mount only after success. The iframe has no same-origin access and no WASI capabilities; it receives a host bridge only when the plugin declares an allowlist.</p>
     </section>
     <div class="ui-grid">
       ${uiPlugins.map(plugin => {
@@ -757,7 +757,7 @@ async function renderIsolatedUi(): Promise<void> {
       }).join('')}
     </div>
     <section id="ui-frame-wrap" class="panel hidden">
-      <div class="panel-title"><div><h2 id="ui-frame-title">Isolated panel</h2><p class="panel-sub">This iframe is a separate bundle. It cannot read the dashboard DOM or call the host API.</p></div><button class="ghost" id="close-ui">close</button></div>
+      <div class="panel-title"><div><h2 id="ui-frame-title">Isolated panel</h2><p class="panel-sub">This iframe is a separate bundle. It cannot read the dashboard DOM or call the host API directly; only its allowlisted bridge exports are reachable.</p></div><button class="ghost" id="close-ui">close</button></div>
       <div id="ui-frame"></div>
     </section>`;
     view.querySelector('#refresh-page')?.addEventListener('click', () => renderIsolatedUi());

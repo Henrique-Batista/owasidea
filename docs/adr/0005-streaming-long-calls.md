@@ -1,7 +1,7 @@
 # ADR 0005 — Streaming e progresso em chamadas longas (jobs + SSE + cancel)
 
-- Status: Proposed — protótipo implementado atrás da feature `streaming`;
-  revisão ARCH/REV/SEC pendente
+- Status: Accepted (REV/SEC reviewed) — protótipo implementado atrás da feature
+  `streaming`; WIT `progress` (fase 2) permanece pendente
 - Data: 2026-10-27
 - Relacionado: RL-06, CT-08, PX-07, ADR 0001, ADR 0004
 - Implementação: `crates/host/src/jobs.rs`, feature `streaming` em

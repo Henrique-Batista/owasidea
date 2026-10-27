@@ -78,7 +78,7 @@ export default function App() {
 
       <footer>
         <span className="pulse" />
-        React bundle loaded from an isolated iframe; no host bridge.
+        React bundle loaded from an isolated iframe; this plugin declares no bridge.
       </footer>
     </div>
   );
