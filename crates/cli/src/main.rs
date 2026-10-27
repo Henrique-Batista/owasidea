@@ -23,6 +23,7 @@ mod templates;
 mod test_support;
 mod type_parser;
 mod updater;
+mod validate;
 mod verify;
 mod wit_types;
 use config::*;
@@ -1051,7 +1052,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Wit { cmd } => match cmd {
             WitCmd::Generate { path } => cmd_wit_generate(&path, cli.json),
         },
-        Commands::Validate => cmd_validate(&cli.config, &cli.manifest_dir),
+        Commands::Validate => validate::cmd_validate(&cli.config, &cli.manifest_dir, cli.json),
         Commands::Verify { dist } => verify::cmd_verify(&dist, cli.json),
         Commands::Sbom {
             output,
@@ -3576,172 +3577,6 @@ fn cmd_inspect(manifest_dir: &Path, plugin: &str, json: bool) -> anyhow::Result<
                 print!("{}", String::from_utf8_lossy(&out.stdout));
             }
         }
-    }
-    Ok(())
-}
-
-fn cmd_validate(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
-    use sha2::{Digest, Sha256};
-    let root = app_root(config);
-    let raw = std::fs::read_to_string(config)?;
-    let cfg: AppConfig = toml::from_str(&raw)?;
-    cfg.validate()?;
-    let plugins = cfg.plugins.clone().unwrap_or_default();
-    let manifest_dir = app_path(&root, manifest_dir);
-    let mut errors = 0;
-    let mut warnings = 0;
-    for (name, p) in &plugins {
-        let manifest_path = manifest_dir.join(format!("{}.manifest.json", name));
-        if !manifest_path.exists() {
-            println!("MISSING manifest: {}", manifest_path.display());
-            errors += 1;
-            continue;
-        }
-        let mraw = std::fs::read_to_string(&manifest_path)?;
-        let manifest: serde_json::Value = serde_json::from_str(&mraw)?;
-        // RL-07: deprecation warnings never fail validation. Legacy manifests
-        // keep working under host ABI 1; the warning names the policy doc.
-        for warning in abi::manifest_warnings(&manifest) {
-            println!("warning: {name}: {warning}");
-            warnings += 1;
-        }
-        // CT-08 ABI fields
-        let sv = manifest["schema_version"].as_u64().unwrap_or(0);
-        if sv > abi::CURRENT_SCHEMA_VERSION {
-            println!("{}: bad schema_version {}", name, sv);
-            errors += 1;
-        }
-        if sv == abi::CURRENT_SCHEMA_VERSION {
-            match manifest["host_abi"].as_str() {
-                Some(ha) if ha == owasidea_host::HOST_ABI => {}
-                Some(ha) => {
-                    println!("{}: host_abi {} != {}", name, ha, owasidea_host::HOST_ABI);
-                    errors += 1;
-                }
-                None => {
-                    println!("{}: host_abi required for schema_version 1", name);
-                    errors += 1;
-                }
-            }
-            match manifest["min_host"].as_str() {
-                Some(mh) => {
-                    let required = semver::Version::parse(mh).ok();
-                    let host = semver::Version::parse(owasidea_host::HOST_VERSION).ok();
-                    let bad = match (required, host) {
-                        (Some(r), Some(h)) => r > h,
-                        _ => true,
-                    };
-                    if bad {
-                        println!(
-                            "{}: min_host {} > host {}",
-                            name,
-                            mh,
-                            owasidea_host::HOST_VERSION
-                        );
-                        errors += 1;
-                    }
-                }
-                None => {
-                    println!("{}: min_host required for schema_version 1", name);
-                    errors += 1;
-                }
-            }
-        } else {
-            if let Some(ha) = manifest["host_abi"].as_str() {
-                if ha != owasidea_host::HOST_ABI {
-                    println!("{}: host_abi {} != {}", name, ha, owasidea_host::HOST_ABI);
-                    errors += 1;
-                }
-            }
-            if let Some(mh) = manifest["min_host"].as_str() {
-                let required = semver::Version::parse(mh).ok();
-                let host = semver::Version::parse(owasidea_host::HOST_VERSION).ok();
-                let bad = match (required, host) {
-                    (Some(r), Some(h)) => r > h,
-                    _ => true,
-                };
-                if bad {
-                    println!(
-                        "{}: min_host {} > host {}",
-                        name,
-                        mh,
-                        owasidea_host::HOST_VERSION
-                    );
-                    errors += 1;
-                }
-            }
-        }
-        if p.runtime.as_deref() == Some("js-wasm") {
-            if manifest["runtime"].as_str() != Some("js-wasm")
-                || manifest["type"].as_str() != Some("ui")
-            {
-                println!("{}: UI manifest runtime/type mismatch", name);
-                errors += 1;
-            } else {
-                println!("{}: UI manifest ok", name);
-            }
-            continue;
-        }
-        // checksum
-        let comp = app_path(&root, &p.path).join(format!("{}.component.wasm", name));
-        if comp.exists() {
-            let bytes = std::fs::read(&comp)?;
-            let mut h = Sha256::new();
-            h.update(&bytes);
-            let actual = format!("{:x}", h.finalize());
-            let expected = manifest["metadata"]["sha256"].as_str().unwrap_or("");
-            if expected.is_empty() {
-                println!("{}: no checksum in manifest", name);
-            } else if expected != actual {
-                println!("{}: CHECKSUM MISMATCH", name);
-                errors += 1;
-            } else {
-                println!("{}: checksum ok", name);
-            }
-        } else {
-            println!("{}: component not found", name);
-            errors += 1;
-        }
-        // capabilities: fs count
-        let mfs = manifest["permissions"]["filesystem"]
-            .as_array()
-            .map(|a| a.len())
-            .unwrap_or(0);
-        if mfs != p.fs.len() {
-            println!(
-                "{}: fs permission mismatch (manifest {}, config {})",
-                name,
-                mfs,
-                p.fs.len()
-            );
-            errors += 1;
-        }
-        // kv
-        let mkv = manifest["permissions"]["kv"].is_null();
-        if p.kv.is_some() != !mkv {
-            println!("{}: kv permission mismatch", name);
-            errors += 1;
-        }
-        // http outbound
-        let mout = manifest["permissions"]["http"]["outbound"]
-            .as_array()
-            .map(|a| a.len())
-            .unwrap_or(0);
-        if mout != p.http_outbound.len() {
-            println!("{}: http outbound mismatch", name);
-            errors += 1;
-        }
-    }
-    if errors > 0 {
-        anyhow::bail!("validation failed with {} error(s)", errors);
-    }
-    if warnings > 0 {
-        println!(
-            "Validation OK with {warnings} deprecation warning(s); see {}.",
-            abi::POLICY_DOC
-        );
-    } else {
-        println!("Validation OK.");
     }
     Ok(())
 }

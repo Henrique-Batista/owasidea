@@ -11,6 +11,12 @@ below; see [`docs/UPDATER.md`](docs/UPDATER.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- `owasidea validate --json` now emits a stable `{ok, plugins, errors,
+  warnings}` document (per-plugin status, ABI warnings included) and still exits
+  non-zero on drift; text output is unchanged without `--json` (FIX-02).
+
 ## [1.0.0] - 2026-10-27
 
 First supported release. The `v1.0.0` tag is cut by the release gate

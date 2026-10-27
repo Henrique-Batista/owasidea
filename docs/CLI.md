@@ -136,7 +136,7 @@ when a `tests/` directory exists) from each plugin manifest's exports, using
 type-default argument values. Never modifies `wasm-app.toml`. Fails if the
 target file exists unless `--force` is given.
 
-### `validate`
+### `validate [--json]`
 
 Check generated manifests against `wasm-app.toml`:
 
@@ -169,6 +169,43 @@ errors.
 
 Exits non-zero on drift. Run after `build`, especially in CI. Policy and removal
 window: `docs/ABI_POLICY.md`; 0.x upgrade: `docs/MIGRATION_0_X_TO_1_0.md`.
+
+#### `validate --json`
+
+Emits one JSON object instead of the text lines. The shape is stable and is the
+contract for CI/agents:
+
+```json
+{
+  "ok": false,
+  "plugins": [
+    {
+      "name": "notes",
+      "ok": false,
+      "errors": ["CHECKSUM MISMATCH"],
+      "warnings": ["ABI_LEGACY_MANIFEST: deprecated legacy manifest (...)"]
+    }
+  ],
+  "errors": ["notes: CHECKSUM MISMATCH"],
+  "warnings": ["notes: ABI_LEGACY_MANIFEST: deprecated legacy manifest (...)"]
+}
+```
+
+- `ok` — `true` only when `errors` is empty; warnings never clear it.
+- `plugins[]` — one entry per `[plugins.<name>]`, in config order, with
+  `ok = errors.is_empty()`. `errors`/`warnings` hold unprefixed messages.
+- `errors`/`warnings` — flattened view over all plugins, each prefixed with
+  `"<plugin>: "`. Config-level failures (unreadable/invalid `wasm-app.toml`)
+  appear here unprefixed with `plugins: []`.
+- A missing manifest is reported as `MISSING manifest: <path>`; an unreadable or
+  malformed manifest is reported as `cannot read manifest: <detail>`.
+- Human-only context lines (`checksum ok`, `UI manifest ok`, `no checksum in
+  manifest`) are not part of the JSON.
+- JSON is written to stdout even when validation fails; the exit code is
+  non-zero and the reason also goes to stderr.
+- Object key order is not significant (`serde_json` emits sorted keys); match
+  fields by name.
+
 
 ### `verify <dist-dir> [--json]`
 

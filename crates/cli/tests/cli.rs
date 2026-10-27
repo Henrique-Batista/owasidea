@@ -1111,6 +1111,18 @@ fn validate_fixture(root: &std::path::Path) -> std::process::Output {
         .unwrap()
 }
 
+fn validate_fixture_json(root: &std::path::Path) -> std::process::Output {
+    Command::cargo_bin("owasidea")
+        .unwrap()
+        .args(["--config"])
+        .arg(root.join("wasm-app.toml"))
+        .args(["validate", "--json"])
+        .args(["--manifest-dir"])
+        .arg(root.join("manifests"))
+        .output()
+        .unwrap()
+}
+
 fn base_manifest(sha: &str) -> serde_json::Value {
     serde_json::json!({
         "name": "legacy", "version": "0.1.0", "language": "rust", "abi": "wasi-0.2",
@@ -1164,6 +1176,183 @@ fn validate_is_quiet_for_current_manifest() {
     assert!(out.status.success(), "{stdout}");
     assert!(!stdout.contains("warning:"), "{stdout}");
     assert!(stdout.contains("Validation OK."), "{stdout}");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+fn current_manifest(sha: &str) -> serde_json::Value {
+    let mut manifest = base_manifest(sha);
+    let object = manifest.as_object_mut().unwrap();
+    object.insert("schema_version".to_string(), serde_json::json!(1));
+    object.insert(
+        "host_abi".to_string(),
+        serde_json::json!(owasidea_host::HOST_ABI),
+    );
+    object.insert(
+        "min_host".to_string(),
+        serde_json::json!(owasidea_host::HOST_VERSION),
+    );
+    manifest
+}
+
+// --- FIX-02: `validate --json` -------------------------------------------
+
+#[test]
+fn validate_json_reports_ok_for_current_manifest() {
+    let root = write_validate_fixture("json-ok", current_manifest);
+    let out = validate_fixture_json(&root);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("validate --json must emit JSON: {e}: {stdout}"));
+    assert_eq!(value["ok"], true);
+    assert_eq!(value["errors"], serde_json::json!([]));
+    assert_eq!(value["warnings"], serde_json::json!([]));
+    let plugins = value["plugins"].as_array().unwrap();
+    assert_eq!(plugins.len(), 1, "{value}");
+    assert_eq!(plugins[0]["name"], "legacy");
+    assert_eq!(plugins[0]["ok"], true);
+    assert_eq!(plugins[0]["errors"], serde_json::json!([]));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn validate_json_reports_tampered_manifest_as_not_ok() {
+    let root = write_validate_fixture("json-tampered", |sha| {
+        // Current ABI so the only failure is the checksum drift.
+        let _ = sha;
+        current_manifest("deadbeef")
+    });
+    let out = validate_fixture_json(&root);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!out.status.success(), "{stdout}");
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("validate --json must emit JSON on failure: {e}: {stdout}"));
+    assert_eq!(value["ok"], false);
+    let errors = value["errors"].as_array().unwrap();
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.as_str().unwrap_or_default().contains("CHECKSUM MISMATCH")),
+        "{value}"
+    );
+    assert_eq!(value["plugins"][0]["ok"], false);
+    assert!(
+        value["plugins"][0]["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e.as_str().unwrap_or_default().contains("CHECKSUM MISMATCH")),
+        "{value}"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn validate_json_includes_abi_warnings_without_failing() {
+    let root = write_validate_fixture("json-legacy", base_manifest);
+    let out = validate_fixture_json(&root);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["ok"], true);
+    let warnings = value["warnings"].as_array().unwrap();
+    assert!(
+        warnings.iter().any(|w| w
+            .as_str()
+            .unwrap_or_default()
+            .contains("ABI_LEGACY_MANIFEST")),
+        "{value}"
+    );
+    assert!(
+        warnings.iter().any(|w| w
+            .as_str()
+            .unwrap_or_default()
+            .contains("ABI_MISSING_HOST_FIELDS")),
+        "{value}"
+    );
+    assert!(
+        value["plugins"][0]["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w
+                .as_str()
+                .unwrap_or_default()
+                .contains("ABI_LEGACY_MANIFEST")),
+        "{value}"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn validate_json_reports_missing_manifest() {
+    let root = write_validate_fixture("json-missing", current_manifest);
+    std::fs::remove_file(root.join("manifests/legacy.manifest.json")).unwrap();
+    let out = validate_fixture_json(&root);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!out.status.success(), "{stdout}");
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["ok"], false);
+    assert!(
+        value["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e.as_str().unwrap_or_default().contains("MISSING manifest")),
+        "{value}"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn validate_without_json_keeps_text_output() {
+    let root = write_validate_fixture("text", current_manifest);
+    let out = validate_fixture(&root);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    assert!(
+        serde_json::from_slice::<serde_json::Value>(&out.stdout).is_err(),
+        "text mode must not emit JSON: {stdout}"
+    );
+    assert!(stdout.contains("Validation OK."), "{stdout}");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn validate_text_failure_still_prints_lines_and_exits_non_zero() {
+    let root = write_validate_fixture("text-bad", |sha| {
+        let _ = sha;
+        current_manifest("deadbeef")
+    });
+    let out = validate_fixture(&root);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{stdout}");
+    assert!(stdout.contains("legacy: CHECKSUM MISMATCH"), "{stdout}");
+    assert!(stderr.contains("validation failed"), "{stderr}");
+    assert!(
+        serde_json::from_slice::<serde_json::Value>(&out.stdout).is_err(),
+        "text mode must not emit JSON on failure: {stdout}"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn validate_json_reports_config_failure_as_json() {
+    let root = write_validate_fixture("json-config", current_manifest);
+    std::fs::write(
+        root.join("wasm-app.toml"),
+        "[app]\nname = \"\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    let out = validate_fixture_json(&root);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!out.status.success(), "{stdout}");
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("config failure must still emit JSON: {e}: {stdout}"));
+    assert_eq!(value["ok"], false);
+    assert_eq!(value["plugins"], serde_json::json!([]));
+    assert!(!value["errors"].as_array().unwrap().is_empty(), "{value}");
     std::fs::remove_dir_all(root).unwrap();
 }
 
