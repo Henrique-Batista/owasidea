@@ -2638,11 +2638,13 @@ fn start_dev_watcher(
     hot_reload: bool,
 ) {
     std::thread::spawn(move || {
+        let root = plugins_dir.parent().map(PathBuf::from).unwrap_or_default();
         let mut previous = snapshot_watch_paths(&paths);
         loop {
             std::thread::sleep(std::time::Duration::from_millis(400));
             let current = snapshot_watch_paths(&paths);
             let mut reload_plugins = std::collections::BTreeSet::new();
+            let mut ui_plugins_to_rebuild = std::collections::BTreeSet::new();
             for (changed, state) in &current {
                 if previous.get(changed) == Some(state) {
                     continue;
@@ -2655,6 +2657,8 @@ fn start_dev_watcher(
                     if hot_reload {
                         reload_plugins.insert(plugin.to_string());
                     }
+                } else if let Some(name) = ui_plugin_name_for_path(changed, &plugins_dir) {
+                    ui_plugins_to_rebuild.insert(name);
                 } else if changed.starts_with(&plugins_dir)
                     && matches!(
                         changed.extension().and_then(|extension| extension.to_str()),
@@ -2682,6 +2686,14 @@ fn start_dev_watcher(
                         "[dev] source changed: {}; run `owasidea build` to compile",
                         changed.display()
                     );
+                }
+            }
+            if !ui_plugins_to_rebuild.is_empty() {
+                // Debounce: wait for the directory copy to settle.
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                for name in ui_plugins_to_rebuild {
+                    println!("[dev] UI plugin dist changed: {name}; rebuilding index");
+                    rebuild_ui_plugin_from_dist(&root, &name, &manifest_dir);
                 }
             }
             if !reload_plugins.is_empty() {
@@ -2763,6 +2775,80 @@ fn plugin_changed_by_path(path: &Path, manifest_dir: &Path) -> Option<String> {
         return Some(name.to_string());
     }
     None
+}
+
+fn ui_plugin_name_for_path(path: &Path, plugins_dir: &Path) -> Option<String> {
+    let rel = path.strip_prefix(plugins_dir).ok()?;
+    let mut comps = rel.components();
+    let name = comps.next()?.as_os_str().to_str()?.to_string();
+    let rest: PathBuf = comps.collect();
+    if rest == Path::new("index.html") || rest.starts_with("dist") {
+        Some(name)
+    } else {
+        None
+    }
+}
+
+fn rebuild_ui_plugin_from_dist(root: &Path, plugin_name: &str, manifest_dir: &Path) {
+    let config_path = root.join("wasm-app.toml");
+    let Ok(raw) = std::fs::read_to_string(&config_path) else {
+        return;
+    };
+    let Ok(cfg) = toml::from_str::<AppConfig>(&raw) else {
+        return;
+    };
+    let plugins = cfg.plugins.clone().unwrap_or_default();
+    let Some(plugin) = plugins.get(plugin_name) else {
+        return;
+    };
+    if plugin.runtime.as_deref() != Some("js-wasm") {
+        return;
+    }
+    let app_version = cfg
+        .app
+        .as_ref()
+        .and_then(|a| a.version.clone())
+        .unwrap_or_else(|| "0.1.0".to_string());
+    let build_id =
+        build_id::resolve_from_manifests(manifest_dir).unwrap_or_else(build_id::compute_build_id);
+    if std::env::var("OWASIDEA_BUILD_ID").is_err() {
+        std::env::set_var("OWASIDEA_BUILD_ID", &build_id);
+    }
+    match build_ui_plugin(
+        root,
+        plugin_name,
+        plugin,
+        &app_version,
+        manifest_dir,
+        &build_id,
+    ) {
+        Ok(_) => {
+            let mut ui_index = Vec::new();
+            let mut ordered: Vec<(&String, &PluginSection)> = plugins.iter().collect();
+            ordered.sort_by_key(|(name, _)| (*name).clone());
+            for (name, p) in ordered {
+                if p.runtime.as_deref() != Some("js-wasm") {
+                    continue;
+                }
+                let mp = manifest_dir.join(format!("{name}.manifest.json"));
+                if let Ok(raw) = std::fs::read_to_string(&mp) {
+                    if let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&raw) {
+                        ui_index.push(ui_index_entry(name, &manifest));
+                    }
+                }
+            }
+            let ui_dir = root.join("ui");
+            let index_path = ui_dir.join("public/ui-plugins.json");
+            if ui_dir.join("public").is_dir() {
+                let _ = std::fs::write(
+                    &index_path,
+                    serde_json::to_string_pretty(&ui_index).unwrap_or_default() + "\n",
+                );
+                println!("[dev] regenerated UI index: {}", index_path.display());
+            }
+        }
+        Err(error) => eprintln!("[dev] UI plugin rebuild {plugin_name} failed: {error}"),
+    }
 }
 
 async fn cmd_run(manifest_dir: &Path, http_addr: &str) -> anyhow::Result<()> {
@@ -5340,5 +5426,40 @@ fn cmd_client(manifest_dir: &Path, lang: &str, output: &Path, check: bool) -> an
         }
         std::fs::write(output, expected)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod dl08_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn ui_plugin_name_for_dist() {
+        let plugins = PathBuf::from("/tmp/app/plugins");
+        assert_eq!(
+            ui_plugin_name_for_path(&plugins.join("foo/dist/index.html"), &plugins),
+            Some("foo".to_string())
+        );
+        assert_eq!(
+            ui_plugin_name_for_path(&plugins.join("foo/dist/assets/x.js"), &plugins),
+            Some("foo".to_string())
+        );
+        assert_eq!(
+            ui_plugin_name_for_path(&plugins.join("foo/index.html"), &plugins),
+            Some("foo".to_string())
+        );
+        assert_eq!(
+            ui_plugin_name_for_path(&plugins.join("foo/src/main.ts"), &plugins),
+            None
+        );
+        assert_eq!(
+            ui_plugin_name_for_path(&plugins.join("foo/node_modules/x"), &plugins),
+            None
+        );
+        assert_eq!(
+            ui_plugin_name_for_path(&plugins.join("foo/target/debug/x"), &plugins),
+            None
+        );
     }
 }

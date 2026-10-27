@@ -33,6 +33,7 @@ if (!resolvedHost) {
 const HOST = resolvedHost;
 const OWASIDEA_BUILD_ID = window.__OWASIDEA__?.build_id ?? null;
 const view = document.getElementById('view')!;
+let uiPluginReloadTimer: number | null = null;
 
 function escapeHtml(value: unknown): string {
   return String(value).replace(/[&<>"']/g, ch => ({
@@ -263,8 +264,25 @@ async function renderUiPlugins() {
     : '<p>No UI plugins are installed.</p>');
 }
 
+async function fetchUiPluginIndex(): Promise<any[]> {
+  // Prefer the Vite-served index in dev (cache-busted), fall back to host.
+  for (const url of [`/ui-plugins.json?_=${Date.now()}`, `${HOST}/ui-plugins`]) {
+    try {
+      const r = await fetch(url, { cache: 'no-store' });
+      if (!r.ok) continue;
+      const data = await r.json();
+      if (Array.isArray(data)) return data;
+    } catch {}
+  }
+  return [];
+}
+
 async function renderUiPlugin(name: string) {
-  const plugins = await fetch(`${HOST}/ui-plugins`).then(r => r.json());
+  if (uiPluginReloadTimer) {
+    clearInterval(uiPluginReloadTimer);
+    uiPluginReloadTimer = null;
+  }
+  const plugins = await fetchUiPluginIndex();
   const plugin = plugins.find((item: any) => item.name === name);
   if (!plugin) {
     view.textContent = `Unknown UI plugin: ${name}`;
@@ -288,6 +306,18 @@ async function renderUiPlugin(name: string) {
   frame.referrerPolicy = 'no-referrer';
   frame.style.cssText = 'width:100%;height:75vh;border:1px solid #8884;border-radius:8px';
   view.append(frame);
+
+  let currentKey = `${plugin.version ?? ''}:${plugin.sha256 ?? ''}`;
+  uiPluginReloadTimer = window.setInterval(async () => {
+    const nextPlugins = await fetchUiPluginIndex();
+    const next = nextPlugins.find((item: any) => item.name === name);
+    if (!next) return;
+    const nextKey = `${next.version ?? ''}:${next.sha256 ?? ''}`;
+    if (nextKey !== currentKey) {
+      currentKey = nextKey;
+      frame.src = `/${next.entry.split('/').map(encodeURIComponent).join('/')}?v=${encodeURIComponent(next.sha256 ?? Date.now())}`;
+    }
+  }, 1500);
 }
 
 async function verifyUiPluginAssets(plugin: any) {
