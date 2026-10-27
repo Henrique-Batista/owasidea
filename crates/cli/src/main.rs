@@ -1,6 +1,7 @@
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 mod build_id;
+mod call;
 mod client_gen;
 mod config;
 mod config_render;
@@ -110,6 +111,19 @@ enum Commands {
         /// Plugin name.
         #[arg(help = "Plugin name.")]
         plugin: String,
+    },
+    /// Call a plugin export over the host HTTP API.
+    #[command(about = "Call a plugin export over the host HTTP API.")]
+    Call {
+        /// Target in the form `<plugin>.<function>`.
+        #[arg(help = "Target in the form <plugin>.<function>.")]
+        target: String,
+        /// JSON array of arguments, @file, or - for stdin.
+        #[arg(long, default_value = "[]")]
+        args: String,
+        /// Request timeout in seconds.
+        #[arg(long, default_value_t = 30)]
+        timeout: u64,
     },
     /// Build and package the desktop app with Tauri.
     #[command(about = "Build and package the desktop app with Tauri.")]
@@ -600,6 +614,21 @@ async fn main() -> anyhow::Result<()> {
             cmd_run(&manifest_dir, &addr).await
         }
         Commands::Inspect { plugin } => cmd_inspect(&manifest_dir, &plugin, cli.json),
+        Commands::Call {
+            target,
+            args,
+            timeout,
+        } => {
+            call::cmd_call(
+                &cli.config,
+                cli.http_addr.as_deref(),
+                &target,
+                &args,
+                timeout,
+                cli.json,
+            )
+            .await
+        }
         Commands::Bundle {
             no_build,
             bundles,
