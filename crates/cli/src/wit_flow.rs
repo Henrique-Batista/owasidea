@@ -343,11 +343,9 @@ fn prepare_other(
         }
         WitSource::Wit => {
             if !has {
-                bail!(
-                    "plugin {name} ({language}): no WIT found in {}; add marker comments for \
-                     generated WIT, or provide a WIT file",
-                    target_dir.display()
-                );
+                // No contract to prepare. Go may still use a prebuilt
+                // component; other toolchains fail with their own message.
+                return Ok(None);
             }
             // Non-Rust toolchains keep `wit/` as the source of truth; the
             // marker comments feed `owasidea wit generate`, not drift checks.
