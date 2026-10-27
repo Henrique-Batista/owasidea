@@ -6,6 +6,7 @@ mod client_gen;
 mod config;
 mod config_render;
 mod dev_desktop;
+mod dev_next_steps;
 mod status;
 mod type_parser;
 mod wit_types;
@@ -2153,18 +2154,21 @@ async fn cmd_dev(
     }
     let manifest_dir = app_path(&root, manifest_dir);
     build_id::ensure_env_from_manifests(&manifest_dir);
-    // RF-08: warn on UI/host build skew.
+    // RF-08: detect UI/host build skew.
+    let mut stale_bundle = false;
     if root.join("ui").join("package.json").is_file() {
         let manifest_bid = build_id::resolve_from_manifests(&manifest_dir);
         let runtime_bid = build_id::read_runtime_build_id(&root);
         match (runtime_bid, manifest_bid) {
             (Some(rb), Some(mb)) if rb != mb => {
+                stale_bundle = true;
                 eprintln!(
                     "warning: UI bundle build id ({}) differs from host build id ({}); rebuild the UI bundle",
                     rb, mb
                 );
             }
             (None, _) => {
+                stale_bundle = true;
                 eprintln!(
                     "warning: UI runtime bundle missing or stale (ui/.owasidea/runtime.json); run `owasidea build`"
                 );
@@ -2262,6 +2266,19 @@ async fn cmd_dev(
         } else {
             "disabled by [dev].watch".to_string()
         }
+    );
+
+    // DL-07: next steps block.
+    let ui_url_str = ui_port.map(|p| format!("http://127.0.0.1:{p}"));
+    let plugins = loaded_plugin_names(&manifest_dir);
+    print!(
+        "{}",
+        crate::dev_next_steps::dev_next_steps(
+            ui_url_str.as_deref(),
+            &host_url,
+            &plugins,
+            stale_bundle,
+        )
     );
 
     let mut children: Vec<std::process::Child> = Vec::new();
