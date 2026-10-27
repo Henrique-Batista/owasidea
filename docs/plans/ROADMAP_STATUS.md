@@ -57,13 +57,13 @@ Status permitidos: `todo`, `doing`, `review`, `done`, `blocked`.
 | CT-06 | done | wt-ui | 1ad071f + e68a3e5 (merge e72fdbe) | cargo gates + UI build + Playwright 11/11; SEC aprovado | bridge opt-in MessageChannel/nonce/allowlist; timeout/cancel/reload |
 | CT-07 | done | wt-ui | 4fda7b1 + 3e17d75 + d0f9547 (merge 22e5850) | Playwright raiz 11/11 + Shipyard 7/7 | SDK same-origin; board-svelte chama changelog-ts.render |
 | CT-08 | done | wt-host | bf344eb + 63b308f (merge 28cd8b1) | fmt/clippy/test + Shipyard build/smoke; SEC aprovado | schema_version/host_abi/min_host; legado aceito; semver |
-| AX-01 | todo | — | — | — | — |
+| AX-01 | done | wt-config | 6e79863 (merge d2326cf) | fmt/clippy/test | templates em `crates/cli/templates/`; main.rs sem strings grandes |
 | AX-02 | todo | — | — | — | — |
 | AX-03 | todo | — | — | — | — |
 | AX-04 | todo | — | — | — | — |
 | AX-05 | todo | — | — | — | — |
 | AX-06 | todo | — | — | — | — |
-| AX-07 | todo | — | — | — | — |
+| AX-07 | done | wt-authoring | 861cd23 + 1b82fea (merge 09f3ce2) | fmt/clippy/test + schema --check | JSON Schema (`additionalProperties:false`); comando `schema`; docs |
 | AX-08 | todo | — | — | — | — |
 | PX-01 | todo | — | — | — | — |
 | PX-02 | todo | — | — | — | — |
