@@ -266,14 +266,14 @@ async function renderUiPlugins() {
 
 async function fetchUiPluginIndex(): Promise<any[]> {
   // Prefer the Vite-served index in dev (cache-busted), fall back to host.
-  try {
-    const r = await fetch(`/ui-plugins.json?_=${Date.now()}`, { cache: 'no-store' });
-    if (r.ok) return await r.json();
-  } catch {}
-  try {
-    const r = await fetch(`${HOST}/ui-plugins?_=${Date.now()}`, { cache: 'no-store' });
-    if (r.ok) return await r.json();
-  } catch {}
+  for (const url of [`/ui-plugins.json?_=${Date.now()}`, `${HOST}/ui-plugins`]) {
+    try {
+      const r = await fetch(url, { cache: 'no-store' });
+      if (!r.ok) continue;
+      const data = await r.json();
+      if (Array.isArray(data)) return data;
+    } catch {}
+  }
   return [];
 }
 
