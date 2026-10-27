@@ -30,6 +30,8 @@ use wasmtime_wasi::{
 };
 use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpCtxView, WasiHttpView};
 
+mod plugin_metrics;
+
 // ---------------------------------------------------------------------------
 // Host ABI version (CT-08)
 // ---------------------------------------------------------------------------
@@ -301,6 +303,7 @@ struct AppState {
     services: Arc<Mutex<HashMap<String, ServiceSession>>>,
     requests: Arc<std::sync::atomic::AtomicU64>,
     errors: Arc<std::sync::atomic::AtomicU64>,
+    plugin_metrics: Arc<plugin_metrics::PluginMetricsMap>,
     dev_mode: bool,
     dev_hot_reload: bool,
     dev_watch_paths: Vec<String>,
@@ -1104,11 +1107,15 @@ struct OverviewRes {
     build_id: Option<String>,
 }
 
+fn record_plugin_metric(state: &AppState, name: &str, success: bool, elapsed_ms: u64, fuel: u64) {
+    plugin_metrics::record(&state.plugin_metrics, name, success, elapsed_ms, fuel);
+}
+
 async fn metrics(State(state): State<AppState>) -> String {
-    format!(
-        "# TYPE owasidea_requests_total counter\nowasidea_requests_total {}\n# TYPE owasidea_errors_total counter\nowasidea_errors_total {}\n",
+    plugin_metrics::render(
         state.requests.load(std::sync::atomic::Ordering::Relaxed),
-        state.errors.load(std::sync::atomic::Ordering::Relaxed)
+        state.errors.load(std::sync::atomic::Ordering::Relaxed),
+        &state.plugin_metrics,
     )
 }
 
@@ -1451,6 +1458,14 @@ async fn call_export(
         .requests
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         + 1;
+    let initial_fuel = p
+        .manifest
+        .permissions
+        .resources
+        .max_fuel
+        .unwrap_or(1_000_000_000);
+    let mut fuel_used = 0u64;
+    let start = std::time::Instant::now();
     let work = async {
         let (mut store, instance) = instantiate(&state.engine, p.as_ref())
             .await
@@ -1500,6 +1515,10 @@ async fn call_export(
         func.call_async(&mut store, &params, &mut results)
             .await
             .map_err(internal)?;
+        fuel_used = store
+            .get_fuel()
+            .map(|remaining| initial_fuel.saturating_sub(remaining))
+            .unwrap_or(0);
         let json_results: Vec<serde_json::Value> = results.iter().map(val_to_json).collect();
         let body = if json_results.len() == 1 {
             serde_json::json!({ "result": json_results[0] })
@@ -1508,10 +1527,19 @@ async fn call_export(
         };
         Ok::<_, (StatusCode, String)>(Json(body))
     };
-    match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), work).await {
-        Ok(r) => r,
-        Err(_) => Err((StatusCode::GATEWAY_TIMEOUT, "request timed out".to_string())),
-    }
+    let result =
+        match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), work).await {
+            Ok(r) => r,
+            Err(_) => Err((StatusCode::GATEWAY_TIMEOUT, "request timed out".to_string())),
+        };
+    record_plugin_metric(
+        &state,
+        &name,
+        result.is_ok(),
+        start.elapsed().as_millis() as u64,
+        fuel_used,
+    );
+    result
 }
 
 async fn service_start_generic(
@@ -1530,6 +1558,7 @@ async fn service_start_generic(
     }
     let mut sessions = state.services.lock().await;
     if sessions.contains_key(&name) {
+        record_plugin_metric(&state, &name, true, 0, 0);
         return Ok(Json(OutputRes {
             output: "already running".to_string(),
         }));
@@ -1544,6 +1573,14 @@ async fn service_start_generic(
         .requests
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         + 1;
+    let initial_fuel = p
+        .manifest
+        .permissions
+        .resources
+        .max_fuel
+        .unwrap_or(1_000_000_000);
+    let mut fuel_used = 0u64;
+    let start = std::time::Instant::now();
     let work = async {
         let (mut store, instance) = instantiate(&state.engine, p.as_ref())
             .await
@@ -1570,6 +1607,10 @@ async fn service_start_generic(
                 func.call_async(&mut store, &params, &mut results)
                     .await
                     .map_err(internal)?;
+                fuel_used = store
+                    .get_fuel()
+                    .map(|remaining| initial_fuel.saturating_sub(remaining))
+                    .unwrap_or(0);
                 if let Some(Val::Result(Err(error))) = results.first() {
                     let error = error
                         .as_deref()
@@ -1590,43 +1631,80 @@ async fn service_start_generic(
         }
         Err((StatusCode::NOT_FOUND, "no start-service export".to_string()))
     };
-    match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), work).await {
-        Ok(Ok((store, instance, output))) => {
-            sessions.insert(
-                name,
-                ServiceSession {
-                    store,
-                    instance,
-                    timeout_ms,
-                },
-            );
-            Ok(Json(OutputRes { output }))
-        }
-        Ok(Err(error)) => Err(error),
-        Err(_) => Err((StatusCode::GATEWAY_TIMEOUT, "request timed out".to_string())),
-    }
+    let result =
+        match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), work).await {
+            Ok(Ok((store, instance, output))) => {
+                sessions.insert(
+                    name.clone(),
+                    ServiceSession {
+                        store,
+                        instance,
+                        timeout_ms,
+                    },
+                );
+                Ok(Json(OutputRes { output }))
+            }
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err((StatusCode::GATEWAY_TIMEOUT, "request timed out".to_string())),
+        };
+    record_plugin_metric(
+        &state,
+        &name,
+        result.is_ok(),
+        start.elapsed().as_millis() as u64,
+        fuel_used,
+    );
+    result
 }
 
 async fn service_stop_generic(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    if state.plugin(&name).is_none() {
-        return Err((StatusCode::NOT_FOUND, format!("unknown plugin {name}")));
+    let start = std::time::Instant::now();
+    let result = async {
+        if state.plugin(&name).is_none() {
+            return Err((StatusCode::NOT_FOUND, format!("unknown plugin {name}")));
+        }
+        let stopped = state.services.lock().await.remove(&name).is_some();
+        Ok::<_, (StatusCode, String)>(Json(serde_json::json!({"stopped": stopped})))
     }
-    let stopped = state.services.lock().await.remove(&name).is_some();
-    Ok(Json(serde_json::json!({"stopped": stopped})))
+    .await;
+    record_plugin_metric(
+        &state,
+        &name,
+        result.is_ok(),
+        start.elapsed().as_millis() as u64,
+        0,
+    );
+    result
 }
 
 async fn service_status_generic(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
 ) -> Result<Json<ServiceStatusRes>, (StatusCode, String)> {
-    if state.plugin(&name).is_none() {
+    let start = std::time::Instant::now();
+    let result = service_status_impl(&state, &name).await;
+    record_plugin_metric(
+        &state,
+        &name,
+        result.is_ok(),
+        start.elapsed().as_millis() as u64,
+        0,
+    );
+    result
+}
+
+async fn service_status_impl(
+    state: &AppState,
+    name: &str,
+) -> Result<Json<ServiceStatusRes>, (StatusCode, String)> {
+    if state.plugin(name).is_none() {
         return Err((StatusCode::NOT_FOUND, format!("unknown plugin {name}")));
     }
     let mut sessions = state.services.lock().await;
-    let Some(session) = sessions.get_mut(&name) else {
+    let Some(session) = sessions.get_mut(name) else {
         return Ok(Json(ServiceStatusRes {
             running: false,
             address: None,
@@ -2470,57 +2548,73 @@ async fn proxy_app(
         axum::http::Request::from_parts(parts, http_body_util::Full::new(body_bytes));
 
     use wasmtime_wasi_http::p2::bindings::http::types::Scheme;
-    let mut store = create_store(&state.engine, p.as_ref())
+    let start = std::time::Instant::now();
+    let result = async {
+        let mut store = create_store(&state.engine, p.as_ref())
+            .await
+            .map_err(internal)?;
+        let incoming_request = store
+            .data_mut()
+            .http()
+            .new_incoming_request(Scheme::Http, guest_request)
+            .map_err(internal)?;
+        let (response_sender, response_receiver) = tokio::sync::oneshot::channel();
+        let response_outparam = store
+            .data_mut()
+            .http()
+            .new_response_outparam(response_sender)
+            .map_err(internal)?;
+        let pre = pre.clone();
+        let task = tokio::spawn(async move {
+            let proxy = pre.instantiate_async(&mut store).await?;
+            proxy
+                .wasi_http_incoming_handler()
+                .call_handle(&mut store, incoming_request, response_outparam)
+                .await?;
+            Ok::<(), wasmtime::Error>(())
+        });
+        let timeout_ms = p.manifest.permissions.resources.timeout_ms.unwrap_or(30000);
+        let guest_response = match tokio::time::timeout(
+            std::time::Duration::from_millis(timeout_ms),
+            response_receiver,
+        )
         .await
-        .map_err(internal)?;
-    let incoming_request = store
-        .data_mut()
-        .http()
-        .new_incoming_request(Scheme::Http, guest_request)
-        .map_err(internal)?;
-    let (response_sender, response_receiver) = tokio::sync::oneshot::channel();
-    let response_outparam = store
-        .data_mut()
-        .http()
-        .new_response_outparam(response_sender)
-        .map_err(internal)?;
-    let pre = pre.clone();
-    let task = tokio::spawn(async move {
-        let proxy = pre.instantiate_async(&mut store).await?;
-        proxy
-            .wasi_http_incoming_handler()
-            .call_handle(&mut store, incoming_request, response_outparam)
-            .await?;
-        Ok::<(), wasmtime::Error>(())
-    });
-    let timeout_ms = p.manifest.permissions.resources.timeout_ms.unwrap_or(30000);
-    let guest_response = match tokio::time::timeout(
-        std::time::Duration::from_millis(timeout_ms),
-        response_receiver,
-    )
-    .await
-    {
-        Ok(Ok(Ok(response))) => response,
-        Ok(Ok(Err(error))) => return Err(internal(error)),
-        Ok(Err(_)) => {
-            let error = task
-                .await
-                .map_err(internal)?
-                .err()
-                .map(|error| error.to_string())
-                .unwrap_or_else(|| "guest did not set HTTP response".to_string());
-            return Err((StatusCode::BAD_GATEWAY, error));
-        }
-        Err(_) => {
-            task.abort();
-            return Err((
-                StatusCode::GATEWAY_TIMEOUT,
-                "plugin request timed out".to_string(),
-            ));
-        }
-    };
-    let (parts, body) = guest_response.into_parts();
-    Ok(Response::from_parts(parts, Body::new(body)))
+        {
+            Ok(Ok(Ok(response))) => response,
+            Ok(Ok(Err(error))) => return Err(internal(error)),
+            Ok(Err(_)) => {
+                let error = task
+                    .await
+                    .map_err(internal)?
+                    .err()
+                    .map(|error| error.to_string())
+                    .unwrap_or_else(|| "guest did not set HTTP response".to_string());
+                return Err((StatusCode::BAD_GATEWAY, error));
+            }
+            Err(_) => {
+                task.abort();
+                return Err((
+                    StatusCode::GATEWAY_TIMEOUT,
+                    "plugin request timed out".to_string(),
+                ));
+            }
+        };
+        let (parts, body) = guest_response.into_parts();
+        Ok::<_, (StatusCode, String)>(Response::from_parts(parts, Body::new(body)))
+    }
+    .await;
+    let success = result
+        .as_ref()
+        .map(|response| response.status().is_success())
+        .unwrap_or(false);
+    record_plugin_metric(
+        &state,
+        &name,
+        success,
+        start.elapsed().as_millis() as u64,
+        0,
+    );
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -2860,6 +2954,17 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
         startup_started.elapsed().as_millis()
     );
 
+    let plugin_metrics: plugin_metrics::PluginMetricsMap = std::sync::RwLock::new(
+        plugins
+            .keys()
+            .map(|name| {
+                (
+                    name.clone(),
+                    Arc::new(plugin_metrics::PluginMetrics::default()),
+                )
+            })
+            .collect(),
+    );
     let state = AppState {
         engine,
         plugins: Arc::new(std::sync::RwLock::new(plugins)),
@@ -2868,6 +2973,7 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
         services: Arc::new(Mutex::new(HashMap::new())),
         requests: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         errors: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        plugin_metrics: Arc::new(plugin_metrics),
         dev_mode: std::env::var("OWASIDEA_DEV_MODE")
             .is_ok_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes")),
         dev_hot_reload: std::env::var("OWASIDEA_DEV_HOT_RELOAD")
@@ -3102,5 +3208,45 @@ mod tests {
             "signed",
         )
         .is_err());
+    }
+
+    fn test_app_state(plugin_metrics: plugin_metrics::PluginMetricsMap) -> AppState {
+        AppState {
+            engine: Engine::default(),
+            plugins: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            ui_plugins: Arc::new(Vec::new()),
+            tailcat_session: Arc::new(Mutex::new(None)),
+            services: Arc::new(Mutex::new(HashMap::new())),
+            requests: Arc::new(std::sync::atomic::AtomicU64::new(5)),
+            errors: Arc::new(std::sync::atomic::AtomicU64::new(2)),
+            plugin_metrics: Arc::new(plugin_metrics),
+            dev_mode: false,
+            dev_hot_reload: false,
+            dev_watch_paths: Vec::new(),
+            dev_last_reload: Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
+            manifests_dir: PathBuf::from("."),
+        }
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_reports_per_plugin_labels() {
+        let plugin_metrics = std::sync::RwLock::new(HashMap::from([(
+            "notes".to_string(),
+            Arc::new(plugin_metrics::PluginMetrics::default()),
+        )]));
+        let state = test_app_state(plugin_metrics);
+        record_plugin_metric(&state, "notes", true, 12, 400);
+        record_plugin_metric(&state, "notes", false, 3, 100);
+        record_plugin_metric(&state, "not-loaded", true, 1, 1);
+
+        let body = metrics(State(state)).await;
+        assert!(body.contains("owasidea_requests_total 5"));
+        assert!(body.contains("owasidea_errors_total 2"));
+        assert!(body.contains("owasidea_plugin_requests_total{plugin=\"notes\"} 2"));
+        assert!(body.contains("owasidea_plugin_errors_total{plugin=\"notes\"} 1"));
+        assert!(body.contains("owasidea_plugin_latency_ms_sum{plugin=\"notes\"} 15"));
+        assert!(body.contains("owasidea_plugin_latency_ms_count{plugin=\"notes\"} 2"));
+        assert!(body.contains("owasidea_plugin_fuel_total{plugin=\"notes\"} 500"));
+        assert!(!body.contains("not-loaded"));
     }
 }
