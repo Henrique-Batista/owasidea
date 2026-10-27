@@ -834,8 +834,22 @@ pub(crate) fn copy_dir_all(source: &Path, destination: &Path) -> anyhow::Result<
     Ok(())
 }
 
+/// Windows gives the main thread a 1 MB stack. The CLI future contains every
+/// command branch, so run it on a thread with room to spare.
+fn main() -> anyhow::Result<()> {
+    let handle = std::thread::Builder::new()
+        .name("owasidea".to_string())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(run)
+        .context("failed to start the owasidea main thread")?;
+    match handle.join() {
+        Ok(result) => result,
+        Err(_) => anyhow::bail!("the owasidea main thread panicked"),
+    }
+}
+
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let manifest_dir = app_path(&app_root(&cli.config), &cli.manifest_dir);
     match cli.cmd {
