@@ -67,6 +67,11 @@ Checks:
   to `dist/<profile>/` (`bundle --profile`, `latest --profile`).
 - New optional sections are safe to add: `[updater]`, `[test]`, `[smoke]`,
   `[dev]`. Full field table: [`CLI.md`](CLI.md#config-schema-v1).
+- Rust `wit_source` is new and optional. `auto` (default) keeps using an
+  existing `wit/`; `attributes` generates `.owasidea/wit` from
+  `#[owasidea::world]`/`#[owasidea::export]`; `wit` forces a hand-written
+  contract. Existing plugins need no change. Do not keep both a `wit/` file and
+  attribute markers: 1.0 fails the build instead of picking one silently.
 
 ## 2. Manifest
 
