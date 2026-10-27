@@ -17,6 +17,7 @@ pub fn tauri_dev_invocation(
     http_addr: &str,
     manifest_dir: &Path,
     runtime_path: Option<&Path>,
+    no_host: bool,
 ) -> TauriDevInvocation {
     let args = vec![
         "tauri".to_string(),
@@ -35,7 +36,9 @@ pub fn tauri_dev_invocation(
     if let Some(path) = runtime_path {
         env.push(("OWASIDEA_RUNTIME".to_string(), path.display().to_string()));
     }
-    env.push(("OWASIDEA_DEV_NO_HOST".to_string(), "1".to_string()));
+    if !no_host {
+        env.push(("OWASIDEA_DEV_NO_HOST".to_string(), "1".to_string()));
+    }
     TauriDevInvocation {
         program: "cargo".to_string(),
         args,
@@ -91,6 +94,7 @@ mod tests {
             "127.0.0.1:8787",
             Path::new("/app/manifests"),
             Some(Path::new("/app/ui/.owasidea/runtime.json")),
+            false,
         );
         assert_eq!(inv.program, "cargo");
         assert_eq!(inv.args[0], "tauri");
@@ -120,6 +124,7 @@ mod tests {
             "127.0.0.1:8787",
             Path::new("/app/manifests"),
             None,
+            false,
         );
         assert!(!inv.env.iter().any(|(k, _)| k == "OWASIDEA_RUNTIME"));
         assert!(inv

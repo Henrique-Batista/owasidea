@@ -91,6 +91,14 @@ enum Commands {
         /// Also launch `cargo tauri dev` with a generated dev config.
         #[arg(long)]
         desktop: bool,
+        #[arg(long)]
+        open: bool,
+        #[arg(long)]
+        no_ui: bool,
+        #[arg(long)]
+        no_host: bool,
+        #[arg(long)]
+        no_watch: bool,
     },
     /// Run the current build without file watching.
     #[command(about = "Run the current build without file watching.")]
@@ -542,13 +550,33 @@ async fn main() -> anyhow::Result<()> {
             )
             .await
         }
-        Commands::Dev { no_build, desktop } => {
+        Commands::Dev {
+            no_build,
+            desktop,
+            open,
+            no_ui,
+            no_host,
+            no_watch,
+        } => {
             let addr = cli
                 .http_addr
                 .clone()
                 .or_else(|| read_host_addr(&cli.config))
                 .unwrap_or_else(|| "127.0.0.1:0".to_string());
-            cmd_dev(&cli.config, &cli.manifest_dir, &addr, !no_build, desktop).await
+            #[allow(clippy::too_many_arguments)]
+            let _ = cmd_dev(
+                &cli.config,
+                &cli.manifest_dir,
+                &addr,
+                !no_build,
+                desktop,
+                open,
+                no_ui,
+                no_host,
+                no_watch,
+            )
+            .await;
+            Ok(())
         }
         Commands::Run => {
             let addr = cli
@@ -2020,14 +2048,25 @@ fn walkdir(dir: std::path::PathBuf) -> Vec<std::path::PathBuf> {
 }
 
 #[allow(clippy::zombie_processes)]
+#[allow(clippy::too_many_arguments)]
 async fn cmd_dev(
     config_path: &Path,
     manifest_dir: &Path,
     http_addr: &str,
     build: bool,
     desktop: bool,
+    open: bool,
+    no_ui: bool,
+    no_host: bool,
+    no_watch: bool,
 ) -> anyhow::Result<()> {
     let _ = read_app_config(config_path)?;
+    if desktop && no_ui {
+        anyhow::bail!("--desktop requires a UI; --no-ui is incompatible with --desktop");
+    }
+    if no_host && !desktop {
+        eprintln!("warning: --no-host without --desktop: UI will have no host backend");
+    }
     let root = app_root(config_path);
     if build {
         cmd_build(config_path, manifest_dir, true)?;
@@ -2113,7 +2152,8 @@ async fn cmd_dev(
     if ui_present {
         displayed_watch_paths.push("ui (Vite HMR)".to_string());
     }
-    let reported_watch_paths = if dev.watch {
+    let effective_watch = dev.watch && !no_watch;
+    let reported_watch_paths = if effective_watch {
         displayed_watch_paths.clone()
     } else {
         Vec::new()
@@ -2137,7 +2177,7 @@ async fn cmd_dev(
     );
     println!(
         "Watch paths:    {}",
-        if dev.watch {
+        if effective_watch {
             displayed_watch_paths.join(", ")
         } else {
             "disabled by [dev].watch".to_string()
@@ -2145,7 +2185,7 @@ async fn cmd_dev(
     );
 
     let mut children: Vec<std::process::Child> = Vec::new();
-    if ui_present && !desktop {
+    if ui_present && !desktop && !no_ui {
         let vite = ui_dir.join("node_modules/vite/bin/vite.js");
         if !vite.is_file() {
             anyhow::bail!(
@@ -2171,7 +2211,7 @@ async fn cmd_dev(
             "[dev] UI ready at http://127.0.0.1:{ui_port} — press Ctrl+C to stop Vite and the host"
         );
     }
-    if dev.watch {
+    if effective_watch {
         start_dev_watcher(
             watch_paths,
             plugins_dir,
@@ -2250,6 +2290,7 @@ async fn cmd_dev(
             &http_addr_for_tauri,
             &manifest_dir,
             runtime_path.as_deref(),
+            no_host,
         );
         let mut tauri_cmd = std::process::Command::new(&inv.program);
         tauri_cmd.args(&inv.args).current_dir(&inv.cwd);
@@ -2263,6 +2304,19 @@ async fn cmd_dev(
             .context("failed to spawn tauri")?;
         let tauri_child = crate::dev_desktop::spawn_prefixed(tauri_child, "tauri");
 
+        if open {
+            let url = ui_port
+                .map(|p| format!("http://127.0.0.1:{p}"))
+                .unwrap_or_else(|| host_url.clone());
+            #[cfg(target_os = "linux")]
+            let _ = std::process::Command::new("xdg-open").arg(&url).status();
+            #[cfg(target_os = "macos")]
+            let _ = std::process::Command::new("open").arg(&url).status();
+            #[cfg(target_os = "windows")]
+            let _ = std::process::Command::new("cmd")
+                .args(["/C", "start", &url])
+                .status();
+        }
         // Wait for any process to exit or Ctrl+C.
         let tauri_slot = std::sync::Arc::new(std::sync::Mutex::new(Some(tauri_child)));
         let tauri_slot_wait = tauri_slot.clone();
