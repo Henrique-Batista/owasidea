@@ -26,6 +26,8 @@ export default defineConfig({
       env: {
         OWASIDEA_DATA_DIR: join(tmpdir(), 'owasidea-shipyard-playwright'),
         OWASIDEA_ALLOWED_ORIGINS: uiUrl,
+        OWASIDEA_PUBLIC_KEY: 'keys/owasidea.pub',
+        OWASIDEA_REQUIRE_SIGNATURES: 'true',
       },
     },
     {

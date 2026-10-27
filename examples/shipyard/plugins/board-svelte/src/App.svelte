@@ -16,8 +16,51 @@
     { id: 5, label: 'Webhook smoke test', column: 'blocked' },
   ];
 
+  // Preload bridge SDK so the parent handshake can complete.
+  if (typeof document !== 'undefined') {
+    const s = document.createElement('script');
+    s.type = 'module';
+    s.src = './owasidea-bridge.js';
+    s.onload = () => {
+      const m = (window as any).OwasideaBridge;
+      if (m && ! (window as any).__owasideaBridge) {
+        m.connect().then((b: any) => { (window as any).__owasideaBridge = b; }).catch(() => {});
+      }
+    };
+    document.head.appendChild(s);
+  }
+
   let items: Item[] = load();
   let draft = '';
+
+  let bridgeResult = '';
+  let bridgeError = '';
+  let bridgeLoading = false;
+
+  async function renderChangelog() {
+    bridgeLoading = true;
+    bridgeError = '';
+    bridgeResult = '';
+    try {
+      // wait for SDK module to load
+      for (let i = 0; i < 50 && !(window as any).OwasideaBridge; i++) {
+        await new Promise(r => setTimeout(r, 100));
+      }
+      const m = (window as any).OwasideaBridge;
+      if (!m) throw new Error('bridge sdk not loaded');
+      let bridge = (window as any).__owasideaBridge;
+      if (!bridge) {
+        bridge = await m.connect();
+        (window as any).__owasideaBridge = bridge;
+      }
+      const result = await bridge.call('changelog-ts', 'render', ['v1.0.0', ['feat: add']]);
+      bridgeResult = String(result ?? '');
+    } catch (e: any) {
+      bridgeError = e && e.code ? `${e.code}: ${e.message}` : String(e);
+    } finally {
+      bridgeLoading = false;
+    }
+  }
 
   function load(): Item[] {
     try {
@@ -104,5 +147,16 @@
   <footer>
     <span class="dot"></span>
     State lives in this iframe's localStorage only.
+    <div style="margin-top:0.5rem">
+      <button on:click={renderChangelog} disabled={bridgeLoading}>
+        {bridgeLoading ? 'Loading…' : 'Render changelog (bridge)'}
+      </button>
+      {#if bridgeResult}
+        <pre style="white-space:pre-wrap">{bridgeResult}</pre>
+      {/if}
+      {#if bridgeError}
+        <pre style="color:#c33">{bridgeError}</pre>
+      {/if}
+    </div>
   </footer>
 </div>

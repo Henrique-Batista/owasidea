@@ -74,6 +74,15 @@ test('isolated UI still verifies when WebCrypto is unavailable', async ({ page }
   await expect(page.locator('iframe[title="board-svelte isolated UI"]')).toBeVisible();
 });
 
+test('board-svelte calls changelog-ts.render via bridge', async ({ page }) => {
+  await page.goto('/#/ui');
+  await page.locator('button.open-ui[data-ui="board-svelte"]').click();
+  const frame = page.frameLocator('iframe[title="board-svelte isolated UI"]');
+  await page.waitForTimeout(2000);
+  await frame.locator('button:has-text("Render changelog (bridge)")').click();
+  await expect(frame.locator('pre')).toContainText('release notes', { timeout: 30_000 });
+});
+
 test('inventory exposes manifests and logs explain their source', async ({ page }) => {
   await page.goto('/#/inventory');
   await expect(page.locator('.plugin-card')).toHaveCount(9);

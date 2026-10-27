@@ -1,4 +1,5 @@
 import './styles.css';
+import { attachBridge } from './bridge';
 
 interface OwasideaRuntime {
   host?: string;
@@ -57,6 +58,7 @@ type UiPlugin = {
   entry: string;
   sha256: string;
   files: Record<string, string>;
+  bridge?: string[];
 };
 type Overview = {
   plugins: number;
@@ -789,6 +791,9 @@ async function renderIsolatedUi(): Promise<void> {
           (view.querySelector('#ui-frame-title') as HTMLElement).textContent = `${plugin.name} — ${plugin.language} — verified with ${mode}`;
           const host = view.querySelector('#ui-frame')!;
           host.replaceChildren(frame);
+          if (Array.isArray(plugin.bridge) && plugin.bridge.length) {
+            attachBridge(frame, plugin as any, HOST);
+          }
           view.querySelector('#ui-frame-wrap')!.classList.remove('hidden');
           view.querySelector('#ui-frame-wrap')!.scrollIntoView({ behavior: 'smooth', block: 'start' });
         } catch (error) {

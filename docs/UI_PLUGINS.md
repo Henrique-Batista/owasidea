@@ -168,3 +168,37 @@ are detected by the watcher. The CLI rebuilds that UI plugin's assets/index entr
 regenerates `ui/public/ui-plugins.json`, and the UI polls the index every ~1.5s;
 when the version/hash changes, the plugin iframe is reloaded with its sandbox
 and allowlist preserved. Production (no watcher) keeps the existing behavior.
+
+## Bridge SDK (CT-07)
+
+UI plugins that declare a `bridge` allowlist can call allowlisted backend
+functions through the parent-mediated MessageChannel bridge. The SDK is shipped
+same-origin with the bundle at `./owasidea-bridge.js` (copied by
+`owasidea build` from `ui/public/owasidea-bridge.js`).
+
+### Configure
+
+```toml
+[plugins.board-svelte]
+...
+bridge = ["changelog-ts.render"]
+```
+
+### Usage (Svelte/TS)
+
+```ts
+const mod: any = await import(/* @vite-ignore */ './owasidea-bridge.js');
+const bridge = await mod.connect(); // handshake; rejects BRIDGE_DISABLED after 5s
+const result = await bridge.call('changelog-ts', 'render', ['v1.0.0', ['feat: add']]);
+// or: bridge.call('changelog-ts.render', ['v1.0.0', ['feat: add']])
+```
+
+`connect()` resolves with `{ call, cancel }`. `call()` returns a Promise that
+resolves with `result`/`results` or rejects with `BridgeError { code, message }`.
+Use `bridge.cancel(id)` when you retain the request id.
+
+### Allowlist
+
+Only entries listed in `bridge` (and validated at build time against the
+headless plugin manifest/exports) are callable. Calls to other functions return
+`NOT_ALLOWED`. Manifests without `bridge` behave as before (fully isolated).

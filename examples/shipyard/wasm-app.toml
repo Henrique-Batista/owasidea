@@ -79,6 +79,7 @@ type = "ui"
 runtime = "js-wasm"
 ui_entry = "index.html"
 ui_build = ["npm", "run", "build"]
+bridge = ["changelog-ts.render"]
 
 [plugins.map-react]
 path = "plugins/map-react"
