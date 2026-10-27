@@ -7,6 +7,7 @@ mod config;
 mod config_render;
 mod dev_desktop;
 mod dev_next_steps;
+mod errors;
 mod logs;
 mod status;
 mod templates;
@@ -217,6 +218,13 @@ enum Commands {
     /// Validate manifests, checksums and capabilities against config.
     #[command(about = "Validate manifests, checksums and capabilities against config.")]
     Validate,
+    /// Explain an OWASIDEA_E_* error code.
+    #[command(about = "Explain an OWASIDEA_E_* error code.")]
+    Explain {
+        /// Error code, e.g. OWASIDEA_E_CONFIG_INVALID.
+        #[arg(help = "Error code.")]
+        code: String,
+    },
     /// Generate a typed client from manifests.
     #[command(about = "Generate a typed client from manifests.")]
     Client {
@@ -776,6 +784,7 @@ async fn main() -> anyhow::Result<()> {
             WitCmd::Generate { path } => cmd_wit_generate(&path, cli.json),
         },
         Commands::Validate => cmd_validate(&cli.config, &cli.manifest_dir),
+        Commands::Explain { code } => errors::cmd_explain(&code, cli.json),
         Commands::Client {
             lang,
             output,
