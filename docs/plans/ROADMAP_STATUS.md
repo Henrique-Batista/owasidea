@@ -36,7 +36,7 @@ Status permitidos: `todo`, `doing`, `review`, `done`, `blocked`.
 | RF-02 | done | wt-config | 0d238a2 (merge 0f13255) | fmt/clippy/test + render/--check no Shipyard | `config render` runtime/tauri/playwright |
 | RF-03 | done | wt-authoring | db75c0e (merge f55f6f8) | REV + SEC aprovaram | ADR-0003 Accepted: initialization script + runtime.json |
 | RF-04 | done | wt-ui | e726a4b (merge 95944f3) | fmt/clippy/test + Shipyard build/smoke + desktop check | runtime.json + initialization script; shell do exemplo; testes Playwright adicionados (não executados) |
-| RF-05 | todo | — | — | — | — |
+| RF-05 | done | wt-host | 89648c7 (merge 0b8b05d) | fmt/clippy/test + SEC aprovado | CSP estrita gerada; bundle usa `tauri.generated.conf.json`; paths confinados |
 | RF-06 | done | wt-config | c7b0221 (merge 7edf0a7) | fmt/clippy/test + Shipyard build | porta UI com fallback; `tauri.dev.conf.json`; Playwright lê env |
 | RF-07 | done | wt-host | 3b8f10e + 118743a (merge 10e83b5) | fmt/clippy/test + build determinístico + runtime check | build_id em manifests/runtime//overview/UI; fallback manifest |
 | RF-08 | done | wt-ui | ebc0b4e (merge 83e246b) | fmt/clippy/test; Playwright adicionado (não executado) | banner de skew UI/host + warning no dev |
