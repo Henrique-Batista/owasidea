@@ -70,10 +70,10 @@ Status permitidos: `todo`, `doing`, `review`, `done`, `blocked`.
 | PX-03 | todo | — | — | — | — |
 | PX-04 | done | wt-config | 8c48009 (merge 14d212a) | fmt/clippy/test | `plugins.lock`; `install --locked`; `update`; `outdated`; digest/assinatura |
 | PX-05 | done | wt-authoring | 24fce84 + 0038e64 (merge 2fe869e) | fmt/clippy/test (16 CLI) | `verify <dist>`; manifests/componentes/assinaturas/UI; `--json` |
-| PX-06 | todo | — | — | — | — |
+| PX-06 | done | wt-host | 2b2a1b6 + d438898 (merge 30f9a66) | fmt/clippy/test (host 6+2 integração) | LogEntry ts/level/plugin/request_id/fields; SSE JSON; compat `logs` |
 | PX-07 | todo | — | — | — | — |
 | PX-08 | todo | — | — | — | — |
-| PX-09 | todo | — | — | — | — |
+| PX-09 | done | wt-config | e60d558 (merge 13a11e8) | fmt/clippy/test | shell helper cmd/sh; paths/temp; CI Windows fmt/clippy/test; docs |
 | RL-01 | todo | — | — | — | — |
 | RL-02 | todo | — | — | — | — |
 | RL-03 | todo | — | — | — | — |
