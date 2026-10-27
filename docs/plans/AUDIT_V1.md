@@ -71,11 +71,13 @@ Contagem: PASS 16, FAIL 1, NOT VERIFIED 2.
 
 - **FIX-05 (P2)** — Empacotamento Tauri (deb/rpm/AppImage) não verificado neste ambiente.  
   Evidência: nenhum artefato gerado; build desktop não executado.  
-  Sugestão: rodar `owasidea bundle` em CI Linux e validar artefatos.
+  Sugestão: rodar `owasidea bundle` em CI Linux e validar artefatos.  
+  **Resolvido (wt-release):** CI full constrói `deb,rpm`, roda `owasidea verify dist/` e publica `linux-packages`; job AppImage instala `bubblewrap`, usa `--isolate-host-libs`, verifica e publica, com skip seguro quando `bwrap` não funciona. `bundle` passa a estagiar manifests/componentes/trust/UI em `dist/` e `verify` falha com `NO_MANIFESTS` em vez de passar vazio.
 
 - **FIX-06 (P2)** — Ferramentas opcionais ausentes (jco, componentize-dotnet, trunk) limitam build de UI TS/C#/Yew.  
   Evidência: `owasidea doctor --json`.  
-  Sugestão: documentar instalação ou marcar como opcionais no CI.
+  Sugestão: documentar instalação ou marcar como opcionais no CI.  
+  **Resolvido (wt-release):** `docs/OPTIONAL_TOOLCHAINS.md` cobre versões, instalação por SO, `doctor --fix`/`tools.lock` e limitações; `tools.lock` ganhou cargo-component/wasm-tools/go/node/npm; GET_STARTED e WINDOWS linkam o documento; CI Linux instala .NET 10 + wasi-sdk.
 
 ## Limitações da auditoria
 

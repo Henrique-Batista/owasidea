@@ -210,7 +210,10 @@ contract for CI/agents:
 ### `verify <dist-dir> [--json]`
 
 Verify a dist directory produced by `bundle` (or any directory containing
-manifests). Checks:
+manifests). `bundle` stages the runtime payload into the output directory
+(`manifests/`, `plugins/<name>/<name>.component.wasm`, `ui/public/` and
+`trust/owasidea.pub`), so verifying `dist/` checks what the installers ship.
+Checks:
 
 - each manifest is valid JSON with compatible ABI fields (`schema_version`,
   `host_abi`, `min_host`)
@@ -219,6 +222,9 @@ manifests). Checks:
   or `<dist>/trust/owasidea.pub` / `<dist>/keys/owasidea.pub`)
 - `metadata.ui` asset digests and bundle digest for UI plugins
 - `ui-plugins.json` index entries match the manifests
+
+A directory with no `*.manifest.json` fails with `NO_MANIFESTS`; verification
+never reports success for zero manifests.
 
 `--json` prints a stable report `{ok, errors:[{file,code,message}], checked}`.
 Exits non-zero if any check fails.

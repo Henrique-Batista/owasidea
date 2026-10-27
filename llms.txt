@@ -11,6 +11,7 @@
 - [Get Started pt-BR](docs/GET_STARTED.pt-BR.md): guia em português.
 - [AI agent playbook](docs/AI_AGENTS.md): deterministic commands, invariants, API, acceptance checks.
 - [Windows support](docs/WINDOWS.md): native Windows flow, NSIS packaging, cross-compilation limits.
+- [Optional toolchains](docs/OPTIONAL_TOOLCHAINS.md): jco, componentize-dotnet/.NET 10, wasi-sdk, C/C++, trunk, doctor --fix/tools.lock, CI behavior.
 - [AppImage packaging](docs/APPIMAGE.md): linuxdeploy root cause, clean CI build, optional local workaround.
 - [Updater](docs/UPDATER.md): Tauri updater, latest.json, stable/beta channels, local static-server test.
 - [Code signing](docs/CODE_SIGNING.md): Windows Authenticode, macOS Developer ID/notarization, CI secrets, safe skip without a certificate.

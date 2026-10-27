@@ -885,6 +885,35 @@ fn verify_dist_ui_asset_hash_mismatch_fails() {
 }
 
 #[test]
+fn verify_dist_without_manifests_fails_instead_of_passing_vacuously() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let root = std::env::temp_dir().join(format!(
+        "owasidea-verify-empty-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let dist = root.join("dist");
+    std::fs::create_dir_all(&dist).unwrap();
+    std::fs::write(dist.join("Shipyard_0.1.0_amd64.deb"), b"deb").unwrap();
+
+    let mut verify = Command::cargo_bin("owasidea").unwrap();
+    let out = verify
+        .args(["verify"])
+        .arg(&dist)
+        .args(["--json"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["ok"], false);
+    assert_eq!(report["errors"][0]["code"], "NO_MANIFESTS");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn latest_generates_and_validates_tauri_updater_manifest() {
     use std::time::{SystemTime, UNIX_EPOCH};
     let root = std::env::temp_dir().join(format!(

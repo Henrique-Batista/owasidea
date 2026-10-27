@@ -46,6 +46,10 @@ Install:
   Install MSYS2 and add `C:\msys64\usr\bin` to `PATH`, or set a per-plugin
   `build` command.
 
+Optional toolchain versions, install commands and `doctor --fix` behavior are
+in [`OPTIONAL_TOOLCHAINS.md`](OPTIONAL_TOOLCHAINS.md). A missing optional
+toolchain only blocks the plugins that use that language.
+
 ## Commands
 
 Use PowerShell:

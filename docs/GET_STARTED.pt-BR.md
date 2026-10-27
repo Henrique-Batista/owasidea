@@ -30,6 +30,9 @@ Opcionais por linguagem:
 - Tauri: dependências de sistema (`webkit2gtk-4.1`, `gtk3`, `libsoup3`) e
   `cargo-tauri`.
 
+Versões, instalação por SO, `doctor --fix`/`tools.lock` e limitações estão em
+[`OPTIONAL_TOOLCHAINS.md`](OPTIONAL_TOOLCHAINS.md).
+
 Instale a CLI:
 
 ```bash

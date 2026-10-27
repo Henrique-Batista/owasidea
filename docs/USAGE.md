@@ -9,6 +9,8 @@ For a real six-language app see [`examples/shipyard`](../examples/shipyard).
 - Go 1.27+ + `componentize-go` as a Go tool dependency
 - Node 20+ + npm (UI and TypeScript plugins)
 - Optional: .NET 10 + wasi workload (C#), wasi-sdk (C/C++), Tauri 2 system deps
+  — see [`OPTIONAL_TOOLCHAINS.md`](OPTIONAL_TOOLCHAINS.md) for versions,
+  install commands and `doctor --fix`/`tools.lock`
 - Python 3 (example smoke scripts)
 
 Install Rust WASI targets and component tools:
