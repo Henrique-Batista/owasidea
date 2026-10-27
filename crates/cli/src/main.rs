@@ -1,3 +1,4 @@
+use anyhow::Context;
 use clap::{Parser, Subcommand};
 mod build_id;
 mod config;
@@ -2018,6 +2019,7 @@ fn walkdir(dir: std::path::PathBuf) -> Vec<std::path::PathBuf> {
     out
 }
 
+#[allow(clippy::zombie_processes)]
 async fn cmd_dev(
     config_path: &Path,
     manifest_dir: &Path,
@@ -2216,7 +2218,8 @@ async fn cmd_dev(
             .current_dir(&root)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .spawn().expect("failed to spawn host");
+            .spawn()
+            .context("failed to spawn host")?;
         let mut host_child = crate::dev_desktop::spawn_prefixed(host_child, "host");
 
         let ui_port_str = ui_port.unwrap().to_string();
@@ -2233,7 +2236,8 @@ async fn cmd_dev(
             .current_dir(&ui_dir)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .spawn().expect("failed to spawn vite");
+            .spawn()
+            .context("failed to spawn vite")?;
         let mut vite_child = crate::dev_desktop::spawn_prefixed(vite_child, "ui");
 
         let host_url_for_tauri = host_url.clone();
@@ -2255,18 +2259,38 @@ async fn cmd_dev(
         let tauri_child = tauri_cmd
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .spawn().expect("failed to spawn tauri");
+            .spawn()
+            .context("failed to spawn tauri")?;
         let tauri_child = crate::dev_desktop::spawn_prefixed(tauri_child, "tauri");
 
         // Wait for any process to exit or Ctrl+C.
         let tauri_slot = std::sync::Arc::new(std::sync::Mutex::new(Some(tauri_child)));
         let tauri_slot_wait = tauri_slot.clone();
         let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let mut guard = tauri_slot_wait.lock().unwrap();
-            if let Some(mut child) = guard.take() {
-                let _ = tx.send(child.wait());
+        std::thread::spawn(move || loop {
+            let mut guard = match tauri_slot_wait.lock() {
+                Ok(g) => g,
+                Err(_) => return,
+            };
+            if let Some(child) = guard.as_mut() {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        guard.take();
+                        let _ = tx.send(Ok(status));
+                        return;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        guard.take();
+                        let _ = tx.send(Err(error));
+                        return;
+                    }
+                }
+            } else {
+                return;
             }
+            drop(guard);
+            std::thread::sleep(std::time::Duration::from_millis(50));
         });
 
         tokio::select! {
