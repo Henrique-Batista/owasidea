@@ -316,6 +316,18 @@ enum PluginCmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Add an existing plugin (local path) to the app config.
+    #[command(about = "Add an existing plugin to the app config.")]
+    Add {
+        /// Local plugin directory or registry source.
+        source: String,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        registry: Option<String>,
+        #[arg(long)]
+        version: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -640,6 +652,19 @@ async fn main() -> anyhow::Result<()> {
                 with_test,
                 no_register,
                 dry_run,
+                &cli.config,
+                cli.json,
+            ),
+            PluginCmd::Add {
+                source,
+                dry_run,
+                registry,
+                version,
+            } => cmd_plugin_add(
+                &source,
+                dry_run,
+                registry.as_deref(),
+                version.as_deref(),
                 &cli.config,
                 cli.json,
             ),
@@ -1422,6 +1447,95 @@ fn cmd_plugin_new(
             kind
         );
     }
+    Ok(())
+}
+
+fn cmd_plugin_add(
+    source: &str,
+    dry_run: bool,
+    registry: Option<&str>,
+    _version: Option<&str>,
+    config_path: &Path,
+    json: bool,
+) -> anyhow::Result<()> {
+    if registry.is_some() {
+        anyhow::bail!(
+            "registry add not yet supported; use `owasidea registry install` (follow-up)"
+        );
+    }
+    let src = std::path::Path::new(source);
+    if !src.exists() || !src.is_dir() {
+        anyhow::bail!("plugin source path not found or not a directory: {source}");
+    }
+    let name = src
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("plugin")
+        .to_string();
+    // derive metadata
+    let mut language = "rust".to_string();
+    let mut kind = "library".to_string();
+    let mut runtime = "wasi-component".to_string();
+    // try read wasm-app.toml inside source
+    let src_config = src.join("wasm-app.toml");
+    if src_config.exists() {
+        if let Ok(raw) = std::fs::read_to_string(&src_config) {
+            if let Ok(v) = toml::from_str::<toml::Value>(&raw) {
+                if let Some(p) = v.get("plugins").and_then(toml::Value::as_table) {
+                    if let Some(e) = p.get(&name) {
+                        if let Some(l) = e.get("language").and_then(toml::Value::as_str) {
+                            language = l.to_string();
+                        }
+                        if let Some(t) = e.get("type").and_then(toml::Value::as_str) {
+                            kind = t.to_string();
+                        }
+                        if let Some(r) = e.get("runtime").and_then(toml::Value::as_str) {
+                            runtime = r.to_string();
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // permissions preview (none derived)
+    let perms: Vec<String> = Vec::new();
+    let rel_path = src.display().to_string();
+    // diff preview
+    println!("plugin add preview:");
+    println!("  name: {name}");
+    println!("  path: {rel_path}");
+    println!("  language: {language}");
+    println!("  type: {kind}");
+    println!("  runtime: {runtime}");
+    println!("  permissions: {:?}", perms);
+    if json {
+        println!("{{\"name\":\"{name}\",\"path\":\"{rel_path}\",\"language\":\"{language}\",\"type\":\"{kind}\",\"runtime\":\"{runtime}\",\"permissions\":[]}}");
+    }
+    // check overwrite
+    ensure_plugin_config_available(config_path, &name)?;
+    if dry_run {
+        println!("dry-run: no changes written");
+        return Ok(());
+    }
+    // register with path possibly absolute? register uses plugins/{name}. Instead write custom.
+    // Reuse register but override path by editing? register_plugin_config hardcodes plugins/{name}.
+    // We'll append manually to support arbitrary path.
+    let mut config = if config_path.exists() {
+        std::fs::read_to_string(config_path)?
+    } else {
+        "[app]\nname = \"my-app\"\nversion = \"0.1.0\"\nidentifier = \"dev.example.myapp\"\n\n[host]\naddr = \"127.0.0.1:8787\"\n\n[dev]\nwatch = true\nhot_reload = true\n".to_string()
+    };
+    if !config.ends_with('\n') {
+        config.push('\n');
+    }
+    config.push_str(&format!(
+        "\n[plugins.\"{name}\"]\npath = \"{rel_path}\"\nlanguage = \"{language}\"\ntype = \"{kind}\"\nruntime = \"{runtime}\"\n"
+    ));
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(config_path, config)?;
+    println!("added plugin {name}");
     Ok(())
 }
 
