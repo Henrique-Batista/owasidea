@@ -114,6 +114,8 @@ configuração e o tempo entre "editei o plugin" e "vi o resultado".
 - Assinatura de código Windows/macOS, updater Tauri e canais de release.
 - SBOM, builds reproduzíveis e provenance.
 - Política de depreciação do ABI (`schema_version`, `host_abi`, `min_host`).
+  Done: [`ABI_POLICY.md`](ABI_POLICY.md) + [`MIGRATION_0_X_TO_1_0.md`](MIGRATION_0_X_TO_1_0.md);
+  `owasidea validate` avisa manifestos legados.
 - Bridges opcionais para streaming/progresso em chamadas longas.
 
 ### Anti-metas

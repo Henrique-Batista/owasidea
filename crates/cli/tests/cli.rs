@@ -965,3 +965,177 @@ fn latest_rejects_unconfigured_updater() {
         .stderr(predicates::str::contains("updater is not configured"));
     std::fs::remove_dir_all(root).unwrap();
 }
+
+// --- RL-07: ABI/deprecation warnings -------------------------------------
+
+fn write_validate_fixture(
+    label: &str,
+    manifest: impl FnOnce(&str) -> serde_json::Value,
+) -> std::path::PathBuf {
+    use sha2::{Digest, Sha256};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let root = std::env::temp_dir().join(format!(
+        "owasidea-validate-{label}-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(root.join("manifests")).unwrap();
+    std::fs::create_dir_all(root.join("plugins/legacy")).unwrap();
+    std::fs::write(
+        root.join("wasm-app.toml"),
+        "[app]\nname = \"legacy\"\nversion = \"0.1.0\"\n\n\
+         [plugins.legacy]\npath = \"plugins/legacy\"\nlanguage = \"rust\"\ntype = \"library\"\n",
+    )
+    .unwrap();
+    let component = b"legacy component bytes";
+    std::fs::write(root.join("plugins/legacy/legacy.component.wasm"), component).unwrap();
+    let sha = format!("{:x}", Sha256::digest(component));
+    let manifest = manifest(&sha);
+    std::fs::write(
+        root.join("manifests/legacy.manifest.json"),
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    root
+}
+
+fn validate_fixture(root: &std::path::Path) -> std::process::Output {
+    Command::cargo_bin("owasidea")
+        .unwrap()
+        .args(["--config"])
+        .arg(root.join("wasm-app.toml"))
+        .arg("validate")
+        .args(["--manifest-dir"])
+        .arg(root.join("manifests"))
+        .output()
+        .unwrap()
+}
+
+fn base_manifest(sha: &str) -> serde_json::Value {
+    serde_json::json!({
+        "name": "legacy", "version": "0.1.0", "language": "rust", "abi": "wasi-0.2",
+        "runtime": "wasi-component", "type": "library",
+        "component": "legacy.component.wasm",
+        "exports": [], "imports": {"wasi": [], "host": [], "plugins": []},
+        "permissions": {
+            "filesystem": [],
+            "http": {"outbound": [], "inbound": false},
+            "kv": null
+        },
+        "state": {}, "composition": {},
+        "metadata": {"sha256": sha}
+    })
+}
+
+#[test]
+fn validate_warns_about_legacy_manifest_without_failing() {
+    let root = write_validate_fixture("legacy", base_manifest);
+    let out = validate_fixture(&root);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    assert!(
+        stdout.contains("warning: legacy: ABI_LEGACY_MANIFEST"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("ABI_MISSING_HOST_FIELDS"), "{stdout}");
+    assert!(stdout.contains("docs/ABI_POLICY.md"), "{stdout}");
+    assert!(stdout.contains("deprecation warning(s)"), "{stdout}");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn validate_is_quiet_for_current_manifest() {
+    let root = write_validate_fixture("current", |sha| {
+        let mut manifest = base_manifest(sha);
+        let object = manifest.as_object_mut().unwrap();
+        object.insert("schema_version".to_string(), serde_json::json!(1));
+        object.insert(
+            "host_abi".to_string(),
+            serde_json::json!(owasidea_host::HOST_ABI),
+        );
+        object.insert(
+            "min_host".to_string(),
+            serde_json::json!(owasidea_host::HOST_VERSION),
+        );
+        manifest
+    });
+    let out = validate_fixture(&root);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    assert!(!stdout.contains("warning:"), "{stdout}");
+    assert!(stdout.contains("Validation OK."), "{stdout}");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn abi_policy_docs_links_resolve() {
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let docs = [
+        "docs/ABI_POLICY.md",
+        "docs/MIGRATION_0_X_TO_1_0.md",
+        "docs/ABI.md",
+        "CHANGELOG.md",
+    ];
+    let mut broken = Vec::new();
+    for doc in docs {
+        let path = repo.join(doc);
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{doc}: {e}"));
+        let dir = path.parent().unwrap();
+        let mut rest = text.as_str();
+        while let Some(start) = rest.find("](") {
+            rest = &rest[start + 2..];
+            let Some(end) = rest.find(')') else { break };
+            let target = rest[..end].trim();
+            rest = &rest[end..];
+            if target.is_empty() || target.starts_with('#') || target.starts_with("http") {
+                continue;
+            }
+            let file = target.split('#').next().unwrap_or("");
+            if file.is_empty() {
+                continue;
+            }
+            if !dir.join(file).exists() {
+                broken.push(format!("{doc}: {target}"));
+            }
+        }
+    }
+    assert!(broken.is_empty(), "broken doc links: {broken:?}");
+}
+
+#[test]
+fn changelog_and_policy_document_1_0_abi_rules() {
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let changelog = std::fs::read_to_string(repo.join("CHANGELOG.md")).unwrap();
+    assert!(changelog.contains("## [1.0.0]"), "{changelog}");
+    assert!(changelog.contains("ABI_LEGACY_MANIFEST"), "{changelog}");
+    assert!(changelog.contains("docs/ABI_POLICY.md"), "{changelog}");
+
+    let policy = std::fs::read_to_string(repo.join("docs/ABI_POLICY.md")).unwrap();
+    for needle in [
+        "schema_version",
+        "host_abi",
+        "min_host",
+        "Deprecation window",
+        "Error vs warning policy",
+        "ABI_LEGACY_MANIFEST",
+    ] {
+        assert!(policy.contains(needle), "ABI_POLICY.md missing {needle}");
+    }
+
+    let migration = std::fs::read_to_string(repo.join("docs/MIGRATION_0_X_TO_1_0.md")).unwrap();
+    for needle in [
+        "wasm-app.toml",
+        "owasidea build",
+        "bridge",
+        "[updater]",
+        "host_abi",
+    ] {
+        assert!(
+            migration.contains(needle),
+            "MIGRATION_0_X_TO_1_0.md missing {needle}"
+        );
+    }
+}

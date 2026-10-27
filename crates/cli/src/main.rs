@@ -1,5 +1,6 @@
 use anyhow::Context;
 use clap::{Parser, Subcommand};
+mod abi;
 mod build_id;
 mod call;
 mod client_gen;
@@ -17,6 +18,8 @@ mod signing;
 mod smoke_gen;
 mod status;
 mod templates;
+#[cfg(test)]
+mod test_support;
 mod type_parser;
 mod updater;
 mod verify;
@@ -3536,6 +3539,7 @@ fn cmd_validate(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
     let plugins = cfg.plugins.clone().unwrap_or_default();
     let manifest_dir = app_path(&root, manifest_dir);
     let mut errors = 0;
+    let mut warnings = 0;
     for (name, p) in &plugins {
         let manifest_path = manifest_dir.join(format!("{}.manifest.json", name));
         if !manifest_path.exists() {
@@ -3545,13 +3549,19 @@ fn cmd_validate(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
         }
         let mraw = std::fs::read_to_string(&manifest_path)?;
         let manifest: serde_json::Value = serde_json::from_str(&mraw)?;
+        // RL-07: deprecation warnings never fail validation. Legacy manifests
+        // keep working under host ABI 1; the warning names the policy doc.
+        for warning in abi::manifest_warnings(&manifest) {
+            println!("warning: {name}: {warning}");
+            warnings += 1;
+        }
         // CT-08 ABI fields
         let sv = manifest["schema_version"].as_u64().unwrap_or(0);
-        if sv > 1 {
+        if sv > abi::CURRENT_SCHEMA_VERSION {
             println!("{}: bad schema_version {}", name, sv);
             errors += 1;
         }
-        if sv == 1 {
+        if sv == abi::CURRENT_SCHEMA_VERSION {
             match manifest["host_abi"].as_str() {
                 Some(ha) if ha == owasidea_host::HOST_ABI => {}
                 Some(ha) => {
@@ -3675,7 +3685,14 @@ fn cmd_validate(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
     if errors > 0 {
         anyhow::bail!("validation failed with {} error(s)", errors);
     }
-    println!("Validation OK.");
+    if warnings > 0 {
+        println!(
+            "Validation OK with {warnings} deprecation warning(s); see {}.",
+            abi::POLICY_DOC
+        );
+    } else {
+        println!("Validation OK.");
+    }
     Ok(())
 }
 

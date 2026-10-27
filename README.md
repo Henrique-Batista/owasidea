@@ -139,6 +139,9 @@ owasidea bundle          # build + sign + Tauri package
 - [`docs/UPDATER.md`](docs/UPDATER.md) — Tauri updater, latest.json, channels, local testing
 - [`docs/CODE_SIGNING.md`](docs/CODE_SIGNING.md) — Windows Authenticode and macOS Developer ID/notarization, CI secrets and safe skip
 - [`docs/RELEASE.md`](docs/RELEASE.md) — release checklist: gates, profiles, signing, CI secrets
+- [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md) — semver, breaking changes, deprecation window, warning vs error
+- [`docs/MIGRATION_0_X_TO_1_0.md`](docs/MIGRATION_0_X_TO_1_0.md) — upgrading a 0.x app to 1.0
+- [`CHANGELOG.md`](CHANGELOG.md) — what shipped in each release
 - [`docs/CLEAN_BUILD.md`](docs/CLEAN_BUILD.md) — bubblewrap isolation and clean Arch/Debian chroot builds
 - [`llms.txt`](llms.txt) — compact AI index
 - `docs/USAGE.md` — setup and running
