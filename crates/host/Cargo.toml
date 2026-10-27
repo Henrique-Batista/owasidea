@@ -64,7 +64,9 @@ opentelemetry-otlp = { version = "0.33", optional = true, default-features = fal
 tracing-opentelemetry = { version = "0.34", optional = true }
 
 [dev-dependencies]
-reqwest = { workspace = true }
+# `stream` powers the SSE assertions in `tests/reload_sse.rs`.
+reqwest = { workspace = true, features = ["stream"] }
 tokio = { workspace = true }
 serde_json = { workspace = true }
+tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
