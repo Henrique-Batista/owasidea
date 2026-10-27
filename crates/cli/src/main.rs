@@ -2001,6 +2001,11 @@ fn build_ui_plugin(
     bridge.sort();
     bridge.dedup();
 
+    // Ship the bridge SDK alongside UI plugin assets (same-origin, no CORS).
+    let sdk_src = root.join("ui/public/owasidea-bridge.js");
+    if sdk_src.is_file() {
+        let _ = std::fs::copy(&sdk_src, destination.join("owasidea-bridge.js"));
+    }
     let (digest, files) = hash_static_tree(&destination)?;
     let manifest = serde_json::json!({
         "name": name,

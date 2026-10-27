@@ -19,6 +19,35 @@
   let items: Item[] = load();
   let draft = '';
 
+  let bridgeResult = '';
+  let bridgeError = '';
+  let bridgeLoading = false;
+
+  async function renderChangelog() {
+    bridgeLoading = true;
+    bridgeError = '';
+    bridgeResult = '';
+    try {
+      if (!(window as any).OwasideaBridge) {
+        await new Promise((resolve, reject) => {
+          const s = document.createElement('script');
+          s.type = 'module';
+          s.src = './owasidea-bridge.js';
+          s.onload = () => resolve(true);
+          s.onerror = () => reject(new Error('failed to load bridge sdk'));
+          document.head.appendChild(s);
+        });
+      }
+      const bridge = await (window as any).OwasideaBridge.connect();
+      const result = await bridge.call('changelog-ts', 'render', ['v1.0.0', ['feat: add']]);
+      bridgeResult = String(result ?? '');
+    } catch (e: any) {
+      bridgeError = e && e.code ? `${e.code}: ${e.message}` : String(e);
+    } finally {
+      bridgeLoading = false;
+    }
+  }
+
   function load(): Item[] {
     try {
       const raw = localStorage.getItem('shipyard-board');
@@ -104,5 +133,16 @@
   <footer>
     <span class="dot"></span>
     State lives in this iframe's localStorage only.
+    <div style="margin-top:0.5rem">
+      <button on:click={renderChangelog} disabled={bridgeLoading}>
+        {bridgeLoading ? 'Loading…' : 'Render changelog (bridge)'}
+      </button>
+      {#if bridgeResult}
+        <pre style="white-space:pre-wrap">{bridgeResult}</pre>
+      {/if}
+      {#if bridgeError}
+        <pre style="color:#c33">{bridgeError}</pre>
+      {/if}
+    </div>
   </footer>
 </div>
