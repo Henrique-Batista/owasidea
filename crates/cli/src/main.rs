@@ -10,6 +10,7 @@ mod dev_next_steps;
 mod doctor;
 mod errors;
 mod logs;
+mod permissions;
 mod status;
 mod templates;
 mod type_parser;
@@ -81,6 +82,9 @@ enum Commands {
         /// Do not sign manifests even if [signing] is configured.
         #[arg(long)]
         no_sign: bool,
+        /// Fail (exit non-zero) if any plugin permission is widened vs the previous lock.
+        #[arg(long)]
+        fail_on_widen: bool,
     },
     /// Build, start a temporary host, run smoke checks, then UI tests.
     #[command(about = "Build, start a temporary host, run smoke checks, then UI tests.")]
@@ -669,7 +673,10 @@ async fn main() -> anyhow::Result<()> {
                 cli.json,
             ),
         },
-        Commands::Build { no_sign } => cmd_build(&cli.config, &cli.manifest_dir, !no_sign),
+        Commands::Build {
+            no_sign,
+            fail_on_widen,
+        } => cmd_build(&cli.config, &cli.manifest_dir, !no_sign, fail_on_widen),
         Commands::Test {
             no_build,
             no_smoke,
@@ -1877,7 +1884,12 @@ fn generate_manifest(
 }
 
 #[allow(clippy::regex_creation_in_loops, clippy::too_many_lines)]
-fn cmd_build(config: &Path, manifest_dir: &Path, sign: bool) -> anyhow::Result<()> {
+fn cmd_build(
+    config: &Path,
+    manifest_dir: &Path,
+    sign: bool,
+    fail_on_widen: bool,
+) -> anyhow::Result<()> {
     let root = app_root(config);
     let raw = std::fs::read_to_string(config)?;
     let cfg: AppConfig = toml::from_str(&raw)?;
@@ -2175,6 +2187,81 @@ fn cmd_build(config: &Path, manifest_dir: &Path, sign: bool) -> anyhow::Result<(
         std::fs::write(&index_path, serde_json::to_string_pretty(&ui_index)? + "\n")?;
         println!("    UI index: {}", index_path.display());
     }
+    // PX-01: effective permission snapshot + diff vs previous lock.
+    {
+        use serde_json::json;
+        use sha2::{Digest, Sha256};
+        let mut new_plugins = serde_json::Map::new();
+        for name in plugins.keys() {
+            let manifest_path = manifest_dir.join(format!("{}.manifest.json", name));
+            if !manifest_path.exists() {
+                continue;
+            }
+            let m: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&manifest_path)?)?;
+            let perms = permissions::effective_permissions(&m);
+            let mut hasher = Sha256::new();
+            hasher.update(perms.join("\n").as_bytes());
+            let hash = format!("{:x}", hasher.finalize());
+            new_plugins.insert(name.clone(), json!({"permissions": perms, "hash": hash}));
+        }
+        let new_lock = json!({"version": 1, "build_id": build_id, "plugins": new_plugins});
+        let lock_path = manifest_dir.join("permissions.lock.json");
+        let diff_path = manifest_dir.join("permissions.diff.json");
+        let old_lock: Option<serde_json::Value> = std::fs::read_to_string(&lock_path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok());
+        let mut diff_plugins = serde_json::Map::new();
+        let mut widened = false;
+        if let Some(old) = &old_lock {
+            if let Some(old_plugins) = old.get("plugins").and_then(|v| v.as_object()) {
+                for (name, newp) in &new_plugins {
+                    let new_perms: Vec<String> = newp["permissions"]
+                        .as_array()
+                        .unwrap_or(&Vec::new())
+                        .iter()
+                        .map(|v| v.as_str().unwrap_or("").to_string())
+                        .collect();
+                    let old_perms: Vec<String> = old_plugins
+                        .get(name)
+                        .and_then(|v| v["permissions"].as_array())
+                        .map(|a| {
+                            a.iter()
+                                .map(|v| v.as_str().unwrap_or("").to_string())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let (added, removed) = permissions::diff(&old_perms, &new_perms);
+                    if !added.is_empty() {
+                        widened = true;
+                    }
+                    if !added.is_empty() || !removed.is_empty() {
+                        println!("permission changes for {}:", name);
+                        for a in &added {
+                            println!("  + {}", a);
+                        }
+                        for r in &removed {
+                            println!("  - {}", r);
+                        }
+                        diff_plugins
+                            .insert(name.clone(), json!({"added": added, "removed": removed}));
+                    }
+                }
+            }
+        }
+        std::fs::write(
+            &diff_path,
+            serde_json::to_string_pretty(
+                &json!({"version": 1, "build_id": build_id, "plugins": diff_plugins}),
+            )? + "\n",
+        )?;
+        if widened && fail_on_widen {
+            anyhow::bail!("permission widening detected (--fail-on-widen); lock not updated");
+        }
+        std::fs::write(&lock_path, serde_json::to_string_pretty(&new_lock)? + "\n")?;
+        println!("    permissions lock: {}", lock_path.display());
+    }
+
     if sign {
         sign_all(&root, &manifest_dir, cfg.signing.as_ref())?;
     }
@@ -2507,7 +2594,7 @@ async fn cmd_dev(
     }
     let root = app_root(config_path);
     if build {
-        cmd_build(config_path, manifest_dir, true)?;
+        cmd_build(config_path, manifest_dir, true, false)?;
     }
     let manifest_dir = app_path(&root, manifest_dir);
     build_id::ensure_env_from_manifests(&manifest_dir);
@@ -3812,7 +3899,7 @@ fn cmd_bundle(
 ) -> anyhow::Result<()> {
     let root = app_root(config);
     if build {
-        cmd_build(config, manifest_dir, true)?;
+        cmd_build(config, manifest_dir, true, false)?;
     }
     let cfg = read_app_config(config)?;
     cfg.validate_for_bundle()?;
@@ -4393,7 +4480,7 @@ async fn cmd_test(
 ) -> anyhow::Result<()> {
     let root = app_root(config_path);
     if build {
-        cmd_build(config_path, manifest_dir, true)?;
+        cmd_build(config_path, manifest_dir, true, false)?;
     }
     let cfg = read_app_config(config_path)?;
     let manifest_dir = app_path(&root, manifest_dir);
