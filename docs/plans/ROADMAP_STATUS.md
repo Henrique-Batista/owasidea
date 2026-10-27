@@ -60,8 +60,8 @@ Status permitidos: `todo`, `doing`, `review`, `done`, `blocked`.
 | AX-01 | done | wt-config | 6e79863 (merge d2326cf) | fmt/clippy/test | templates em `crates/cli/templates/`; main.rs sem strings grandes |
 | AX-02 | done | wt-config | 97e5b84 (merge 48b0b94) | fmt/clippy/test + scaffold Svelte build real | Svelte/React/Vue/Yew/Blazor/Uno; `ui_build`/base `./` |
 | AX-03 | done | wt-authoring | 4688d11 (merge 06f026f) | fmt/clippy/test | README com build/call/permissões/teste; WIT C# sem duplicação |
-| AX-04 | todo | — | — | — | — |
-| AX-05 | todo | — | — | — | — |
+| AX-04 | done | wt-config | c978b06 (merge 58dc4d3) | fmt/clippy/test + dry-run sem arquivos | `--template/--with-test/--no-register/--dry-run`; presets init |
+| AX-05 | done | wt-authoring | c1399e9 (merge 2561634) | fmt/clippy/test + UI build + Playwright 11/11 | catálogo `OWASIDEA_E_*`; `explain`; UI mostra hint/docs |
 | AX-06 | todo | — | — | — | — |
 | AX-07 | done | wt-authoring | 861cd23 + 1b82fea (merge 09f3ce2) | fmt/clippy/test + schema --check | JSON Schema (`additionalProperties:false`); comando `schema`; docs |
 | AX-08 | todo | — | — | — | — |
