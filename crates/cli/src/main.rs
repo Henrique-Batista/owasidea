@@ -13,6 +13,7 @@ mod logs;
 mod permissions;
 mod profile;
 mod registry_lock;
+mod sbom;
 mod signing;
 mod smoke_gen;
 mod status;
@@ -231,6 +232,12 @@ enum Commands {
         /// (dev|staging|prod) and write artifacts to `dist/<profile>`.
         #[arg(long, value_name = "PROFILE")]
         profile: Option<String>,
+        /// Write an in-toto/SLSA-like provenance attestation into the bundle.
+        #[arg(long)]
+        provenance: bool,
+        /// Skip SBOM generation (SBOM is written into the bundle by default).
+        #[arg(long)]
+        no_sbom: bool,
     },
     /// Generate or validate latest.json for the Tauri updater.
     #[command(about = "Generate or validate latest.json for the Tauri updater.")]
@@ -294,6 +301,28 @@ enum Commands {
         /// Dist directory to verify.
         #[arg(help = "Dist directory.")]
         dist: PathBuf,
+    },
+    /// Generate a CycloneDX/SPDX SBOM from Cargo/npm/Go lockfiles.
+    #[command(about = "Generate a CycloneDX/SPDX SBOM from Cargo/npm/Go lockfiles.")]
+    Sbom {
+        /// Output file (default: <dist>/sbom.cdx.json or sbom.spdx.json).
+        #[arg(long, value_name = "PATH")]
+        output: Option<PathBuf>,
+        /// Output format: cyclonedx|spdx.
+        #[arg(long, default_value = "cyclonedx", value_name = "FORMAT")]
+        format: String,
+        /// Write an in-toto/SLSA-like provenance attestation next to the SBOM.
+        #[arg(long)]
+        provenance: bool,
+        /// Directory of release artifacts to hash (default: the SBOM directory).
+        #[arg(long, value_name = "DIR")]
+        artifacts: Option<PathBuf>,
+        /// Check the existing SBOM instead of writing (fails when stale).
+        #[arg(long)]
+        check: bool,
+        /// Config profile (dev|staging|prod): default output under dist/<profile>.
+        #[arg(long, value_name = "PROFILE")]
+        profile: Option<String>,
     },
     /// Plan Windows/macOS code signing and notarization from CI secrets.
     #[command(about = "Plan Windows/macOS code signing and notarization from CI secrets.")]
@@ -976,6 +1005,8 @@ async fn main() -> anyhow::Result<()> {
             isolate_host_libs,
             mask_paths,
             profile,
+            provenance,
+            no_sbom,
         } => cmd_bundle(
             &cli.config,
             &cli.manifest_dir,
@@ -984,6 +1015,8 @@ async fn main() -> anyhow::Result<()> {
             isolate_host_libs,
             &mask_paths,
             profile.as_deref(),
+            provenance,
+            no_sbom,
         ),
         Commands::Latest {
             artifacts,
@@ -1017,6 +1050,23 @@ async fn main() -> anyhow::Result<()> {
         },
         Commands::Validate => cmd_validate(&cli.config, &cli.manifest_dir),
         Commands::Verify { dist } => verify::cmd_verify(&dist, cli.json),
+        Commands::Sbom {
+            output,
+            format,
+            provenance,
+            artifacts,
+            check,
+            profile,
+        } => sbom::cmd_sbom(
+            &cli.config,
+            output.as_deref(),
+            &format,
+            provenance,
+            artifacts.as_deref(),
+            check,
+            profile.as_deref(),
+            cli.json,
+        ),
         Commands::Explain { code } => errors::cmd_explain(&code, cli.json),
         Commands::Signing { cmd } => match cmd {
             SigningCmd::Plan { platform, require } => {
@@ -4387,6 +4437,7 @@ fn write_latest_if_configured(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_bundle(
     config: &Path,
     manifest_dir: &Path,
@@ -4395,6 +4446,8 @@ fn cmd_bundle(
     isolate_host_libs: bool,
     mask_paths: &[PathBuf],
     profile: Option<&str>,
+    provenance: bool,
+    no_sbom: bool,
 ) -> anyhow::Result<()> {
     let profile = match profile {
         Some(name) => Some(crate::profile::validate_profile(name)?),
@@ -4579,7 +4632,7 @@ fn cmd_bundle(
             .map(|output| app_path(&root, output)),
     };
     if bundle_dir.is_dir() {
-        if let Some(output_dir) = output_dir {
+        let artifact_dir = if let Some(output_dir) = output_dir {
             clear_bundle_artifacts(&output_dir)?;
             copy_selected_bundles(&bundle_dir, &output_dir, &requested)?;
             if let Some(profile) = profile {
@@ -4598,9 +4651,17 @@ fn cmd_bundle(
             }
             println!("Artifacts copied to {}", output_dir.display());
             write_latest_if_configured(&root, &cfg, profile, &output_dir)?;
+            output_dir
         } else {
             println!("Artifacts are under {}", bundle_dir.display());
             write_latest_if_configured(&root, &cfg, profile, &bundle_dir)?;
+            bundle_dir.clone()
+        };
+        // RL-04: SBOM/provenance describe the artifacts in the output
+        // directory, so they are written after the bundle is copied and
+        // `latest.json` is generated.
+        if !no_sbom {
+            sbom::write_bundle_attestations(&root, &cfg, profile, &artifact_dir, provenance)?;
         }
     } else {
         println!(

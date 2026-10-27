@@ -109,10 +109,72 @@ Output (`dist/` or `dist/<profile>/`):
 - `*.sig` next to each updater artifact
 - `latest.json`
 - `tauri.generated.conf.json` (effective config, auditable)
+- `sbom.cdx.json` / `sbom.spdx.json` (RL-04)
+- `provenance.intoto.json` when `bundle --provenance` is used (RL-04)
 
 Run `owasidea latest --artifacts <dir> --check` before publishing. It fails on
 a missing platform, empty signature, non-HTTPS URL, non-semver version, or a
 channel mismatch.
+
+### 4.1 SBOM and provenance (RL-04)
+
+`bundle` writes CycloneDX 1.5 (`sbom.cdx.json`) and SPDX 2.3
+(`sbom.spdx.json`) into the output directory by default; `--no-sbom` skips
+them. The same documents can be generated standalone:
+
+```bash
+export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+owasidea sbom --output dist/sbom.cdx.json --provenance --artifacts dist
+owasidea sbom --format spdx --output dist/sbom.spdx.json
+owasidea sbom --check          # fails when the SBOM is stale
+```
+
+The SBOM covers every lockfile under the app root:
+
+| Ecosystem | Source | purl |
+| --- | --- | --- |
+| Rust | `Cargo.lock` (root, desktop, plugins) | `pkg:cargo/<name>@<version>` |
+| npm | `package-lock.json` (root, UI, JS/TS plugins) | `pkg:npm/<name>@<version>` |
+| Go | `go.mod` + `go.sum` | `pkg:golang/<module>@<version>` |
+
+Hashes recorded in the lockfiles (`Cargo.lock` checksum, npm `integrity`,
+`go.sum` h1) are copied into the component when present.
+
+**Reproducibility.** The documents are deterministic: components are sorted by
+purl, the CycloneDX serial number and the SPDX document namespace are derived
+from a content hash, and no wall clock is read. `SOURCE_DATE_EPOCH` is the only
+timestamp source. Two builds of the same commit with the same epoch therefore
+produce byte-identical SBOMs; `owasidea sbom --check` enforces that in CI.
+Artifact binaries are only as reproducible as the underlying toolchains — Tauri
+and `linuxdeploy` are not byte-reproducible on every host, so compare SBOMs and
+provenance subjects rather than whole bundles.
+
+**Provenance.** `--provenance` (or `bundle --provenance`) writes
+`provenance.intoto.json`, an in-toto statement with a SLSA provenance v1
+predicate:
+
+- `subject`: relative path + SHA-256 of every file in the artifact directory
+  (including the SBOM files);
+- `buildDefinition.externalParameters`: build id, app name/version, profile,
+  `sourceDateEpoch`;
+- `internalParameters`: git commit, dirty flag, `owasidea` version;
+- `runDetails`: builder id and invocation id (the build id);
+- `predicate.owasidea.limitations`: what the attestation does **not** claim.
+
+Limitations, stated explicitly:
+
+- It is **unsigned** and has no builder identity, transparency log, or
+  provenance signature; it is SLSA-*like*, not SLSA Build L3.
+- It is not a hermetic build: components come from lockfiles in the working
+  tree, not from an isolated, resolved dependency graph.
+- Artifact hashes describe the output directory at generation time. A dirty
+  working tree is recorded (`gitDirty: true`) but does not fail the build.
+- `SOURCE_DATE_EPOCH` must be supplied for reproducible timestamps; without it
+  the CycloneDX timestamp is omitted and SPDX `created` is the Unix epoch.
+
+CI generates both SBOM formats plus provenance with
+`SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)` and uploads them as the
+`sbom-provenance` artifact. No secret is needed.
 
 ---
 
@@ -147,6 +209,11 @@ Missing values are not an error: the bundle step runs without updater signing,
 the updater verification step is skipped, and a message explains what to set.
 No secret is written to the repo, to `latest.json`, or to the generated Tauri
 config.
+
+SBOM and provenance generation (RL-04) needs no secret. The `full` job sets
+`SOURCE_DATE_EPOCH` from the last commit, writes `dist/sbom.cdx.json`,
+`dist/sbom.spdx.json` and `dist/provenance.intoto.json`, validates them with
+`owasidea sbom --check`, and uploads the `sbom-provenance` artifact.
 
 ---
 

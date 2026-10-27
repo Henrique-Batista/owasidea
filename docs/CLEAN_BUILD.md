@@ -46,6 +46,25 @@ the repository and never commit generated `dist/` output. See
 [`CLI.md`](CLI.md#bundle-profiles) for the merge rules and what each profile
 changes (host, CSP, Tauri identity, runtime descriptor, artifact directory).
 
+## Reproducible SBOMs
+
+`owasidea bundle` writes `sbom.cdx.json` and `sbom.spdx.json` next to the
+artifacts (RL-04). For a release you can reproduce, export the commit timestamp
+before building:
+
+```bash
+export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+owasidea build
+owasidea bundle --provenance
+owasidea sbom --check
+```
+
+The SBOM content and the build id depend only on the lockfiles, the commit and
+the epoch, so two runs with the same `SOURCE_DATE_EPOCH` are byte-identical.
+The binaries themselves are only as reproducible as Tauri and `linuxdeploy`;
+compare `provenance.intoto.json` subjects instead of whole bundles. See
+[`RELEASE.md`](RELEASE.md#41-sbom-and-provenance-rl-04).
+
 ## Option B: clean chroot (hermetic release)
 
 Use this when you want a build root that contains only official packages, for

@@ -327,6 +327,14 @@ ui = "ui"
 output = "dist"
 ```
 
+#### Bundle SBOM and provenance
+
+After copying the artifacts, `bundle` writes `sbom.cdx.json` and
+`sbom.spdx.json` into the output directory (RL-04). Add `--provenance` to also
+write `provenance.intoto.json`, an unsigned SLSA-like attestation with the
+build id, git commit, `SOURCE_DATE_EPOCH` and SHA-256 hashes of every artifact.
+Use `--no-sbom` to skip both files. See [`RELEASE.md`](RELEASE.md#41-sbom-and-provenance-rl-04).
+
 #### Bundle updater artifacts
 
 With `[updater]` configured (endpoint + public key), `bundle` also:
@@ -437,6 +445,34 @@ owasidea latest --artifacts dist --check
 Requires `[updater].endpoint` and `[updater].pubkey` (or
 `OWASIDEA_UPDATER_ENDPOINT`/`OWASIDEA_UPDATER_PUBKEY`). See
 [`UPDATER.md`](UPDATER.md) and `scripts/gen-latest-json.sh`.
+
+### `sbom [--output <path>] [--format cyclonedx|spdx] [--provenance] [--artifacts <dir>] [--check] [--profile <name>]`
+
+Generate a software bill of materials from the lockfiles in the app tree
+(RL-04):
+
+- `Cargo.lock` (root, desktop, Rust plugins) → `pkg:cargo/...`
+- `package-lock.json` (root, UI, JS/TS plugins) → `pkg:npm/...`
+- `go.mod` + `go.sum` (Go plugins) → `pkg:golang/...`
+
+The default output is `<dist>/sbom.cdx.json` (CycloneDX 1.5); `--format spdx`
+writes SPDX 2.3 JSON. Components are sorted by purl, hashes from the lockfiles
+are included, and the serial number/namespace is content-derived, so two runs
+with the same `SOURCE_DATE_EPOCH` produce byte-identical documents. Without
+`SOURCE_DATE_EPOCH` the CycloneDX timestamp is omitted.
+
+`--provenance` writes `provenance.intoto.json` next to the SBOM: an in-toto
+statement (SLSA provenance v1 shape) with the build id, git commit, epoch and
+SHA-256 hashes of the files under `--artifacts` (default: the SBOM directory).
+`--check` regenerates in memory and fails when the existing file is stale.
+`--json` prints a machine-readable summary.
+
+```bash
+SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) \
+  owasidea sbom --output dist/sbom.cdx.json --provenance --artifacts dist
+owasidea sbom --output dist/sbom.spdx.json --format spdx
+owasidea sbom --check
+```
 
 ### `signing plan [--platform windows|macos|linux] [--require] [--json]`
 
