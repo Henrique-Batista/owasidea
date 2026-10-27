@@ -16,6 +16,7 @@ mod smoke_gen;
 mod status;
 mod templates;
 mod type_parser;
+mod verify;
 mod wit_types;
 use config::*;
 use config_render::*;
@@ -237,6 +238,13 @@ enum Commands {
     /// Validate manifests, checksums and capabilities against config.
     #[command(about = "Validate manifests, checksums and capabilities against config.")]
     Validate,
+    /// Verify a dist directory: manifests, components, signatures, UI index.
+    #[command(about = "Verify a dist directory: manifests, components, signatures, UI index.")]
+    Verify {
+        /// Dist directory to verify.
+        #[arg(help = "Dist directory.")]
+        dist: PathBuf,
+    },
     /// Explain an OWASIDEA_E_* error code.
     #[command(about = "Explain an OWASIDEA_E_* error code.")]
     Explain {
@@ -863,6 +871,7 @@ async fn main() -> anyhow::Result<()> {
             WitCmd::Generate { path } => cmd_wit_generate(&path, cli.json),
         },
         Commands::Validate => cmd_validate(&cli.config, &cli.manifest_dir),
+        Commands::Verify { dist } => verify::cmd_verify(&dist, cli.json),
         Commands::Explain { code } => errors::cmd_explain(&code, cli.json),
         Commands::Client {
             lang,

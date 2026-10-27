@@ -149,6 +149,22 @@ Check generated manifests against `wasm-app.toml`:
 
 Exits non-zero on drift. Run after `build`, especially in CI.
 
+### `verify <dist-dir> [--json]`
+
+Verify a dist directory produced by `bundle` (or any directory containing
+manifests). Checks:
+
+- each manifest is valid JSON with compatible ABI fields (`schema_version`,
+  `host_abi`, `min_host`)
+- referenced component exists and its sha256 matches `metadata.sha256`
+- Ed25519 signature verifies against the public key (`OWASIDEA_PUBLIC_KEY`
+  or `<dist>/trust/owasidea.pub` / `<dist>/keys/owasidea.pub`)
+- `metadata.ui` asset digests and bundle digest for UI plugins
+- `ui-plugins.json` index entries match the manifests
+
+`--json` prints a stable report `{ok, errors:[{file,code,message}], checked}`.
+Exits non-zero if any check fails.
+
 ### `config render [--target runtime|tauri|playwright|all] [--check]`
 
 Render derived configuration artifacts from `wasm-app.toml` (single source of
