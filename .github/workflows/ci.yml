@@ -297,6 +297,15 @@ jobs:
       - name: Install tauri-cli
         run: cargo install tauri-cli --version "^2" --locked
 
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test host/cli
+        run: cargo test -p owasidea-host -p owasidea-cli
+
       - name: Build host and CLI
         run: cargo build -p owasidea-host -p owasidea-cli
 
