@@ -758,13 +758,15 @@ async fn main() -> anyhow::Result<()> {
                 cmd_test(
                     &cli.config,
                     &cli.manifest_dir,
-                    !no_build,
-                    !no_smoke,
-                    !no_ui,
-                    cli.json,
-                    filter.as_deref(),
-                    plugin.as_deref(),
-                    watch,
+                    &TestOptions {
+                        build: !no_build,
+                        smoke: !no_smoke,
+                        ui: !no_ui,
+                        json: cli.json,
+                        filter: filter.as_deref(),
+                        plugin: plugin.as_deref(),
+                        watch,
+                    },
                 )
                 .await
             }
@@ -773,13 +775,15 @@ async fn main() -> anyhow::Result<()> {
             cmd_test(
                 &cli.config,
                 &cli.manifest_dir,
-                !no_build,
-                true,
-                false,
-                cli.json,
-                None,
-                None,
-                false,
+                &TestOptions {
+                    build: !no_build,
+                    smoke: true,
+                    ui: false,
+                    json: cli.json,
+                    filter: None,
+                    plugin: None,
+                    watch: false,
+                },
             )
             .await
         }
@@ -4823,31 +4827,27 @@ fn apply_signing_env_to(command: &mut std::process::Command, cfg: &AppConfig, ro
     );
 }
 
-async fn cmd_test(
-    config_path: &Path,
-    manifest_dir: &Path,
+#[derive(Clone, Copy)]
+struct TestOptions<'a> {
     build: bool,
     smoke: bool,
     ui: bool,
     json: bool,
-    filter: Option<&str>,
-    plugin: Option<&str>,
+    filter: Option<&'a str>,
+    plugin: Option<&'a str>,
     watch: bool,
+}
+
+async fn cmd_test(
+    config_path: &Path,
+    manifest_dir: &Path,
+    opts: &TestOptions<'_>,
 ) -> anyhow::Result<()> {
-    if watch {
+    if opts.watch {
+        let mut inner = *opts;
+        inner.watch = false;
         loop {
-            let _ = Box::pin(cmd_test(
-                config_path,
-                manifest_dir,
-                build,
-                smoke,
-                ui,
-                json,
-                filter,
-                plugin,
-                false,
-            ))
-            .await;
+            let _ = Box::pin(cmd_test(config_path, manifest_dir, &inner)).await;
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => { return Ok(()); }
                 _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
@@ -4855,19 +4855,27 @@ async fn cmd_test(
         }
     }
     let root = app_root(config_path);
-    if build {
+    if opts.build {
         cmd_build(config_path, manifest_dir, true, false)?;
     }
     let cfg = read_app_config(config_path)?;
     let manifest_dir = app_path(&root, manifest_dir);
-    if !build {
+    if !opts.build {
         sign_all(&root, &manifest_dir, cfg.signing.as_ref())?;
     }
     let mut failures = 0usize;
-    if smoke {
-        failures += run_api_smoke(config_path, &manifest_dir, &cfg, json, filter, plugin).await?;
+    if opts.smoke {
+        failures += run_api_smoke(
+            config_path,
+            &manifest_dir,
+            &cfg,
+            opts.json,
+            opts.filter,
+            opts.plugin,
+        )
+        .await?;
     }
-    if ui {
+    if opts.ui {
         let command = cfg
             .test
             .as_ref()
