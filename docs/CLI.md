@@ -332,7 +332,19 @@ Private keys are written mode `0600` on Unix. See `docs/REGISTRY.md` and
 
 Search a static HTTPS registry index. HTTP is allowed only for localhost tests.
 
-### `registry install <name> --version <version> --url <index.json> --public-key <key> [--force]`
+### `registry install <name> --version <version> --url <index.json> --public-key <key> [--force] [--locked]`
+
+Download and verify one signed plugin version. Verification happens before
+writing. Unsigned, untrusted, malformed, over-sized, cross-origin, and
+path-traversal packages are rejected.
+
+### `registry update [--name <name>] [--version <version>] --url <index.json> --public-key <key>`
+
+Consult the registry and update `plugins.lock` entries (lock only).
+
+### `registry outdated --url <index.json>`
+
+List lock entries whose version differs from the registry.
 
 Download and verify one signed plugin version. Verification happens before
 writing. Unsigned, untrusted, malformed, over-sized, cross-origin, and

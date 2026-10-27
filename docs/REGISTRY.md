@@ -77,3 +77,27 @@ comes from the plugin signature and explicitly pinned publisher key.
 
 The pilot does not provide a hosted marketplace, accounts, billing, reviews, or
 an upload API. Registry hosting and publisher identity remain deployment-owned.
+
+## Lockfile
+
+`plugins.lock` (TOML, next to the manifest directory's parent) records installed
+registry plugins:
+
+```toml
+version = 1
+
+[[plugins]]
+name = "notes"
+version = "1.0.0"
+source = "https://plugins.example/index.json"
+sha256 = "<artifact digest>"
+signature_format = "owasidea-manifest-v1"
+```
+
+Entries are sorted by name then version. `registry install` writes/updates the
+lock after checksum and signature verification. `registry install --locked`
+requires an existing matching entry (version, source, digest, signature format)
+and performs no new resolution; it fails if the entry is missing or differs.
+`registry update` consults the registry and updates lock entries (lock only,
+no artifact install). `registry outdated` reports lock entries whose version
+differs from the registry.
