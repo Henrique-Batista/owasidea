@@ -13,6 +13,18 @@ path = "src/lib.rs"
 name = "owasidea-host"
 path = "src/main.rs"
 
+[features]
+default = []
+# Optional OpenTelemetry tracing (RL-05). Off by default: no new dependencies,
+# no span construction, and no OTLP exporter unless this feature is enabled and
+# `OTEL_EXPORTER_OTLP_ENDPOINT` is set.
+otel = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+]
+
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
@@ -36,6 +48,17 @@ sha2 = "0.10"
 semver = "1"
 ring = "0.17"
 base64 = "0.22"
+
+opentelemetry = { version = "0.33", optional = true, default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.33", optional = true, default-features = false, features = ["trace", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.33", optional = true, default-features = false, features = [
+    "trace",
+    "http-proto",
+    # The SDK's batch span processor runs on its own OS thread, so it needs the
+    # blocking HTTP client; an async client panics with "no reactor running".
+    "reqwest-blocking-client",
+] }
+tracing-opentelemetry = { version = "0.34", optional = true }
 
 [dev-dependencies]
 reqwest = { workspace = true }

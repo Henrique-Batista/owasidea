@@ -121,6 +121,41 @@ owasidea_plugin_fuel_total{plugin="notes"} 24510
 - Label values are escaped (`\`, `"`, newline) and families are sorted by plugin
   name for stable scrapes.
 
+## Tracing (OpenTelemetry, RL-05)
+
+OTLP trace export is optional and off by default. Enable it at build time and
+configure an endpoint at run time:
+
+```bash
+cargo build -p owasidea-host --features otel
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318   # OTLP/HTTP
+# optional: traces-specific override, wins over the endpoint above
+export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://127.0.0.1:4318/v1/traces
+```
+
+- Without the `otel` feature, or with the feature compiled in but the endpoint
+  unset (or blank), the host installs the same `tracing_subscriber::fmt`
+  subscriber as before, creates no spans, starts no exporter, and logs exactly
+  as it does today.
+- Transport is OTLP over HTTP/protobuf (`http://host:4318/v1/traces` by
+  default). A gRPC collector can be fronted by an OTLP/HTTP receiver.
+- Spans:
+  - `http.request` — one per inbound host HTTP request, with
+    `http.request.method`, `url.path`, `http.response.status_code` and
+    `otel.status_code`.
+  - `plugin.call` — one per plugin invocation, with `plugin`, `function`,
+    `call.kind` (`library` for `/call`, `/greet`, `/complete`; `service` for
+    `start-service`, `stop-service`, `restart-service`; `executable` for
+    `/app/{name}`), `status` (`ok`/`error`) and `otel.status_code`.
+- Context propagation: the host reads the W3C `traceparent` (and `tracestate`)
+  request header, so a caller's trace id becomes the parent of the exported
+  spans. A malformed header is ignored; the request is never rejected because of
+  it.
+- `service.name` is `owasidea-host`. Pending spans are flushed on `SIGINT`
+  (`Ctrl+C`) shutdown; a collector that is unreachable only produces exporter
+  warnings and never fails requests.
+- Failures to build the exporter fall back to plain logging with a warning.
+
 ## Plugins
 
 - `GET /plugins` → list of plugin summaries:

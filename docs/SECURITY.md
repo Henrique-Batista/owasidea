@@ -76,6 +76,24 @@ configured. Protect private signing keys; `owasidea keygen` writes Unix private
 keys with mode `0600`. Registry public keys must be pinned through trusted app
 configuration, not downloaded from the registry being checked.
 
+### Telemetry (RL-05)
+
+OTLP trace export is opt-in and never enabled by default:
+
+- Build with `--features otel`; nothing is linked or started otherwise.
+- Export only starts when `OTEL_EXPORTER_OTLP_ENDPOINT` (or
+  `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`) is set to a non-empty value.
+- Traces leave the process over OTLP/HTTP to the configured collector. Treat
+  the collector as a trusted sink: span attributes include plugin names,
+  export/function names, and request paths — not request bodies, argument
+  values, prompt text, or KV contents.
+- The `traceparent` header is accepted from clients for context propagation and
+  is never trusted for authorization. Malformed values are ignored.
+- Point the endpoint at a local collector or an authenticated internal
+  endpoint; do not send traces over untrusted networks without TLS.
+- Export is best-effort: an unreachable collector logs exporter warnings and
+  never blocks or fails a plugin call.
+
 ## Limits and residual risks
 
 - Wasmtime provides a WebAssembly capability sandbox, not an OS user/container
