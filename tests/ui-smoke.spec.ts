@@ -70,6 +70,34 @@ test('plugin detail calls a WIT export through the host API', async ({ page }) =
   await expect(page.locator('pre[data-out="greet"]')).toContainText('Hello, Ada');
 });
 
+test('services panel restarts a service and shows the failure reason', async ({ page }) => {
+  await page.route('http://127.0.0.1:8787/plugins', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify([
+      { name: 'heartbeat', language: 'rust', type: 'service', runtime: 'wasi-component', exports: [] },
+    ]),
+  }));
+  let restarts = 0;
+  await page.route('http://127.0.0.1:8787/plugin/heartbeat/service/status', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ running: false, address: null, last_error: 'no start-service export', restarts }),
+  }));
+  await page.route('http://127.0.0.1:8787/plugin/heartbeat/service/restart', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ running: true, address: null, last_error: null, restarts: ++restarts }),
+  }));
+
+  await page.goto('/#/services');
+  await expect(page.locator('button[data-restart="heartbeat"]')).toBeVisible();
+  await expect(page.locator('p[data-svc-state="heartbeat"]')).toContainText('last error: no start-service export');
+  await page.locator('button[data-restart="heartbeat"]').click();
+  await expect(page.locator('p[data-svc-state="heartbeat"]')).toContainText('running');
+  await expect(page.locator('p[data-svc-state="heartbeat"]')).toContainText('restarts: 1');
+});
+
 test('dev panel shows watcher paths and reload result', async ({ page }) => {
   await page.route('http://127.0.0.1:8787/dev/status', route => route.fulfill({
     status: 200,

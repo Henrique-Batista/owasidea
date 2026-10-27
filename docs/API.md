@@ -107,8 +107,9 @@ owasidea_plugin_fuel_total{plugin="notes"} 24510
 ```
 
 - Instrumented paths: `POST /plugin/{name}/call`, `POST /plugin/{name}/service/start`,
-  `GET /plugin/{name}/service/status`, `POST /plugin/{name}/service/stop`, and
-  `* /app/{name}` (executable `wasi:http` plugins).
+  `GET /plugin/{name}/service/status`, `POST /plugin/{name}/service/stop`,
+  `POST /plugin/{name}/service/restart`, and `* /app/{name}` (executable
+  `wasi:http` plugins).
 - `requests` counts every instrumented operation, including failed ones;
   `errors` counts non-2xx responses, dispatcher errors, and guest failures.
 - `latency_ms_sum` / `latency_ms_count` are a counter pair, so average latency is
@@ -137,10 +138,29 @@ owasidea_plugin_fuel_total{plugin="notes"} 24510
 - `POST /plugin/{name}/service/start` → generic service start.
 - `POST /plugin/{name}/service/stop` → generic service stop.
 - `GET /plugin/{name}/service/status` → generic service status.
+- `POST /plugin/{name}/service/restart` → drop the live instance, then start a
+  fresh one; returns the same body as `service/status`. Accepts an optional
+  `{ "region_json": "" }` body.
 
 Generic services keep one component instance between start/status/stop. Start is
-idempotent; stop drops the instance. Hot reload returns `409` while service is
-running; stop it, reload, then start again.
+idempotent; stop drops the instance. Restart drops the instance first, so guest
+state and sockets are recreated; it returns `409` when the plugin is not
+`service`/`hybrid` or when a concurrent start made the restart inconsistent, and
+`404` for an unknown plugin. Hot reload returns `409` while service is running;
+stop it, reload, then start or restart again.
+
+Status response:
+
+```json
+{ "running": true, "address": "127.0.0.1:9000", "last_error": null, "restarts": 1 }
+```
+
+- `address` is populated when the start export returns a bare `host:port`.
+- `last_error` keeps the reason the last start attempt failed (guest error,
+  timeout, missing `start-service` export); a successful start clears it, so it
+  also explains why a stopped service did not come up.
+- `restarts` counts explicit restarts that replaced a live instance. It survives
+  stop/start and is not reset by the host.
 
 - `POST /plugin/{name}/reload` → re-reads manifest from disk and re-instantiates
   the component; returns `{ "reloaded": "name" }` or 4xx/5xx on validation failure.

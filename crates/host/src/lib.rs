@@ -292,6 +292,22 @@ struct ServiceSession {
     store: Store<HostState>,
     instance: wasmtime::component::Instance,
     timeout_ms: u64,
+    address: Option<String>,
+}
+
+/// Lifecycle outcome for one generic service plugin. It outlives individual
+/// component instances so `/service/status` can explain the last failure after
+/// the instance has been dropped.
+#[derive(Debug, Clone, Default)]
+struct ServiceHealth {
+    last_error: Option<String>,
+    restarts: u64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum StartOutcome {
+    Started(String),
+    AlreadyRunning,
 }
 
 #[derive(Clone)]
@@ -301,6 +317,7 @@ struct AppState {
     ui_plugins: Arc<Vec<UiPluginInfo>>,
     tailcat_session: Arc<Mutex<Option<TailcatSession>>>,
     services: Arc<Mutex<HashMap<String, ServiceSession>>>,
+    service_health: Arc<Mutex<HashMap<String, ServiceHealth>>>,
     requests: Arc<std::sync::atomic::AtomicU64>,
     errors: Arc<std::sync::atomic::AtomicU64>,
     plugin_metrics: Arc<plugin_metrics::PluginMetricsMap>,
@@ -992,10 +1009,25 @@ struct CallReq {
     args: Vec<serde_json::Value>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Default)]
 struct ServiceStatusRes {
     running: bool,
     address: Option<String>,
+    /// Reason the last start attempt failed, if any. Cleared by a successful start.
+    last_error: Option<String>,
+    /// Explicit restarts that replaced a live instance.
+    restarts: u64,
+}
+
+impl ServiceStatusRes {
+    fn new(running: bool, address: Option<String>, health: &ServiceHealth) -> Self {
+        Self {
+            running,
+            address,
+            last_error: health.last_error.clone(),
+            restarts: health.restarts,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -1542,6 +1574,23 @@ async fn call_export(
     result
 }
 
+/// Accept a start output that is a bare `host:port` as the service address.
+/// Anything else (for example "service started") is not an address.
+fn service_address(output: &str) -> Option<String> {
+    let candidate = output.trim();
+    if candidate.is_empty() {
+        return None;
+    }
+    if candidate.parse::<SocketAddr>().is_ok() {
+        return Some(candidate.to_string());
+    }
+    let (host, port) = candidate.rsplit_once(':')?;
+    if host.is_empty() || host.chars().any(char::is_whitespace) || port.parse::<u16>().is_err() {
+        return None;
+    }
+    Some(candidate.to_string())
+}
+
 async fn service_start_generic(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
@@ -1556,18 +1605,74 @@ async fn service_start_generic(
             format!("plugin {name} is not a stateful service"),
         ));
     }
-    let mut sessions = state.services.lock().await;
-    if sessions.contains_key(&name) {
-        record_plugin_metric(&state, &name, true, 0, 0);
-        return Ok(Json(OutputRes {
-            output: "already running".to_string(),
-        }));
-    }
     let region_json = if req.region_json.trim().is_empty() {
         default_region_json()
     } else {
         req.region_json
     };
+    match start_service_session(&state, &name, p, region_json).await? {
+        StartOutcome::Started(output) => Ok(Json(OutputRes { output })),
+        StartOutcome::AlreadyRunning => Ok(Json(OutputRes {
+            output: "already running".to_string(),
+        })),
+    }
+}
+
+/// Stop by dropping the instance, then start a fresh one (PX-08).
+async fn service_restart_generic(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+    body: Option<Json<ServiceStartReq>>,
+) -> Result<Json<ServiceStatusRes>, (StatusCode, String)> {
+    let p = state
+        .plugin(&name)
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
+    if !matches!(p.manifest.kind.as_str(), "service" | "hybrid") {
+        return Err((
+            StatusCode::CONFLICT,
+            format!(
+                "plugin {name} is not a stateful service; restart requires type service or hybrid"
+            ),
+        ));
+    }
+    let region_json = body
+        .map(|Json(req)| req.region_json)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(default_region_json);
+
+    // Drop the live instance exactly like `/service/stop`; the next start gets
+    // fresh guest state and sockets.
+    let dropped = state.services.lock().await.remove(&name).is_some();
+    match start_service_session(&state, &name, p, region_json).await? {
+        StartOutcome::Started(_) => {}
+        StartOutcome::AlreadyRunning => {
+            return Err((
+                StatusCode::CONFLICT,
+                format!("plugin {name} was started concurrently; restart aborted"),
+            ));
+        }
+    }
+    {
+        let mut health = state.service_health.lock().await;
+        let entry = health.entry(name.clone()).or_default();
+        entry.last_error = None;
+        if dropped {
+            entry.restarts += 1;
+        }
+    }
+    tracing::info!(plugin = %name, replaced = dropped, "service restarted");
+    service_status_impl(&state, &name).await
+}
+
+/// Instantiate and start one service instance. Records `last_error` for
+/// `/service/status` and one PX-07 metric per attempt.
+async fn start_service_session(
+    state: &AppState,
+    name: &str,
+    p: Arc<PluginRuntime>,
+    region_json: String,
+) -> Result<StartOutcome, (StatusCode, String)> {
+    let start = std::time::Instant::now();
     let timeout_ms = p.manifest.permissions.resources.timeout_ms.unwrap_or(30000);
     let rid = state
         .requests
@@ -1580,76 +1685,94 @@ async fn service_start_generic(
         .max_fuel
         .unwrap_or(1_000_000_000);
     let mut fuel_used = 0u64;
-    let start = std::time::Instant::now();
-    let work = async {
-        let (mut store, instance) = instantiate(&state.engine, p.as_ref())
-            .await
-            .map_err(internal)?;
-        store.data_mut().request_id = rid;
-        for candidate in ["start-service", "start-server"] {
-            if let Some(func) = instance.get_func(&mut store, candidate) {
-                let ty = func.ty(&store);
-                let mut params = Vec::new();
-                let parameter_types: Vec<_> = ty.params().collect();
-                if parameter_types.len() > 1 {
-                    return Err((
-                        StatusCode::BAD_REQUEST,
-                        format!("{candidate} may accept zero or one string argument"),
-                    ));
-                }
-                if let Some((_, param_type)) = parameter_types.first() {
-                    params.push(
-                        json_to_val(param_type, &serde_json::Value::String(region_json.clone()))
-                            .map_err(|error| (StatusCode::BAD_REQUEST, error))?,
-                    );
-                }
-                let mut results = ty.results().map(|ty| default_val(&ty)).collect::<Vec<_>>();
-                func.call_async(&mut store, &params, &mut results)
-                    .await
-                    .map_err(internal)?;
-                fuel_used = store
-                    .get_fuel()
-                    .map(|remaining| initial_fuel.saturating_sub(remaining))
-                    .unwrap_or(0);
-                if let Some(Val::Result(Err(error))) = results.first() {
-                    let error = error
-                        .as_deref()
-                        .map(val_to_json)
-                        .unwrap_or(serde_json::Value::Null);
-                    return Err((StatusCode::BAD_REQUEST, error.to_string()));
-                }
-                let output_value = match results.first() {
-                    Some(Val::Result(Ok(Some(value)))) => Some(val_to_json(value)),
-                    Some(value) => Some(val_to_json(value)),
-                    None => None,
-                };
-                let out = output_value
-                    .and_then(|value| value.as_str().map(str::to_string))
-                    .unwrap_or_else(|| "started".to_string());
-                return Ok::<_, (StatusCode, String)>((store, instance, out));
-            }
+    let result: Result<StartOutcome, (StatusCode, String)> = async {
+        let mut sessions = state.services.lock().await;
+        if sessions.contains_key(name) {
+            return Ok(StartOutcome::AlreadyRunning);
         }
-        Err((StatusCode::NOT_FOUND, "no start-service export".to_string()))
-    };
-    let result =
+        let work = async {
+            let (mut store, instance) = instantiate(&state.engine, p.as_ref())
+                .await
+                .map_err(internal)?;
+            store.data_mut().request_id = rid;
+            for candidate in ["start-service", "start-server"] {
+                if let Some(func) = instance.get_func(&mut store, candidate) {
+                    let ty = func.ty(&store);
+                    let mut params = Vec::new();
+                    let parameter_types: Vec<_> = ty.params().collect();
+                    if parameter_types.len() > 1 {
+                        return Err((
+                            StatusCode::BAD_REQUEST,
+                            format!("{candidate} may accept zero or one string argument"),
+                        ));
+                    }
+                    if let Some((_, param_type)) = parameter_types.first() {
+                        params.push(
+                            json_to_val(
+                                param_type,
+                                &serde_json::Value::String(region_json.clone()),
+                            )
+                            .map_err(|error| (StatusCode::BAD_REQUEST, error))?,
+                        );
+                    }
+                    let mut results = ty.results().map(|ty| default_val(&ty)).collect::<Vec<_>>();
+                    func.call_async(&mut store, &params, &mut results)
+                        .await
+                        .map_err(internal)?;
+                    fuel_used = store
+                        .get_fuel()
+                        .map(|remaining| initial_fuel.saturating_sub(remaining))
+                        .unwrap_or(0);
+                    if let Some(Val::Result(Err(error))) = results.first() {
+                        let error = error
+                            .as_deref()
+                            .map(val_to_json)
+                            .unwrap_or(serde_json::Value::Null);
+                        return Err((StatusCode::BAD_REQUEST, error.to_string()));
+                    }
+                    let output_value = match results.first() {
+                        Some(Val::Result(Ok(Some(value)))) => Some(val_to_json(value)),
+                        Some(value) => Some(val_to_json(value)),
+                        None => None,
+                    };
+                    let out = output_value
+                        .and_then(|value| value.as_str().map(str::to_string))
+                        .unwrap_or_else(|| "started".to_string());
+                    return Ok::<_, (StatusCode, String)>((store, instance, out));
+                }
+            }
+            Err((StatusCode::NOT_FOUND, "no start-service export".to_string()))
+        };
         match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), work).await {
             Ok(Ok((store, instance, output))) => {
                 sessions.insert(
-                    name.clone(),
+                    name.to_string(),
                     ServiceSession {
                         store,
                         instance,
                         timeout_ms,
+                        address: service_address(&output),
                     },
                 );
-                Ok(Json(OutputRes { output }))
+                Ok(StartOutcome::Started(output))
             }
             Ok(Err(error)) => Err(error),
             Err(_) => Err((StatusCode::GATEWAY_TIMEOUT, "request timed out".to_string())),
-        };
+        }
+    }
+    .await;
+    {
+        // Never hold the sessions lock while taking the health lock.
+        let mut health = state.service_health.lock().await;
+        let entry = health.entry(name.to_string()).or_default();
+        match &result {
+            Ok(_) => entry.last_error = None,
+            Err((_, message)) => entry.last_error = Some(message.clone()),
+        }
+    }
     record_plugin_metric(
-        &state,
-        &name,
+        state,
+        name,
         result.is_ok(),
         start.elapsed().as_millis() as u64,
         fuel_used,
@@ -1703,12 +1826,15 @@ async fn service_status_impl(
     if state.plugin(name).is_none() {
         return Err((StatusCode::NOT_FOUND, format!("unknown plugin {name}")));
     }
+    // Copy the lifecycle record before locking sessions (lock order:
+    // service_health then services is never held simultaneously).
+    let health = {
+        let health = state.service_health.lock().await;
+        health.get(name).cloned().unwrap_or_default()
+    };
     let mut sessions = state.services.lock().await;
     let Some(session) = sessions.get_mut(name) else {
-        return Ok(Json(ServiceStatusRes {
-            running: false,
-            address: None,
-        }));
+        return Ok(Json(ServiceStatusRes::new(false, None, &health)));
     };
     for candidate in ["service-status", "server-status"] {
         if let Some(func) = session.instance.get_func(&mut session.store, candidate) {
@@ -1736,16 +1862,18 @@ async fn service_status_impl(
                     _ => None,
                 })
                 .unwrap_or(true);
-            return Ok(Json(ServiceStatusRes {
+            return Ok(Json(ServiceStatusRes::new(
                 running,
-                address: None,
-            }));
+                session.address.clone(),
+                &health,
+            )));
         }
     }
-    Ok(Json(ServiceStatusRes {
-        running: true,
-        address: None,
-    }))
+    Ok(Json(ServiceStatusRes::new(
+        true,
+        session.address.clone(),
+        &health,
+    )))
 }
 
 async fn echo_udp(
@@ -1927,6 +2055,7 @@ async fn stop_service(
     Ok(Json(ServiceStatusRes {
         running: false,
         address: None,
+        ..Default::default()
     }))
 }
 
@@ -1935,10 +2064,7 @@ async fn service_status(
 ) -> Result<Json<ServiceStatusRes>, (StatusCode, String)> {
     let mut guard = state.tailcat_session.lock().await;
     let Some(session) = guard.as_mut() else {
-        return Ok(Json(ServiceStatusRes {
-            running: false,
-            address: None,
-        }));
+        return Ok(Json(ServiceStatusRes::default()));
     };
     ensure_ticker(&state, session);
     let status = session
@@ -1952,6 +2078,7 @@ async fn service_status(
     Ok(Json(ServiceStatusRes {
         running,
         address: session.address.clone(),
+        ..Default::default()
     }))
 }
 
@@ -2971,6 +3098,7 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
         ui_plugins: Arc::new(ui_plugins),
         tailcat_session: Arc::new(Mutex::new(None)),
         services: Arc::new(Mutex::new(HashMap::new())),
+        service_health: Arc::new(Mutex::new(HashMap::new())),
         requests: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         errors: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         plugin_metrics: Arc::new(plugin_metrics),
@@ -3047,6 +3175,10 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
         .route("/plugin/{name}/service/start", post(service_start_generic))
         .route("/plugin/{name}/service/stop", post(service_stop_generic))
         .route("/plugin/{name}/service/status", get(service_status_generic))
+        .route(
+            "/plugin/{name}/service/restart",
+            post(service_restart_generic),
+        )
         .route("/plugin/{name}/bind-udp", post(bind_udp))
         .route("/plugin/{name}/parse-address", post(parse_address))
         .route("/plugin/{name}/dial-tcp", post(dial_tcp))
@@ -3217,6 +3349,7 @@ mod tests {
             ui_plugins: Arc::new(Vec::new()),
             tailcat_session: Arc::new(Mutex::new(None)),
             services: Arc::new(Mutex::new(HashMap::new())),
+            service_health: Arc::new(Mutex::new(HashMap::new())),
             requests: Arc::new(std::sync::atomic::AtomicU64::new(5)),
             errors: Arc::new(std::sync::atomic::AtomicU64::new(2)),
             plugin_metrics: Arc::new(plugin_metrics),
@@ -3226,6 +3359,34 @@ mod tests {
             dev_last_reload: Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
             manifests_dir: PathBuf::from("."),
         }
+    }
+
+    #[test]
+    fn service_address_accepts_bare_host_port_only() {
+        assert_eq!(
+            service_address("127.0.0.1:9000"),
+            Some("127.0.0.1:9000".to_string())
+        );
+        assert_eq!(
+            service_address("[::1]:9000"),
+            Some("[::1]:9000".to_string())
+        );
+        assert_eq!(service_address("heartbeat service started"), None);
+        assert_eq!(service_address("started on 127.0.0.1:9000"), None);
+        assert_eq!(service_address(""), None);
+    }
+
+    #[test]
+    fn service_status_exposes_failure_reason_and_restarts() {
+        let health = ServiceHealth {
+            last_error: Some("no start-service export".to_string()),
+            restarts: 2,
+        };
+        let value = serde_json::to_value(ServiceStatusRes::new(false, None, &health)).unwrap();
+        assert_eq!(value["running"], false);
+        assert_eq!(value["address"], serde_json::Value::Null);
+        assert_eq!(value["last_error"], "no start-service export");
+        assert_eq!(value["restarts"], 2);
     }
 
     #[tokio::test]
