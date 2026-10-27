@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use axum::{
     body::Body,
-    extract::{Path as AxumPath, State},
+    extract::{Path as AxumPath, Query, State},
     http::{header, HeaderValue, Method, StatusCode},
     middleware,
     response::{
@@ -214,19 +214,66 @@ struct PluginRuntime {
 const MAX_LOG_ENTRIES: usize = 1_000;
 const MAX_LOG_CHARS: usize = 1024;
 
-#[derive(Default)]
+#[derive(Default, Clone, Debug, Serialize, Deserialize)]
+pub struct LogEntry {
+    pub ts: u64,
+    pub level: String,
+    pub plugin: String,
+    pub request_id: u64,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fields: Option<serde_json::Value>,
+}
+
 struct LogBuffer {
+    plugin: String,
     next_id: u64,
-    entries: VecDeque<(u64, String)>,
+    entries: VecDeque<(u64, LogEntry)>,
 }
 
 impl LogBuffer {
-    fn push(&mut self, message: String) {
+    fn new(plugin: &str) -> Self {
+        Self {
+            plugin: plugin.to_string(),
+            next_id: 0,
+            entries: VecDeque::new(),
+        }
+    }
+
+    fn push(
+        &mut self,
+        level: &str,
+        message: String,
+        request_id: u64,
+        fields: Option<serde_json::Value>,
+    ) {
         self.next_id += 1;
         let message = message.chars().take(MAX_LOG_CHARS).collect();
-        self.entries.push_back((self.next_id, message));
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let entry = LogEntry {
+            ts,
+            level: level.to_string(),
+            plugin: self.plugin.clone(),
+            request_id,
+            message,
+            fields,
+        };
+        self.entries.push_back((self.next_id, entry));
         if self.entries.len() > MAX_LOG_ENTRIES {
             self.entries.pop_front();
+        }
+    }
+
+    fn level_rank(level: &str) -> i32 {
+        match level.to_lowercase().as_str() {
+            "debug" => 0,
+            "info" => 1,
+            "warn" | "warning" => 2,
+            "error" => 3,
+            _ => 1,
         }
     }
 }
@@ -289,6 +336,7 @@ struct HostState {
     http_hooks: AllowlistHooks,
     limits: wasmtime::StoreLimits,
     _instance_permit: tokio::sync::OwnedSemaphorePermit,
+    request_id: u64,
 }
 
 #[derive(Clone)]
@@ -468,9 +516,10 @@ fn build_linker(engine: &Engine, plugin: &PluginRuntime) -> Result<Linker<HostSt
             .map_err(|e| anyhow!("missing host-log interface: {e}"))?;
         inst.func_wrap(
             "log",
-            move |_store: wasmtime::StoreContextMut<'_, HostState>, (msg,): (String,)| {
+            move |store: wasmtime::StoreContextMut<'_, HostState>, (msg,): (String,)| {
+                let rid = store.data().request_id;
                 if let Ok(mut l) = logs.try_lock() {
-                    l.push(msg);
+                    l.push("info", msg, rid, None);
                 }
                 Ok(())
             },
@@ -679,6 +728,7 @@ async fn create_store(engine: &Engine, plugin: &PluginRuntime) -> Result<Store<H
                 b.build()
             },
             _instance_permit: permit,
+            request_id: 0,
         },
     );
     store.limiter(|state| &mut state.limits);
@@ -1002,9 +1052,15 @@ struct OutputRes {
     output: String,
 }
 
+#[derive(Serialize, Deserialize)]
+struct LogsQuery {
+    level: Option<String>,
+}
+
 #[derive(Serialize)]
 struct LogsRes {
     logs: Vec<String>,
+    entries: Vec<LogEntry>,
 }
 
 #[derive(Serialize)]
@@ -1152,24 +1208,25 @@ async fn permissions_diff(
 async fn plugin_logs(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
+    Query(q): Query<LogsQuery>,
 ) -> Result<Json<LogsRes>, (StatusCode, String)> {
     let p = state
         .plugin(&name)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
-    let logs = p
-        .logs
-        .lock()
-        .await
-        .entries
-        .iter()
-        .map(|(_, message)| message.clone())
-        .collect();
-    Ok(Json(LogsRes { logs }))
+    let guard = p.logs.lock().await;
+    let mut entries: Vec<LogEntry> = guard.entries.iter().map(|(_, e)| e.clone()).collect();
+    if let Some(lv) = q.level.as_deref() {
+        let thr = LogBuffer::level_rank(lv);
+        entries.retain(|e| LogBuffer::level_rank(&e.level) >= thr);
+    }
+    let logs = entries.iter().map(|e| e.message.clone()).collect();
+    Ok(Json(LogsRes { logs, entries }))
 }
 
 async fn plugin_logs_stream(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
+    Query(q): Query<LogsQuery>,
 ) -> Result<
     Sse<impl futures::Stream<Item = Result<Event, std::convert::Infallible>>>,
     (StatusCode, String),
@@ -1178,6 +1235,7 @@ async fn plugin_logs_stream(
         .plugin(&name)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
     let logs = p.logs.clone();
+    let level_filter = q.level.clone();
     let stream = async_stream::stream! {
         let mut last = 0u64;
         loop {
@@ -1190,8 +1248,16 @@ async fn plugin_logs_stream(
                     .collect()
             };
             if !snapshot.is_empty() {
-                for (id, message) in snapshot {
-                    yield Ok(Event::default().id(id.to_string()).data(message));
+                for (id, entry) in snapshot {
+                    if let Some(lv) = level_filter.as_deref() {
+                        let thr = LogBuffer::level_rank(lv);
+                        if LogBuffer::level_rank(&entry.level) < thr {
+                            last = id;
+                            continue;
+                        }
+                    }
+                    let data = serde_json::to_string(&entry).unwrap_or_default();
+                    yield Ok(Event::default().event("log").id(id.to_string()).data(data));
                     last = id;
                 }
             }
@@ -1311,10 +1377,15 @@ async fn greet(
         .plugin(&name)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
     let timeout_ms = p.manifest.permissions.resources.timeout_ms.unwrap_or(30000);
+    let rid = state
+        .requests
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        + 1;
     let work = async {
         let (mut store, instance) = instantiate(&state.engine, p.as_ref())
             .await
             .map_err(internal)?;
+        store.data_mut().request_id = rid;
         let func = instance
             .get_typed_func::<(String,), (String,)>(&mut store, "greet")
             .map_err(internal)?;
@@ -1340,10 +1411,15 @@ async fn complete(
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
     let timeout_ms = p.manifest.permissions.resources.timeout_ms.unwrap_or(30000);
     let prompt = req.prompt.clone();
+    let rid = state
+        .requests
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        + 1;
     let work = async {
         let (mut store, instance) = instantiate(&state.engine, p.as_ref())
             .await
             .map_err(internal)?;
+        store.data_mut().request_id = rid;
         let func = instance
             .get_typed_func::<(String,), (Result<String, String>,)>(&mut store, "complete")
             .map_err(internal)?;
@@ -1371,10 +1447,15 @@ async fn call_export(
         .plugin(&name)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
     let timeout_ms = p.manifest.permissions.resources.timeout_ms.unwrap_or(30000);
+    let rid = state
+        .requests
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        + 1;
     let work = async {
         let (mut store, instance) = instantiate(&state.engine, p.as_ref())
             .await
             .map_err(internal)?;
+        store.data_mut().request_id = rid;
         // Resolve function: top-level first, then inside exported interfaces.
         let func = if let Some(f) = instance.get_func(&mut store, &req.function) {
             f
@@ -1459,10 +1540,15 @@ async fn service_start_generic(
         req.region_json
     };
     let timeout_ms = p.manifest.permissions.resources.timeout_ms.unwrap_or(30000);
+    let rid = state
+        .requests
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        + 1;
     let work = async {
         let (mut store, instance) = instantiate(&state.engine, p.as_ref())
             .await
             .map_err(internal)?;
+        store.data_mut().request_id = rid;
         for candidate in ["start-service", "start-server"] {
             if let Some(func) = instance.get_func(&mut store, candidate) {
                 let ty = func.ty(&store);
@@ -2750,7 +2836,7 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
                     .map(|permission| permission.namespace.as_str())
                     .unwrap_or(&manifest.name),
             )?)),
-            logs: Arc::new(Mutex::new(LogBuffer::default())),
+            logs: Arc::new(Mutex::new(LogBuffer::new(&manifest.name))),
             instance_slots: instance_slots(&manifest)?,
             http_pre: None,
         };
@@ -2932,17 +3018,17 @@ mod tests {
 
     #[test]
     fn plugin_log_buffer_is_bounded_and_truncates_messages() {
-        let mut logs = LogBuffer::default();
+        let mut logs = LogBuffer::new("notes");
         for id in 0..=MAX_LOG_ENTRIES {
-            logs.push(format!("log-{id}"));
+            logs.push("info", format!("log-{id}"), 0, None);
         }
         assert_eq!(logs.entries.len(), MAX_LOG_ENTRIES);
         assert_eq!(logs.entries.front().unwrap().0, 2);
         assert_eq!(logs.entries.back().unwrap().0, (MAX_LOG_ENTRIES + 1) as u64);
 
-        logs.push("x".repeat(MAX_LOG_CHARS + 10));
+        logs.push("info", "x".repeat(MAX_LOG_CHARS + 10), 0, None);
         assert_eq!(
-            logs.entries.back().unwrap().1.chars().count(),
+            logs.entries.back().unwrap().1.message.chars().count(),
             MAX_LOG_CHARS
         );
     }
