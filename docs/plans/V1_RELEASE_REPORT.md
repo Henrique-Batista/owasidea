@@ -191,13 +191,18 @@ os complementa.
 | `scripts/test-examples.sh` | **hello** build + smoke 2/2 + UI 3/3; **notes** build + smoke 4/4 + UI 4/4; **ticker** build + smoke (start/status/stop) + UI 4/4 |
 | Ponto de capability (`notes` sem `kv`) | build rejeitado: `host-kv WIT import and configured kv permission must both be present` |
 | TUI em pty (`dev` no `hello`) | host e Vite capturados no Output; `r`, `R` (rebuild + reload), `s` (serviço `heartbeat`: running → stopped), chamada `notes.greet` com resultado, watcher com hot reload, `q` sem processos órfãos |
+| Shipyard `build` | pass; 11 manifests assinados, incluindo Go, TypeScript, C#, C, C++ e composição |
+| Shipyard `smoke --no-build` | pass; 19 checks (chamadas em 6 linguagens, `wasi:http`, serviço) |
+| Shipyard `test --no-build --no-smoke` | pass; Playwright **7/7** |
+| Templates Rust, Go e TypeScript | `scripts/test-templates.sh --langs rust,go,typescript` pass; `validate` OK |
+| `owasidea doctor` | `go`, `jco`, wasi-sdk e workload `wasi-experimental` ok; faltam só opcionais (`componentize-dotnet`, `trunk`) |
 
 ### 10.4 Não verificado nesta rodada (limites explícitos)
 
-- **Shipyard `build`/`smoke`/`test` não foram reexecutados**: a máquina tem
-  `go` (`/usr/sbin/go`) sem `componentize-go` e sem `jco`. `validate` passa
-  porque lê os manifests já gerados. Rodar `owasidea build` aqui falha antes de
-  compilar os plugins Go.
+- **Shipyard** foi reexecutado nesta rodada e passou (seção 10.3) depois de
+  instalar `componentize-go` 0.5.2 e `jco` 1.39.0. O `.deb` do Shipyard não foi
+  reconstruído nesta rodada; o resultado do G5 continua sendo a referência de
+  empacotamento.
 - **Windows**: não executado (igual ao G2).
 - **CI remoto**: não há remote configurado neste repositório
   (`git remote -v` vazio). Por isso o push não foi possível (ver 10.5).
@@ -206,14 +211,10 @@ os complementa.
 
 ### 10.5 Push
 
-Nenhum remote está configurado. O push de `release/1.0` e da tag `v1.0.0` precisa
-da URL do remote. Comando previsto, depois que o remote existir:
+Remote: <https://github.com/Henrique-Batista/owasidea>. O `main` remoto tinha
+apenas um commit inicial (`339d967`, `LICENSE` MIT); a história foi integrada em
+`release/1.0` com `git merge --allow-unrelated-histories`, sem force-push, e o
+`main` local avançou por fast-forward.
 
-```bash
-git remote add origin <url>
-git push -u origin release/1.0
-git push origin v1.0.0
-```
-
-A tag `v1.0.0` foi recriada no commit final desta release (antes apontava para
-`c4aaf80`, tag local nunca publicada).
+Publicados: `main`, `release/1.0` e a tag `v1.0.0` (recriada no commit final;
+antes apontava para `c4aaf80`, tag local nunca publicada).
