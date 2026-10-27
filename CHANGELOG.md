@@ -22,6 +22,16 @@ below; see [`docs/UPDATER.md`](docs/UPDATER.md).
 
 ### Fixed
 
+- Typed POC routes (`dial-tcp`, `start-server`, `bind-udp`, `tls-probe`,
+  `dial-echo`, `echo-udp`, `parse-address`) run under the manifest
+  `timeout_ms` (default 10 s), answer `504` instead of hanging, and release the
+  `max_instances` slot. `/app/{name}` now filters guest response headers to an
+  allowlist, drops `set-cookie`/`access-control-*`, adds `nosniff` and CSP
+  `sandbox`, and serves HTML/JS/CSS as `text/plain`. The optional tailcat routes
+  are registered only when the plugin is loaded or
+  `OWASIDEA_ENABLE_TAILCAT=1` is set. `owasidea build` propagates
+  `render_targets` failures instead of reporting a stale runtime descriptor as a
+  successful build (G1).
 - UI plugin bridge binds the handshake to the verified document: the dashboard
   mounts the iframe with a one-time `__owasidea_bridge` nonce, validates
   `event.source`/nonce on both sides, arms only the first `load`, and closes the

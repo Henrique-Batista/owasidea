@@ -23,16 +23,28 @@
 - **WASI HTTP:** Outbound HTTP is denied unless exact hosts are listed in
   `permissions.http.outbound`; wildcard `*` is rejected. Executable HTTP
   components run through embedded `wasmtime-wasi-http`, not a sidecar with
-  ambient network access.
+  ambient network access. Guest responses proxied through `/app/{name}` are
+  header-filtered to an allowlist (`content-type`, `content-length`,
+  `cache-control`, `etag`, `last-modified`, `expires`); `set-cookie`,
+  `access-control-*` and framing headers are dropped, `nosniff` plus CSP
+  `sandbox` are added, and HTML/JS/CSS/SVG are served as `text/plain` so a guest
+  cannot execute script or set cookies on the host origin.
 - **Host KV/log:** KV imports require a matching namespace/access permission;
   read-only plugins cannot persist writes. Plugin logs use bounded per-plugin
   ring buffers with per-message truncation.
 - **Process/environment:** Plugins do not inherit host environment variables,
   stdin, stdout, or stderr. Tailcat's optional network hints are allowlisted and
-  passed only to that named integration.
+  passed only to that named integration. Tailcat's hardcoded service routes are
+  registered only when the plugin is loaded or `OWASIDEA_ENABLE_TAILCAT=1` is
+  set, so a generic host does not expose that optional integration.
 - **Resources:** Component stores apply manifest fuel and memory limits; a
   per-plugin semaphore enforces `max_instances`, and host-driven calls/HTTP
-  response startup have request timeouts.
+  response startup have request timeouts. The typed POC routes (`dial-tcp`,
+  `start-server`, `bind-udp`, `tls-probe`, `dial-echo`, `echo-udp`,
+  `parse-address`) use the manifest `timeout_ms` (default 10 s) and answer `504`;
+  a timed-out call drops its store and returns the instance slot. These
+  timeouts interrupt a guest that yields (I/O, timers, async imports); a purely
+  CPU-bound guest is stopped by `max_fuel`, not by wall-clock time.
 - **Integrity/signing:** SHA-256 detects accidental/tampered artifact changes.
   Ed25519 `owasidea-manifest-v1` signatures authenticate effective manifest
   permissions plus WASI component bytes. UI manifests sign the complete asset
