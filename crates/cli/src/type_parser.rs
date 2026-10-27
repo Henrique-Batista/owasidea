@@ -239,6 +239,24 @@ pub fn parse_type(input: &str) -> Result<TypeSpec, ParseError> {
     Ok(ty)
 }
 
+pub fn default_json(ty: &TypeSpec) -> serde_json::Value {
+    match ty {
+        TypeSpec::Primitive(p) => match p.as_str() {
+            "bool" => serde_json::Value::Bool(false),
+            "string" | "char" => serde_json::Value::String(String::new()),
+            "f32" | "f64" => serde_json::json!(0.0),
+            _ => serde_json::json!(0),
+        },
+        TypeSpec::List(_) => serde_json::json!([]),
+        TypeSpec::Option(_) => serde_json::Value::Null,
+        TypeSpec::Result { .. } => serde_json::Value::Null,
+        TypeSpec::Tuple(items) => {
+            serde_json::Value::Array(items.iter().map(default_json).collect())
+        }
+        TypeSpec::Named { .. } => serde_json::Value::Null,
+    }
+}
+
 pub fn validate_type(path: &str, input: &str) -> Result<(), ParseError> {
     match parse_type(input) {
         Ok(_) => Ok(()),
