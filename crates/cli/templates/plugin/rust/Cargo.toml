@@ -10,9 +10,12 @@ crate-type = ["cdylib"]
 
 [dependencies]
 wit-bindgen = "0.41"
+owasidea = {{owasidea_dep}}
 
 [package.metadata.component]
 package = "poc:{{name}}"
+
 [package.metadata.component.target]
-path = "wit"
+# Generated from the #[owasidea::world]/#[owasidea::export] markers.
+path = ".owasidea/wit"
 world = "{{name}}"

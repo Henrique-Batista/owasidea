@@ -1,6 +1,6 @@
 wit_bindgen::generate!({
     world: "attr-example",
-    path: "wit",
+    path: ".owasidea/wit",
     generate_all,
 });
 

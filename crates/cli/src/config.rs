@@ -57,6 +57,15 @@ impl AppConfig {
                         anyhow::bail!("plugins.{}.fs[{}] must not be empty", name, i);
                     }
                 }
+                if let Some(source) = plugin.wit_source.as_deref() {
+                    if !matches!(source, "auto" | "wit" | "attributes") {
+                        anyhow::bail!(
+                            "plugins.{}.wit_source must be auto, wit or attributes (found {:?})",
+                            name,
+                            source
+                        );
+                    }
+                }
             }
         }
         if let Some(dev) = &self.dev {
@@ -262,6 +271,11 @@ pub struct PluginSection {
     pub persistent: bool,
     #[serde(default)]
     pub runtime: Option<String>,
+    /// Where the component contract comes from: `auto` (default), `wit`
+    /// (hand-written `wit/` or the Cargo metadata target path) or `attributes`
+    /// (generated from `#[owasidea::world]` / `#[owasidea::export]` markers).
+    #[serde(default)]
+    pub wit_source: Option<String>,
     #[serde(default)]
     pub ui_entry: Option<String>,
     #[serde(default)]

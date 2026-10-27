@@ -16,8 +16,8 @@ owasidea = { path = "../../crates/owasidea" }
 package = "poc:attr-example"
 
 [package.metadata.component.target]
-path = "wit"
+path = ".owasidea/wit"
 world = "attr-example"
 
 [package.metadata.component.target.dependencies]
-"poc:host" = { path = "wit/deps/host" }
+"poc:host" = { path = ".owasidea/wit/deps/host" }

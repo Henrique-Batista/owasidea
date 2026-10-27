@@ -28,6 +28,7 @@ mod type_parser;
 mod updater;
 mod validate;
 mod verify;
+mod wit_flow;
 mod wit_types;
 use config::*;
 use config_render::*;
@@ -1627,7 +1628,7 @@ fn cmd_plugin_new(
             _ => &[],
         };
         if !no_register {
-            register_plugin_config(config_path, &name, &lang, &kind, &runtime, ui_build)?;
+            register_plugin_config(config_path, &name, &lang, &kind, &runtime, ui_build, None)?;
         }
         if json {
             println!(
@@ -1649,19 +1650,16 @@ fn cmd_plugin_new(
         anyhow::bail!("service scaffolding currently supports Rust; other languages can use the documented WIT lifecycle contract");
     }
 
-    std::fs::create_dir_all(dir.join("wit"))?;
     std::fs::create_dir_all(dir.join("src"))?;
-    let wit = if kind == "service" {
-        templates::render(templates::WIT_SERVICE, &[("name", &name)])
-    } else {
-        templates::render(templates::WIT_LIBRARY, &[("name", &name)])
-    };
-    std::fs::write(dir.join("wit").join(format!("{name}.wit")), wit)?;
     match lang.as_str() {
         "rust" => {
+            let dependency = owasidea_macro_dependency(&dir);
             std::fs::write(
                 dir.join("Cargo.toml"),
-                templates::render(templates::RUST_CARGO, &[("name", &name)]),
+                templates::render(
+                    templates::RUST_CARGO,
+                    &[("name", &name), ("owasidea_dep", &dependency)],
+                ),
             )?;
             let source = if kind == "service" {
                 templates::render(templates::RUST_LIB_SERVICE, &[("name", &name)])
@@ -1669,8 +1667,18 @@ fn cmd_plugin_new(
                 templates::render(templates::RUST_LIB, &[("name", &name)])
             };
             std::fs::write(dir.join("src").join("lib.rs"), source)?;
+            // Seed the artifact so the plugin builds and the editor resolves
+            // bindings before the first `owasidea build`.
+            wit_flow::generate(&dir, &name, "rust", "0.1.0")?;
         }
         "go" => {
+            let wit = if kind == "service" {
+                templates::render(templates::WIT_SERVICE, &[("name", &name)])
+            } else {
+                templates::render(templates::WIT_LIBRARY, &[("name", &name)])
+            };
+            std::fs::create_dir_all(dir.join("wit"))?;
+            std::fs::write(dir.join("wit").join(format!("{name}.wit")), wit)?;
             std::fs::write(
                 dir.join("go.mod"),
                 templates::render(templates::GO_MOD, &[("name", &name)]),
@@ -1684,6 +1692,13 @@ fn cmd_plugin_new(
             )?;
         }
         "typescript" | "javascript" => {
+            let wit = if kind == "service" {
+                templates::render(templates::WIT_SERVICE, &[("name", &name)])
+            } else {
+                templates::render(templates::WIT_LIBRARY, &[("name", &name)])
+            };
+            std::fs::create_dir_all(dir.join("wit"))?;
+            std::fs::write(dir.join("wit").join(format!("{name}.wit")), wit)?;
             std::fs::write(
                 dir.join("package.json"),
                 templates::render(templates::TS_PACKAGE_JSON, &[("name", &name)]),
@@ -1773,7 +1788,15 @@ fn cmd_plugin_new(
         ),
     )?;
     if !no_register {
-        register_plugin_config(config_path, &name, &lang, &kind, &runtime, &[])?;
+        register_plugin_config(
+            config_path,
+            &name,
+            &lang,
+            &kind,
+            &runtime,
+            &[],
+            (lang == "rust").then_some("attributes"),
+        )?;
     }
     if json {
         println!(
@@ -1899,6 +1922,23 @@ fn ensure_plugin_config_available(config_path: &Path, name: &str) -> anyhow::Res
     Ok(())
 }
 
+/// The macro crate ships with the framework checkout; an installed CLI falls
+/// back to the published version.
+fn owasidea_macro_dependency(plugin_dir: &Path) -> String {
+    let macros = Path::new(env!("CARGO_MANIFEST_DIR")).join("../owasidea");
+    let macros = macros.canonicalize().unwrap_or(macros);
+    if macros.is_dir() {
+        let plugin_dir = plugin_dir
+            .canonicalize()
+            .unwrap_or_else(|_| plugin_dir.to_path_buf());
+        if let Some(relative) = pathdiff::diff_paths(&macros, plugin_dir) {
+            let relative = relative.to_string_lossy().replace('\\', "/");
+            return format!("{{ path = \"{relative}\" }}");
+        }
+    }
+    "\"1.0.0\"".to_string()
+}
+
 fn register_plugin_config(
     config_path: &Path,
     name: &str,
@@ -1906,6 +1946,7 @@ fn register_plugin_config(
     kind: &str,
     runtime: &str,
     ui_build: &[&str],
+    wit_source: Option<&str>,
 ) -> anyhow::Result<()> {
     let mut config = if config_path.exists() {
         std::fs::read_to_string(config_path)?
@@ -1918,6 +1959,9 @@ fn register_plugin_config(
     config.push_str(&format!(
         "\n[plugins.\"{name}\"]\npath = \"plugins/{name}\"\nlanguage = \"{language}\"\ntype = \"{kind}\"\nruntime = \"{runtime}\"\n"
     ));
+    if let Some(source) = wit_source {
+        config.push_str(&format!("wit_source = \"{source}\"\n"));
+    }
     if kind == "ui" {
         config.push_str("ui_entry = \"index.html\"\n");
         if !ui_build.is_empty() {
@@ -2276,7 +2320,15 @@ fn cmd_build(
         match lang {
             "rust" => {
                 // Generate WIT from Rust attributes if present.
-                let _ = generate_wit(&plugin_dir);
+                if let Some(prepared) = wit_flow::prepare(
+                    &plugin_dir,
+                    name,
+                    lang,
+                    p.wit_source.as_deref(),
+                    p.version.as_deref().unwrap_or("0.1.0"),
+                )? {
+                    println!("    {}", prepared.summary());
+                }
                 let status = std::process::Command::new("cargo")
                     .args(["component", "build", "--release"])
                     .current_dir(&plugin_dir)
@@ -2298,7 +2350,15 @@ fn cmd_build(
                 std::fs::copy(&src, &dst)?;
             }
             "go" => {
-                let _ = generate_wit(&plugin_dir);
+                if let Some(prepared) = wit_flow::prepare(
+                    &plugin_dir,
+                    name,
+                    lang,
+                    p.wit_source.as_deref(),
+                    p.version.as_deref().unwrap_or("0.1.0"),
+                )? {
+                    println!("    {}", prepared.summary());
+                }
                 let src = match go_build::component_source(&plugin_dir, name)? {
                     go_build::ComponentSource::Prebuilt(src) => {
                         println!(
@@ -2338,7 +2398,15 @@ fn cmd_build(
                 std::fs::copy(&src, &dst)?;
             }
             "typescript" | "javascript" => {
-                let _ = generate_wit(&plugin_dir);
+                if let Some(prepared) = wit_flow::prepare(
+                    &plugin_dir,
+                    name,
+                    lang,
+                    p.wit_source.as_deref(),
+                    p.version.as_deref().unwrap_or("0.1.0"),
+                )? {
+                    println!("    {}", prepared.summary());
+                }
                 ensure_npm_dependencies(&plugin_dir)?;
                 let status = external_command("npm")
                     .args(["run", "build"])
@@ -2368,7 +2436,15 @@ fn cmd_build(
                 }
             }
             "c" | "cpp" | "c++" => {
-                let _ = generate_wit(&plugin_dir);
+                if let Some(prepared) = wit_flow::prepare(
+                    &plugin_dir,
+                    name,
+                    lang,
+                    p.wit_source.as_deref(),
+                    p.version.as_deref().unwrap_or("0.1.0"),
+                )? {
+                    println!("    {}", prepared.summary());
+                }
                 let (wasi_sdk, adapter) = wasi_toolchain();
                 let (Some(wasi_sdk), Some(adapter)) = (wasi_sdk, adapter) else {
                     anyhow::bail!(
@@ -2394,7 +2470,15 @@ fn cmd_build(
                 }
             }
             "csharp" => {
-                let _ = generate_wit(&plugin_dir);
+                if let Some(prepared) = wit_flow::prepare(
+                    &plugin_dir,
+                    name,
+                    lang,
+                    p.wit_source.as_deref(),
+                    p.version.as_deref().unwrap_or("0.1.0"),
+                )? {
+                    println!("    {}", prepared.summary());
+                }
                 let dotnet =
                     tool_path("dotnet").unwrap_or_else(|| std::path::PathBuf::from("dotnet"));
                 let mut cmd = std::process::Command::new(&dotnet);
@@ -5438,6 +5522,25 @@ fn type_arg_to_wit(arg: &syn::GenericArgument) -> String {
     }
 }
 
+fn to_kebab_case(input: &str) -> String {
+    let mut out = String::new();
+    for (index, ch) in input.chars().enumerate() {
+        if ch == '_' {
+            if !out.ends_with('-') {
+                out.push('-');
+            }
+        } else if ch.is_uppercase() {
+            if index > 0 && !out.ends_with('-') {
+                out.push('-');
+            }
+            out.extend(ch.to_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
 fn parse_fn_sig(sig: &syn::Signature) -> ExportSig {
     let params = sig
         .inputs
@@ -5445,7 +5548,7 @@ fn parse_fn_sig(sig: &syn::Signature) -> ExportSig {
         .filter_map(|arg| {
             if let syn::FnArg::Typed(t) = arg {
                 let pname = match &*t.pat {
-                    syn::Pat::Ident(pi) => pi.ident.to_string(),
+                    syn::Pat::Ident(pi) => to_kebab_case(&pi.ident.to_string()),
                     _ => "arg".to_string(),
                 };
                 let ty = rust_type_to_wit(&t.ty);
@@ -5461,7 +5564,7 @@ fn parse_fn_sig(sig: &syn::Signature) -> ExportSig {
         syn::ReturnType::Type(_, ty) => format!(" -> {}", rust_type_to_wit(ty)),
     };
     ExportSig {
-        name: sig.ident.to_string(),
+        name: to_kebab_case(&sig.ident.to_string()),
         params,
         ret,
         is_async: sig.asyncness.is_some(),
@@ -5570,7 +5673,25 @@ fn parse_ts_params(raw: &str) -> String {
     out.join(", ")
 }
 
-pub fn generate_wit(plugin_dir: &Path) -> anyhow::Result<()> {
+pub(crate) const HOST_WIT: &str = "package poc:host@0.1.0;\n\ninterface host-kv {\n    get: func(key: string) -> option<string>;\n    set: func(key: string, value: string);\n}\n\ninterface host-log {\n    log: func(msg: string);\n}\n";
+
+/// A contract rendered from source markers, before it is written to disk.
+#[derive(Debug, Clone)]
+pub(crate) struct RenderedWit {
+    pub world: String,
+    pub content: String,
+    pub host_wit: Option<String>,
+    pub exports: usize,
+}
+
+/// Renders the WIT contract from `#[owasidea::world]`, `#[owasidea::export]`
+/// and host markers. Returns `None` when the sources carry no markers, so
+/// hand-written WIT keeps working unchanged.
+pub(crate) fn render_wit_source(
+    plugin_dir: &Path,
+    default_world: &str,
+    version: &str,
+) -> anyhow::Result<Option<RenderedWit>> {
     let src_dir = plugin_dir.join("src");
     let mut rs_files = Vec::new();
     collect_rs_files(&src_dir, &mut rs_files);
@@ -5900,10 +6021,10 @@ pub fn generate_wit(plugin_dir: &Path) -> anyhow::Result<()> {
         }
     }
 
-    let world = match world_name {
-        Some(w) => w,
-        None => return Ok(()),
-    };
+    if world_name.is_none() && exports.is_empty() && !host_log && !host_kv {
+        return Ok(None);
+    }
+    let world = world_name.unwrap_or_else(|| default_world.to_string());
 
     // dedup exports by name
     let mut seen = std::collections::BTreeSet::new();
@@ -5914,12 +6035,9 @@ pub fn generate_wit(plugin_dir: &Path) -> anyhow::Result<()> {
         }
     }
 
-    let wit_dir = plugin_dir.join("wit");
-    std::fs::create_dir_all(&wit_dir)?;
-    let wit_path = wit_dir.join(format!("{}.wit", world));
-
     let mut out = String::new();
-    out.push_str(&format!("package poc:{}@0.1.0;\n\n", world));
+    out.push_str("// Generated by owasidea from source attributes. Do not edit.\n");
+    out.push_str(&format!("package poc:{}@{};\n\n", world, version));
     out.push_str(&format!("world {} {{\n", world));
     if host_log {
         out.push_str("    import poc:host/host-log@0.1.0;\n");
@@ -5938,22 +6056,34 @@ pub fn generate_wit(plugin_dir: &Path) -> anyhow::Result<()> {
         ));
     }
     out.push_str("}\n");
-    std::fs::write(&wit_path, out)?;
 
-    if host_log || host_kv {
-        let deps_dir = wit_dir.join("deps").join("host");
+    Ok(Some(RenderedWit {
+        world,
+        content: out,
+        host_wit: (host_log || host_kv).then(|| HOST_WIT.to_string()),
+        exports: deduped.len(),
+    }))
+}
+
+/// Writes a rendered contract. Returns `true` when the file content changed,
+/// which lets the build report regeneration without rewriting unchanged files.
+pub(crate) fn write_wit(out_dir: &Path, rendered: &RenderedWit) -> anyhow::Result<bool> {
+    std::fs::create_dir_all(out_dir)?;
+    let wit_path = out_dir.join(format!("{}.wit", rendered.world));
+    let previous = std::fs::read_to_string(&wit_path).ok();
+    let changed = previous.as_deref() != Some(rendered.content.as_str());
+    if changed {
+        std::fs::write(&wit_path, &rendered.content)?;
+    }
+    if let Some(host) = &rendered.host_wit {
+        let deps_dir = out_dir.join("deps").join("host");
         std::fs::create_dir_all(&deps_dir)?;
-        let host_wit = deps_dir.join("host.wit");
-        if !host_wit.exists() {
-            std::fs::write(
-                &host_wit,
-                "package poc:host@0.1.0;\n\ninterface host-kv {\n    get: func(key: string) -> option<string>;\n    set: func(key: string, value: string);\n}\n\ninterface host-log {\n    log: func(msg: string);\n}\n",
-            )?;
+        let host_path = deps_dir.join("host.wit");
+        if std::fs::read_to_string(&host_path).ok().as_deref() != Some(host.as_str()) {
+            std::fs::write(&host_path, host)?;
         }
     }
-
-    println!("generated {}", wit_path.display());
-    Ok(())
+    Ok(changed)
 }
 
 fn go_type_to_wit(t: &str) -> String {
@@ -6271,8 +6401,33 @@ fn parse_cpp_params(raw: &str) -> String {
     out.join(", ")
 }
 
-fn cmd_wit_generate(path: &Path, _json: bool) -> anyhow::Result<()> {
-    generate_wit(path)
+fn cmd_wit_generate(path: &Path, json: bool) -> anyhow::Result<()> {
+    let plugin_dir = if path.is_file() {
+        path.parent().unwrap_or(path)
+    } else {
+        path
+    };
+    let language = wit_flow::detect_language(plugin_dir);
+    let name = plugin_dir
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("component");
+    let prepared = wit_flow::generate(plugin_dir, name, language, "0.1.0")?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "world": prepared.world,
+                "path": prepared.dir.join(format!("{}.wit", prepared.world)),
+                "mode": prepared.mode.as_str(),
+                "changed": prepared.changed,
+                "exports": prepared.exports,
+            })
+        );
+    } else {
+        println!("{}", prepared.summary());
+    }
+    Ok(())
 }
 
 fn generate_keypair(private_key_path: &Path, public_key_path: &Path) -> anyhow::Result<()> {

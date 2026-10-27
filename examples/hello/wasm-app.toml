@@ -10,6 +10,8 @@ addr = "127.0.0.1:8801"
 path = "plugins/greeter"
 language = "rust"
 type = "library"
+# No WIT file: the contract is generated from #[owasidea::export].
+wit_source = "attributes"
 
 [dev]
 watch = true

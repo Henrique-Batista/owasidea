@@ -10,9 +10,11 @@ crate-type = ["cdylib"]
 
 [dependencies]
 wit-bindgen = "0.41"
+owasidea = { path = "../../../../crates/owasidea" }
 
 [package.metadata.component]
 package = "poc:greeter"
 [package.metadata.component.target]
-path = "wit"
+# The contract is generated from the #[owasidea::*] markers below.
+path = ".owasidea/wit"
 world = "greeter"

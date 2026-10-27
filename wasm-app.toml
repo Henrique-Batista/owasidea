@@ -28,6 +28,7 @@ type = "executable"
 path = "plugins/attr-example"
 language = "rust"
 type = "library"
+wit_source = "attributes"
 kv = "attr-example:read-write"
 
 [plugins.example]
