@@ -66,10 +66,10 @@ Status permitidos: `todo`, `doing`, `review`, `done`, `blocked`.
 | AX-07 | done | wt-authoring | 861cd23 + 1b82fea (merge 09f3ce2) | fmt/clippy/test + schema --check | JSON Schema (`additionalProperties:false`); comando `schema`; docs |
 | AX-08 | done | wt-authoring | 47cc2db (merge b50c283) | fmt/clippy/test | `plugin add` com preview de permissões; `--dry-run`; sem overwrite |
 | PX-01 | done | wt-host | 0b96e3c + 4f4abaa (merge b0fa228) | fmt/clippy/test (71 unit + 13 CLI) | `permissions.lock.json`/diff; `--fail-on-widen`; endpoint/UI |
-| PX-02 | todo | — | — | — | — |
+| PX-02 | done | wt-config | 6fb3ad8 + dd5ca92 (merge 8807e80) | fmt/clippy/test (75 unit + 13 CLI) | `test --generate [--force]`; defaults por tipo; não sobrescreve |
 | PX-03 | todo | — | — | — | — |
 | PX-04 | done | wt-config | 8c48009 (merge 14d212a) | fmt/clippy/test | `plugins.lock`; `install --locked`; `update`; `outdated`; digest/assinatura |
-| PX-05 | todo | — | — | — | — |
+| PX-05 | done | wt-authoring | 24fce84 + 0038e64 (merge 2fe869e) | fmt/clippy/test (16 CLI) | `verify <dist>`; manifests/componentes/assinaturas/UI; `--json` |
 | PX-06 | todo | — | — | — | — |
 | PX-07 | todo | — | — | — | — |
 | PX-08 | todo | — | — | — | — |
