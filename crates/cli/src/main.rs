@@ -11,6 +11,7 @@ mod doctor;
 mod errors;
 mod logs;
 mod permissions;
+mod profile;
 mod registry_lock;
 mod smoke_gen;
 mod status;
@@ -224,6 +225,10 @@ enum Commands {
         /// Extra directory to hide when `--isolate-host-libs` is used.
         #[arg(long = "mask-path", value_name = "PATH")]
         mask_paths: Vec<PathBuf>,
+        /// Config profile: merge `wasm-app.<profile>.toml` over `wasm-app.toml`
+        /// (dev|staging|prod) and write artifacts to `dist/<profile>`.
+        #[arg(long, value_name = "PROFILE")]
+        profile: Option<String>,
     },
     /// Generate an Ed25519 keypair for signing plugins.
     #[command(about = "Generate an Ed25519 keypair for signing plugins.")]
@@ -737,7 +742,13 @@ async fn main() -> anyhow::Result<()> {
         Commands::Build {
             no_sign,
             fail_on_widen,
-        } => cmd_build(&cli.config, &cli.manifest_dir, !no_sign, fail_on_widen),
+        } => cmd_build(
+            &cli.config,
+            &cli.manifest_dir,
+            !no_sign,
+            fail_on_widen,
+            None,
+        ),
         Commands::Test {
             no_build,
             no_smoke,
@@ -897,6 +908,7 @@ async fn main() -> anyhow::Result<()> {
             bundles,
             isolate_host_libs,
             mask_paths,
+            profile,
         } => cmd_bundle(
             &cli.config,
             &cli.manifest_dir,
@@ -904,6 +916,7 @@ async fn main() -> anyhow::Result<()> {
             &bundles,
             isolate_host_libs,
             &mask_paths,
+            profile.as_deref(),
         ),
         Commands::Keygen { out } => cmd_keygen(&out),
         Commands::Sign { plugin, key } => cmd_sign(&manifest_dir, &plugin, &key),
@@ -1995,10 +2008,16 @@ fn cmd_build(
     manifest_dir: &Path,
     sign: bool,
     fail_on_widen: bool,
+    cfg_override: Option<&AppConfig>,
 ) -> anyhow::Result<()> {
     let root = app_root(config);
-    let raw = std::fs::read_to_string(config)?;
-    let cfg: AppConfig = toml::from_str(&raw)?;
+    let cfg: AppConfig = match cfg_override {
+        Some(cfg) => cfg.clone(),
+        None => {
+            let raw = std::fs::read_to_string(config)?;
+            toml::from_str(&raw)?
+        }
+    };
     cfg.validate()?;
     let plugins = cfg.plugins.clone().unwrap_or_default();
     if plugins.is_empty() {
@@ -2700,7 +2719,7 @@ async fn cmd_dev(
     }
     let root = app_root(config_path);
     if build {
-        cmd_build(config_path, manifest_dir, true, false)?;
+        cmd_build(config_path, manifest_dir, true, false, None)?;
     }
     let manifest_dir = app_path(&root, manifest_dir);
     build_id::ensure_env_from_manifests(&manifest_dir);
@@ -4223,25 +4242,41 @@ fn cmd_bundle(
     bundles: &[String],
     isolate_host_libs: bool,
     mask_paths: &[PathBuf],
+    profile: Option<&str>,
 ) -> anyhow::Result<()> {
+    let profile = match profile {
+        Some(name) => Some(crate::profile::validate_profile(name)?),
+        None => None,
+    };
     let root = app_root(config);
-    if build {
-        cmd_build(config, manifest_dir, true, false)?;
-    }
-    let cfg = read_app_config(config)?;
+    let cfg = crate::profile::merged_config(config, profile)?;
     cfg.validate_for_bundle()?;
+    if let Some(profile) = profile {
+        match crate::profile::active_overlay(config, profile) {
+            Some(overlay) => println!("Bundle profile: {profile} (overlay: {})", overlay.display()),
+            None => println!(
+                "Bundle profile: {profile} (no overlay {}; using base config)",
+                crate::profile::overlay_path(config, profile).display()
+            ),
+        }
+    }
+    if build {
+        // Build with the merged config so overlay plugins and [app].version are
+        // reflected in the generated manifests.
+        cmd_build(config, manifest_dir, true, false, Some(&cfg))?;
+    }
     if !build {
         sign_all(&root, &app_path(&root, manifest_dir), cfg.signing.as_ref())?;
     }
-    let desktop = cfg.desktop.unwrap_or_default();
+    let desktop = cfg.desktop.clone().unwrap_or_default();
     let ui_dir = if let Some(ui) = desktop.ui.as_deref() {
         crate::config_render::safe_resolve(&root, ui)?
     } else {
         root.join("ui")
     };
 
-    let desktop_dir = match desktop.path {
-        Some(path) => crate::config_render::safe_resolve(&root, &path)?,
+    let desktop_dir = match desktop.path.as_deref() {
+        Some(path) => crate::config_render::safe_resolve(&root, path)?,
         None if root.join("desktop/Cargo.toml").is_file() => root.join("desktop"),
         None => root.join("crates/desktop"),
     };
@@ -4266,21 +4301,13 @@ fn cmd_bundle(
     // The dashboard embeds the host origin at build time (Vite `define`).
     // Use the same source of truth as `dev`/`run` instead of the framework
     // default, otherwise changing [host].addr silently breaks the bundle.
-    let host_url = format!(
-        "http://{}",
-        read_host_addr(config).unwrap_or_else(|| "127.0.0.1:8787".to_string())
-    );
+    // With `--profile`, this is the merged overlay host.
+    let host_url = crate::config_render::host_url(&cfg);
     // Render the generated Tauri config from [host].addr so the bundle uses
-    // the generated CSP (RF-05). Fail loudly if it cannot be created.
-    let generated_config = crate::config_render::render_targets(
-        config,
-        crate::config_render::RenderScope::Single(crate::config_render::RenderTarget::Tauri),
-        false,
-    )
-    .map_err(|e| anyhow::anyhow!("failed to render tauri.generated.conf.json: {e}"))?
-    .into_iter()
-    .next()
-    .ok_or_else(|| anyhow::anyhow!("config render did not produce tauri.generated.conf.json"))?;
+    // the generated CSP (RF-05). Fail loudly if it cannot be created. With a
+    // profile, [app] also drives productName/version/identifier.
+    let generated_config = crate::config_render::render_tauri_for_profile(&root, &cfg, profile)
+        .map_err(|e| anyhow::anyhow!("failed to render tauri.generated.conf.json: {e}"))?;
     if !generated_config.is_file() {
         anyhow::bail!(
             "generated Tauri config not found at {}",
@@ -4309,6 +4336,12 @@ fn cmd_bundle(
     if crate::config_render::csp_connect_src_count(generated_csp) != 1 {
         anyhow::bail!("generated Tauri config CSP must contain exactly one connect-src directive");
     }
+    // Profile bundles ship a profile-specific runtime descriptor; the base
+    // `ui/.owasidea/runtime.json` used by `dev`/`run` is left untouched.
+    let profile_runtime = match profile {
+        Some(profile) => Some(crate::profile::write_runtime(&root, &cfg, profile)?),
+        None => None,
+    };
     println!("Building UI in {}...", ui_dir.display());
     let status = external_command("npm")
         .args(["run", "build"])
@@ -4377,13 +4410,40 @@ fn cmd_bundle(
     let target = PathBuf::from(meta["target_directory"].as_str().unwrap_or(""));
     let bundle_dir = target.join("release/bundle");
     let direct_resources = target.join("release/resources");
-    copy_runtime_resources(&root, &direct_resources, cfg.signing.as_ref())?;
+    copy_runtime_resources(
+        &root,
+        &direct_resources,
+        cfg.signing.as_ref(),
+        profile_runtime.as_deref(),
+    )?;
     println!("Direct-run resources: {}", direct_resources.display());
+    // Profiles always get their own artifact directory so `dev`, `staging` and
+    // `prod` bundles never overwrite each other.
+    let output_dir = match profile {
+        Some(_) => Some(crate::profile::output_dir(&root, &cfg, profile)?),
+        None => desktop
+            .output
+            .as_deref()
+            .map(|output| app_path(&root, output)),
+    };
     if bundle_dir.is_dir() {
-        if let Some(output) = desktop.output {
-            let output_dir = app_path(&root, output);
+        if let Some(output_dir) = output_dir {
             clear_bundle_artifacts(&output_dir)?;
             copy_selected_bundles(&bundle_dir, &output_dir, &requested)?;
+            if let Some(profile) = profile {
+                std::fs::create_dir_all(&output_dir)?;
+                let overlay = crate::profile::active_overlay(config, profile);
+                let metadata = crate::profile::bundle_metadata(&cfg, profile, overlay.as_deref());
+                let mut bytes = serde_json::to_vec_pretty(&metadata)?;
+                bytes.push(b'\n');
+                std::fs::write(output_dir.join("owasidea.bundle.json"), bytes)?;
+                // Keep the effective Tauri config next to the artifacts so the
+                // profile is auditable without rebuilding.
+                std::fs::copy(
+                    &generated_config,
+                    output_dir.join("tauri.generated.conf.json"),
+                )?;
+            }
             println!("Artifacts copied to {}", output_dir.display());
         } else {
             println!("Artifacts are under {}", bundle_dir.display());
@@ -4408,13 +4468,16 @@ fn copy_runtime_resources(
     root: &Path,
     destination: &Path,
     signing: Option<&SigningSection>,
+    runtime_src: Option<&Path>,
 ) -> anyhow::Result<()> {
     std::fs::create_dir_all(destination)?;
     let manifests = root.join("manifests");
     if manifests.is_dir() {
         copy_dir_all(&manifests, &destination.join("manifests"))?;
     }
-    let runtime_src = root.join("ui").join(".owasidea").join("runtime.json");
+    let runtime_src = runtime_src
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| root.join("ui").join(".owasidea").join("runtime.json"));
     if runtime_src.is_file() {
         std::fs::copy(&runtime_src, destination.join("owasidea.runtime.json"))?;
     }
@@ -4856,7 +4919,7 @@ async fn cmd_test(
     }
     let root = app_root(config_path);
     if opts.build {
-        cmd_build(config_path, manifest_dir, true, false)?;
+        cmd_build(config_path, manifest_dir, true, false, None)?;
     }
     let cfg = read_app_config(config_path)?;
     let manifest_dir = app_path(&root, manifest_dir);

@@ -239,7 +239,7 @@ Generate a typed TypeScript client from the manifests in `--manifest-dir`.
 Only `ts` is supported. `--check` fails if the file is missing or differs
 without writing.
 
-### `bundle [--no-build] [--bundles <targets>] [--isolate-host-libs]`
+### `bundle [--no-build] [--bundles <targets>] [--profile <dev|staging|prod>] [--isolate-host-libs]`
 
 Build and sign, build the UI, and produce a Tauri desktop bundle.
 
@@ -323,6 +323,72 @@ When `[desktop].output` is set, bundle artifacts are copied there. Example:
 path = "desktop"
 ui = "ui"
 output = "dist"
+```
+
+#### Bundle profiles
+
+`bundle --profile dev|staging|prod` merges a per-profile overlay over
+`wasm-app.toml` without editing the base file:
+
+```text
+wasm-app.toml            # base config (never rewritten)
+wasm-app.staging.toml    # optional overlay for the staging profile
+```
+
+Merge is deterministic: tables merge recursively, every other value (scalars and
+arrays) from the overlay replaces the base value. `plugins.<name>` merges per
+plugin, so an overlay can add capabilities without repeating the plugin's
+`path`/`language`/`type`.
+
+```toml
+# wasm-app.staging.toml
+[app]
+version = "1.0.0-rc.1"
+identifier = "dev.owasidea.shipyard.staging"
+
+[host]
+addr = "127.0.0.1:9100"
+
+[plugins.webhook-go]
+http_outbound = ["https://staging.example"]
+```
+
+The merged config drives the whole bundle:
+
+- `[host].addr` → `OWASIDEA_HOST` for the UI build and `connect-src` in the
+  generated CSP (`desktop/tauri.generated.conf.json`);
+- `[app].name`/`version`/`identifier` → Tauri `productName`/`version`/
+  `identifier` (profile bundles only; without `--profile` the base
+  `tauri.conf.json` identity is kept);
+- plugins and `[app].version` used by `owasidea build`;
+- `ui/.owasidea/runtime.<profile>.json` → `owasidea.runtime.json` in the bundle
+  resources (the base `ui/.owasidea/runtime.json` used by `dev`/`run` is left
+  untouched);
+- artifacts go to `<desktop.output>/<profile>` (`dist/<profile>` when
+  `[desktop].output` is unset), so `dev`, `staging` and `prod` never overwrite
+  each other. The directory also receives `owasidea.bundle.json` (effective
+  profile, host, identity, plugin set, overlay used) and the generated
+  `tauri.generated.conf.json`.
+
+A profile without an overlay file uses the base config unchanged; the CLI
+prints which case applied:
+
+```text
+Bundle profile: staging (overlay: /repo/wasm-app.staging.toml)
+Bundle profile: prod (no overlay /repo/wasm-app.prod.toml; using base config)
+```
+
+Only `dev`, `staging` and `prod` are accepted. Any other name fails before the
+build starts:
+
+```text
+error: unknown bundle profile "qa"; expected one of: dev, staging, prod
+```
+
+```bash
+owasidea bundle --profile staging --bundles deb
+owasidea bundle --profile prod --bundles deb,rpm,appimage
+owasidea bundle --profile dev --no-build
 ```
 
 ### `wit generate [path]`
