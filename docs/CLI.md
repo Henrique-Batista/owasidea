@@ -190,6 +190,12 @@ from `[signing]` is applied automatically.
 Show the generated manifest, and for headless plugins the formatted WIT.
 `--json` prints the raw manifest.
 
+### `client --lang ts -o <file> [--check]`
+
+Generate a typed TypeScript client from the manifests in `--manifest-dir`.
+Only `ts` is supported. `--check` fails if the file is missing or differs
+without writing.
+
 ### `bundle [--no-build] [--bundles <targets>] [--isolate-host-libs]`
 
 Build and sign, build the UI, and produce a Tauri desktop bundle.

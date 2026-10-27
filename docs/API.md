@@ -130,3 +130,17 @@ running; stop it, reload, then start again.
 ## Errors
 
 Non-2xx responses return plain text or JSON error message. 404 for unknown plugin.
+
+
+## Typed client (CT-03)
+
+Generate with `owasidea client --lang ts -o src/client.ts`. Usage:
+
+```ts
+import { createClient } from "./client";
+const client = createClient({ baseUrl: "http://127.0.0.1:8787", timeoutMs: 30000 });
+const out = await client.coreRust.ping();
+```
+
+Calls use `POST /plugin/{name}/call` with `{ function, args }`. Failures throw
+`CallError` with `status`, `body`, `plugin`, `function`.

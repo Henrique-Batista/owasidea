@@ -1,6 +1,7 @@
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 mod build_id;
+mod client_gen;
 mod config;
 mod config_render;
 mod dev_desktop;
@@ -143,6 +144,19 @@ enum Commands {
     /// Validate manifests, checksums and capabilities against config.
     #[command(about = "Validate manifests, checksums and capabilities against config.")]
     Validate,
+    /// Generate a typed client from manifests.
+    #[command(about = "Generate a typed client from manifests.")]
+    Client {
+        /// Target language (default ts).
+        #[arg(long, default_value = "ts")]
+        lang: String,
+        /// Output file path.
+        #[arg(short = 'o', long = "output")]
+        output: PathBuf,
+        /// Check mode: do not write; fail if missing/different.
+        #[arg(long)]
+        check: bool,
+    },
     /// Render derived configuration artifacts (runtime/tauri/playwright).
     #[command(about = "Render derived configuration artifacts (runtime/tauri/playwright).")]
     Config {
@@ -579,6 +593,11 @@ async fn main() -> anyhow::Result<()> {
             WitCmd::Generate { path } => cmd_wit_generate(&path, cli.json),
         },
         Commands::Validate => cmd_validate(&cli.config, &cli.manifest_dir),
+        Commands::Client {
+            lang,
+            output,
+            check,
+        } => cmd_client(&manifest_dir, &lang, &output, check),
         Commands::Config { cmd } => match cmd {
             ConfigCmd::Render { target, check } => cmd_config_render(&cli.config, &target, check),
         },
@@ -5118,5 +5137,26 @@ mod dev_tests {
             "default-src 'self'; connect-src http://127.0.0.1:8787 http://127.0.0.1:*"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+fn cmd_client(manifest_dir: &Path, lang: &str, output: &Path, check: bool) -> anyhow::Result<()> {
+    if lang != "ts" {
+        anyhow::bail!("unsupported language: {} (only ts)", lang);
+    }
+    let expected = client_gen::generate_ts(manifest_dir)?;
+    if check {
+        let actual = std::fs::read_to_string(output).ok();
+        match actual {
+            Some(a) if a == expected => Ok(()),
+            Some(_) => anyhow::bail!("generated client is out of date: {}", output.display()),
+            None => anyhow::bail!("generated client missing: {}", output.display()),
+        }
+    } else {
+        if let Some(parent) = output.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(output, expected)?;
+        Ok(())
     }
 }
