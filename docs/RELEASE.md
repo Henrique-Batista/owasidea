@@ -267,8 +267,9 @@ SBOM and provenance generation (RL-04) needs no secret. The `full` job sets
 2. Smoke-test an installed copy against the beta channel first.
 3. Only then promote the same artifacts to stable (re-generate `latest.json`
    with `--channel stable --url-base …/stable` if the base URL differs).
-4. Tag and push only with explicit approval; this repository's agents do not
-   push or tag.
+4. Tag and push only with explicit approval from the maintainer who owns the
+   remote. The 1.0.0 release was pushed to `origin` after that approval; see
+   [`plans/V1_RELEASE_REPORT.md`](plans/V1_RELEASE_REPORT.md#105-push).
 
 ---
 

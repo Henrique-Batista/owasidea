@@ -138,8 +138,9 @@ A tag **local** `v1.0.0` foi criada neste commit:
 git tag -a v1.0.0 -m "Owasidea 1.0.0"
 ```
 
-**Push exige aprovação** (`git push origin v1.0.0`); nenhum push foi feito. A
-tag pré-existente é `v1.0.0-pre` (baseline da Fase 0).
+**Push exige aprovação.** A tag pré-existente é `v1.0.0-pre` (baseline da Fase
+0). O push de `main`, `release/1.0` e `v1.0.0` foi feito depois, com aprovação
+explícita do mantenedor; ver seção 10.5.
 
 ## 9. Evidências
 
@@ -204,8 +205,8 @@ os complementa.
   reconstruído nesta rodada; o resultado do G5 continua sendo a referência de
   empacotamento.
 - **Windows**: não executado (igual ao G2).
-- **CI remoto**: não há remote configurado neste repositório
-  (`git remote -v` vazio). Por isso o push não foi possível (ver 10.5).
+- **CI remoto**: o workflow está versionado e o push foi feito (seção 10.5),
+  mas nenhum run do GitHub Actions foi observado nesta rodada.
 - **Dashboard**: testado em pseudo-terminal (pyte) em Linux. Não há teste em
   terminal Windows nem em terminais que não respondem consulta de cursor.
 
