@@ -10,6 +10,7 @@ mod dev_next_steps;
 mod doctor;
 mod errors;
 mod logs;
+mod registry_lock;
 mod status;
 mod templates;
 mod type_parser;
@@ -278,6 +279,24 @@ enum RegistryCmd {
         public_key: PathBuf,
         #[arg(long)]
         force: bool,
+        #[arg(long)]
+        locked: bool,
+    },
+    /// Update lockfile entries from the registry (lock only).
+    Update {
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        version: Option<String>,
+        #[arg(long)]
+        url: String,
+        #[arg(long)]
+        public_key: PathBuf,
+    },
+    /// Show plugins whose lockfile version differs from the registry.
+    Outdated {
+        #[arg(long)]
+        url: String,
     },
 }
 
@@ -837,6 +856,7 @@ async fn main() -> anyhow::Result<()> {
                 url,
                 public_key,
                 force,
+                locked,
             } => {
                 cmd_registry_install(
                     &name,
@@ -845,9 +865,29 @@ async fn main() -> anyhow::Result<()> {
                     &public_key,
                     &manifest_dir,
                     force,
+                    locked,
                     cli.json,
                 )
                 .await
+            }
+            RegistryCmd::Update {
+                name,
+                version,
+                url,
+                public_key,
+            } => {
+                cmd_registry_update(
+                    name.as_deref(),
+                    version.as_deref(),
+                    &url,
+                    &public_key,
+                    &manifest_dir,
+                    cli.json,
+                )
+                .await
+            }
+            RegistryCmd::Outdated { url } => {
+                cmd_registry_outdated(&url, &manifest_dir, cli.json).await
             }
         },
     }
@@ -3452,6 +3492,7 @@ async fn cmd_registry_search(query: &str, url: &str, json: bool) -> anyhow::Resu
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn cmd_registry_install(
     name: &str,
     version: &str,
@@ -3459,9 +3500,30 @@ async fn cmd_registry_install(
     public_key: &Path,
     manifest_dir: &Path,
     force: bool,
+    locked: bool,
     json: bool,
 ) -> anyhow::Result<()> {
     validate_plugin_name(name)?;
+    let lock_path = registry_lock::lockfile_path(manifest_dir);
+    let lock = registry_lock::read_lock(&lock_path)?;
+    if locked {
+        let entry = registry_lock::find_entry(&lock, name)
+            .ok_or_else(|| anyhow::anyhow!("lockfile has no entry for {name}"))?;
+        if entry.version != version {
+            anyhow::bail!(
+                "locked version mismatch: lock has {} but requested {}",
+                entry.version,
+                version
+            );
+        }
+        if entry.source != registry {
+            anyhow::bail!(
+                "locked source mismatch: lock has {} but requested {}",
+                entry.source,
+                registry
+            );
+        }
+    }
     let (index_url, index) = fetch_registry_index(registry).await?;
     let entry = index
         .plugins
@@ -3548,7 +3610,11 @@ async fn cmd_registry_install(
         if artifact_url.origin() != index_url.origin() {
             anyhow::bail!("registry artifact must stay on registry origin");
         }
-        let response = client.get(artifact_url).send().await?.error_for_status()?;
+        let response = client
+            .get(artifact_url.clone())
+            .send()
+            .await?
+            .error_for_status()?;
         let artifact = read_limited(response, 512 * 1024 * 1024).await?;
         use sha2::{Digest, Sha256};
         let digest = format!("{:x}", Sha256::digest(&artifact));
@@ -3557,6 +3623,26 @@ async fn cmd_registry_install(
         }
         artifact.to_vec()
     };
+    let artifact_digest = if is_ui {
+        manifest["metadata"]["ui"]["sha256"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    } else {
+        use sha2::{Digest, Sha256};
+        format!("{:x}", Sha256::digest(&artifact))
+    };
+    if locked {
+        let entry = registry_lock::find_entry(&lock, name).unwrap();
+        if entry.sha256 != artifact_digest {
+            anyhow::bail!("locked artifact digest mismatch");
+        }
+        if let Some(fmt) = manifest["metadata"]["signature_format"].as_str() {
+            if entry.signature_format != fmt {
+                anyhow::bail!("locked signature format mismatch");
+            }
+        }
+    }
     let signature = manifest["metadata"]["signature"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("registry plugin is unsigned"))?;
@@ -3678,6 +3764,22 @@ async fn cmd_registry_install(
         let _ = std::fs::remove_file(&manifest_tmp);
         return Err(error.into());
     }
+    let signature_format = manifest["metadata"]["signature_format"]
+        .as_str()
+        .unwrap_or("owasidea-manifest-v1")
+        .to_string();
+    let mut lock = registry_lock::read_lock(&lock_path)?;
+    lock.plugins
+        .retain(|e| !(e.name == name && e.version == version));
+    lock.plugins.push(registry_lock::PluginLockEntry {
+        name: name.to_string(),
+        version: version.to_string(),
+        source: registry.to_string(),
+        sha256: artifact_digest,
+        signature_format,
+    });
+    registry_lock::write_lock(&lock_path, &lock)?;
+
     if json {
         println!(
             "{}",
@@ -3685,6 +3787,165 @@ async fn cmd_registry_install(
         );
     } else {
         println!("installed {name}@{version} into {}", manifest_dir.display());
+    }
+    Ok(())
+}
+
+async fn cmd_registry_update(
+    name: Option<&str>,
+    version: Option<&str>,
+    registry: &str,
+    public_key: &Path,
+    manifest_dir: &Path,
+    json: bool,
+) -> anyhow::Result<()> {
+    let lock_path = registry_lock::lockfile_path(manifest_dir);
+    let mut lock = registry_lock::read_lock(&lock_path)?;
+    let (index_url, index) = fetch_registry_index(registry).await?;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(60))
+        .build()?;
+
+    let targets: Vec<String> = if let Some(n) = name {
+        vec![n.to_string()]
+    } else {
+        lock.plugins.iter().map(|e| e.name.clone()).collect()
+    };
+    let mut updated = 0usize;
+    for target in targets {
+        let entry = index
+            .plugins
+            .iter()
+            .filter(|p| p.name == target)
+            .max_by(|a, b| a.version.cmp(&b.version));
+        let reg_entry = if let Some(v) = version {
+            index
+                .plugins
+                .iter()
+                .find(|p| p.name == target && p.version == v)
+        } else {
+            entry
+        };
+        let reg_entry =
+            reg_entry.ok_or_else(|| anyhow::anyhow!("registry does not contain {target}"))?;
+        // verify by fetching manifest+artifact (reuse install path minimal): fetch manifest
+        let manifest_url = index_url.join(&reg_entry.manifest)?;
+        let artifact_url = index_url.join(&reg_entry.artifact)?;
+        if manifest_url.origin() != index_url.origin()
+            || artifact_url.origin() != index_url.origin()
+        {
+            anyhow::bail!("registry manifest and artifact must stay on registry origin");
+        }
+        let manifest_response = client.get(manifest_url).send().await?.error_for_status()?;
+        let manifest_bytes = read_limited(manifest_response, 1024 * 1024).await?;
+        let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes)?;
+        let is_ui = manifest["runtime"].as_str() == Some("js-wasm");
+        let artifact_digest = if is_ui {
+            // fetch assets digests not needed for lock update? Use manifest ui sha256
+            manifest["metadata"]["ui"]["sha256"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        } else {
+            let response = client
+                .get(artifact_url.clone())
+                .send()
+                .await?
+                .error_for_status()?;
+            let artifact = read_limited(response, 512 * 1024 * 1024).await?;
+            use sha2::{Digest, Sha256};
+            format!("{:x}", Sha256::digest(&artifact))
+        };
+        // signature format
+        let sig_fmt = manifest["metadata"]["signature_format"]
+            .as_str()
+            .unwrap_or("owasidea-manifest-v1")
+            .to_string();
+        // verify signature
+        let signature = manifest["metadata"]["signature"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("registry plugin is unsigned"))?;
+        let key_b64 = std::fs::read_to_string(public_key)?;
+        let key_bytes = base64_decode(key_b64.trim())?;
+        let signature_bytes = base64_decode(signature)?;
+        let signed_manifest = manifest.clone();
+        let payload = if is_ui {
+            // reuse cli_signature_payload with empty artifact
+            cli_signature_payload(signed_manifest, &[])?
+        } else {
+            // need artifact bytes; re-fetch? We discarded; fetch again
+            let response = client.get(artifact_url).send().await?.error_for_status()?;
+            let artifact = read_limited(response, 512 * 1024 * 1024).await?;
+            cli_signature_payload(signed_manifest, &artifact)?
+        };
+        ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &key_bytes)
+            .verify(&payload, &signature_bytes)
+            .map_err(|_| anyhow::anyhow!("plugin signature verification failed"))?;
+
+        // update lock entry
+        if let Some(e) = lock.plugins.iter_mut().find(|e| e.name == target) {
+            e.version = reg_entry.version.clone();
+            e.source = registry.to_string();
+            e.sha256 = artifact_digest;
+            e.signature_format = sig_fmt;
+        } else {
+            lock.plugins.push(registry_lock::PluginLockEntry {
+                name: target.clone(),
+                version: reg_entry.version.clone(),
+                source: registry.to_string(),
+                sha256: artifact_digest,
+                signature_format: sig_fmt,
+            });
+        }
+        updated += 1;
+    }
+    registry_lock::write_lock(&lock_path, &lock)?;
+    if json {
+        println!("{}", serde_json::json!({"updated": updated}));
+    } else {
+        println!("updated {updated} lock entries");
+    }
+    let _ = (index_url, index);
+    Ok(())
+}
+
+async fn cmd_registry_outdated(
+    registry: &str,
+    manifest_dir: &Path,
+    json: bool,
+) -> anyhow::Result<()> {
+    let lock_path = registry_lock::lockfile_path(manifest_dir);
+    let lock = registry_lock::read_lock(&lock_path)?;
+    let (_, index) = fetch_registry_index(registry).await?;
+    let mut outdated = Vec::new();
+    for entry in &lock.plugins {
+        let latest = index
+            .plugins
+            .iter()
+            .filter(|p| p.name == entry.name)
+            .map(|p| p.version.as_str())
+            .max();
+        if let Some(latest) = latest {
+            if latest != entry.version {
+                outdated.push((
+                    entry.name.clone(),
+                    entry.version.clone(),
+                    latest.to_string(),
+                ));
+            }
+        }
+    }
+    if json {
+        println!("{}", serde_json::to_string_pretty(&outdated)?);
+    } else {
+        if outdated.is_empty() {
+            println!("all lock entries up to date");
+        } else {
+            for (name, current, latest) in &outdated {
+                println!("{name}: {current} -> {latest}");
+            }
+        }
     }
     Ok(())
 }
