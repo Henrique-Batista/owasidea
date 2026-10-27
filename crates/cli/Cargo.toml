@@ -25,6 +25,7 @@ toml = "0.8"
 regex = "1"
 syn = { version = "2", features = ["full"] }
 sha2 = "0.10"
+semver = "1"
 ring = "0.17"
 base64 = "0.22"
 pathdiff = "0.2"

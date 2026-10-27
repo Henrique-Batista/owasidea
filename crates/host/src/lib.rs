@@ -147,7 +147,7 @@ fn default_true() -> bool {
     true
 }
 fn default_schema_version() -> u32 {
-    1
+    0
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -2459,34 +2459,73 @@ fn load_manifests(dir: &Path) -> Result<Vec<(Manifest, PathBuf)>> {
 }
 
 fn validate_manifest_abi(manifest: &Manifest) -> Result<()> {
-    if manifest.schema_version != 1 {
-        anyhow::bail!(
-            "plugin {} manifest schema_version {} is not supported (expected 1)",
-            manifest.name,
-            manifest.schema_version
-        );
-    }
-    if let Some(host_abi) = &manifest.host_abi {
-        if host_abi != HOST_ABI {
-            anyhow::bail!(
-                "plugin {} manifest host_abi {} is incompatible with host {}",
-                manifest.name,
-                host_abi,
-                HOST_ABI
-            );
+    match manifest.schema_version {
+        0 => {
+            // Legacy manifests: optional fields validated only if present.
+            if let Some(host_abi) = &manifest.host_abi {
+                if host_abi != HOST_ABI {
+                    anyhow::bail!(
+                        "plugin {} manifest host_abi {} is incompatible with host {}",
+                        manifest.name,
+                        host_abi,
+                        HOST_ABI
+                    );
+                }
+            }
+            if let Some(min_host) = &manifest.min_host {
+                let required = semver::Version::parse(min_host)
+                    .with_context(|| format!("invalid min_host {min_host:?}"))?;
+                let host = semver::Version::parse(HOST_VERSION)
+                    .with_context(|| format!("invalid host version {HOST_VERSION:?}"))?;
+                if required > host {
+                    anyhow::bail!(
+                        "plugin {} manifest min_host {} is greater than host {}",
+                        manifest.name,
+                        min_host,
+                        HOST_VERSION
+                    );
+                }
+            }
         }
-    }
-    if let Some(min_host) = &manifest.min_host {
-        let required = semver::Version::parse(min_host)
-            .with_context(|| format!("invalid min_host {min_host:?}"))?;
-        let host = semver::Version::parse(HOST_VERSION)
-            .with_context(|| format!("invalid host version {HOST_VERSION:?}"))?;
-        if required > host {
+        1 => {
+            let host_abi = manifest.host_abi.as_deref().ok_or_else(|| {
+                anyhow!(
+                    "plugin {} manifest host_abi is required for schema_version 1",
+                    manifest.name
+                )
+            })?;
+            if host_abi != HOST_ABI {
+                anyhow::bail!(
+                    "plugin {} manifest host_abi {} is incompatible with host {}",
+                    manifest.name,
+                    host_abi,
+                    HOST_ABI
+                );
+            }
+            let min_host = manifest.min_host.as_deref().ok_or_else(|| {
+                anyhow!(
+                    "plugin {} manifest min_host is required for schema_version 1",
+                    manifest.name
+                )
+            })?;
+            let required = semver::Version::parse(min_host)
+                .with_context(|| format!("invalid min_host {min_host:?}"))?;
+            let host = semver::Version::parse(HOST_VERSION)
+                .with_context(|| format!("invalid host version {HOST_VERSION:?}"))?;
+            if required > host {
+                anyhow::bail!(
+                    "plugin {} manifest min_host {} is greater than host {}",
+                    manifest.name,
+                    min_host,
+                    HOST_VERSION
+                );
+            }
+        }
+        other => {
             anyhow::bail!(
-                "plugin {} manifest min_host {} is greater than host {}",
+                "plugin {} manifest schema_version {} is not supported (expected 0 or 1)",
                 manifest.name,
-                min_host,
-                HOST_VERSION
+                other
             );
         }
     }
