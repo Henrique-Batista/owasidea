@@ -102,3 +102,7 @@ The reference flow is documented in
 - Unit tests in the module; integration tests in `crates/*/tests/`.
 - Do not move existing code unless required by the item.
 - Examples: `crates/cli/src/config.rs`; host capability broker in `lib.rs`.
+
+## CLI templates (AX-01)
+
+Plugin/init templates live in `crates/cli/templates/` and are embedded at compile time via `include_str!` (see `crates/cli/src/templates.rs`). Placeholders use `{{name}}` style and are rendered by `templates::render`.

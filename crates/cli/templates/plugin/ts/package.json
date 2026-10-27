@@ -1,0 +1,12 @@
+{
+  "name": "{{name}}",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "jco componentize src/index.ts --wit wit --world-name {{name}} -o {{name}}.component.wasm"
+  },
+  "devDependencies": {
+    "@bytecodealliance/jco": "1.39.0",
+    "@bytecodealliance/componentize-js": "0.23.0"
+  }
+}

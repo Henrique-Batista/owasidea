@@ -1,0 +1,5 @@
+package poc:host@0.1.0;
+
+interface host-log {
+    log: func(msg: string);
+}
