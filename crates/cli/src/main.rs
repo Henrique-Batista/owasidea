@@ -968,6 +968,36 @@ async fn cmd_doctor(
             println!("{:20} {}", name, label);
         }
     }
+    if fix {
+        // dry-run by default: only print install commands; never run sudo.
+        let os = doctor::detect_os();
+        for (name, ok, opt) in &results {
+            if *ok || *opt {
+                continue;
+            }
+            // find command from tools.lock if present
+            let mut cmd = None;
+            if let Ok(content) = std::fs::read_to_string("tools.lock") {
+                if let Ok(lock) = doctor::parse_lock(&content) {
+                    for spec in &lock.tools {
+                        if spec.name == *name {
+                            cmd = doctor::install_command(spec, os);
+                        }
+                    }
+                }
+            }
+            if let Some(c) = cmd {
+                if yes && !c.contains("sudo") {
+                    println!("running: {}", c);
+                    let _ = std::process::Command::new("sh").arg("-c").arg(&c).status();
+                } else {
+                    println!("install (dry-run): {}", c);
+                }
+            } else {
+                println!("no install command known for {}", name);
+            }
+        }
+    }
     if results.iter().any(|(_, ok, opt)| !ok && !*opt) {
         std::process::exit(1);
     }

@@ -1,6 +1,5 @@
 #![allow(dead_code)]
 use serde::Deserialize;
-use std::path::Path;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct ToolLock {
@@ -106,7 +105,20 @@ windows = "rustup toolchain install 1.80"
     }
     #[test]
     fn dry_run_does_not_execute() {
-        // placeholder: install_command is pure
-        assert!(true);
+        assert_eq!(
+            install_command(
+                &ToolSpec {
+                    name: "x".into(),
+                    min_version: None,
+                    install: Some(InstallCmds {
+                        linux: Some("echo hi".into()),
+                        macos: None,
+                        windows: None
+                    })
+                },
+                Os::Linux
+            ),
+            Some("echo hi".into())
+        );
     }
 }
