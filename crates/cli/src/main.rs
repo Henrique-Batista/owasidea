@@ -7,6 +7,7 @@ mod config;
 mod config_render;
 mod dev_desktop;
 mod dev_next_steps;
+mod doctor;
 mod errors;
 mod logs;
 mod status;
@@ -61,6 +62,12 @@ enum Commands {
         /// Download and install wasi-sdk + the reactor adapter when missing.
         #[arg(long)]
         install_wasi_sdk: bool,
+        /// Show (and optionally run) install commands for missing tools.
+        #[arg(long)]
+        fix: bool,
+        /// Execute safe install commands (no sudo) when --fix is set.
+        #[arg(long)]
+        yes: bool,
     },
     /// Manage plugins (create new plugins).
     #[command(about = "Manage plugins (create new plugins).")]
@@ -609,7 +616,11 @@ async fn main() -> anyhow::Result<()> {
     let manifest_dir = app_path(&app_root(&cli.config), &cli.manifest_dir);
     match cli.cmd {
         Commands::Init { dir, preset, yes } => cmd_init(dir, &preset, yes, cli.json),
-        Commands::Doctor { install_wasi_sdk } => cmd_doctor(cli.json, install_wasi_sdk).await,
+        Commands::Doctor {
+            install_wasi_sdk,
+            fix,
+            yes,
+        } => cmd_doctor(cli.json, install_wasi_sdk, fix, yes).await,
         Commands::Plugin { cmd } => match cmd {
             PluginCmd::New {
                 name,
@@ -873,7 +884,12 @@ fn cmd_init(dir: Option<PathBuf>, preset: &str, yes: bool, json: bool) -> anyhow
     Ok(())
 }
 
-async fn cmd_doctor(json: bool, install_wasi_sdk_requested: bool) -> anyhow::Result<()> {
+async fn cmd_doctor(
+    json: bool,
+    install_wasi_sdk_requested: bool,
+    fix: bool,
+    yes: bool,
+) -> anyhow::Result<()> {
     if install_wasi_sdk_requested {
         let sdk = install_wasi_sdk().await?;
         if find_wasi_adapter(Some(&sdk)).is_none() {
