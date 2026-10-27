@@ -152,7 +152,7 @@ truth for host/port/CSP/dev URL):
 
 `--check` does not write; exits non-zero if files are missing or stale.
 
-### `dev [--no-build]`
+### `dev [--no-build] [--desktop]`
 
 Build first, then start the host, the Vite dev server (if
 `<app-root>/ui/package.json` exists), and a recursive watcher. The UI port comes
@@ -166,6 +166,8 @@ A busy configured port falls back to the next free port. `dev` also writes
 - loaded plugin names
 - watch roots
 - Tauri dev config path and devUrl
+
+With `--desktop`, the CLI also runs `cargo tauri dev --config <desktop>/tauri.dev.conf.json` in the resolved desktop directory, with `OWASIDEA_HOST`, `HOST_ADDR`, `OWASIDEA_MANIFESTS` (and `OWASIDEA_RUNTIME` when set) in the environment. The host and Vite remain managed by the CLI; Tauri only loads the reserved dev URL. Logs are prefixed `[host]`, `[ui]`, `[tauri]`; Ctrl+C stops all three. If `cargo tauri` is missing, the command fails with an actionable install hint.
 
 The watcher hot-reloads stateless components by calling
 `POST /plugin/{name}/reload`. Stateful services require an explicit stop/reload;

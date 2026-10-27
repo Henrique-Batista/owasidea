@@ -118,12 +118,14 @@ fn main() {
                 script_payload
             );
 
-            let addr = resolved.bind_addr.clone();
-            tauri::async_runtime::spawn(async move {
-                if let Err(error) = owasidea_host::run(manifests, addr).await {
-                    eprintln!("shipyard host error: {error}");
-                }
-            });
+            if std::env::var("OWASIDEA_DEV_NO_HOST").as_deref() != Ok("1") {
+                let addr = resolved.bind_addr.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) = owasidea_host::run(manifests, addr).await {
+                        eprintln!("shipyard host error: {error}");
+                    }
+                });
+            }
             let window = tauri::WebviewWindowBuilder::new(
                 app,
                 "main",

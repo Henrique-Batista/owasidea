@@ -12,16 +12,18 @@ fn main() {
             if let Some(bid) = &resolved.build_id {
                 std::env::set_var("OWASIDEA_BUILD_ID", bid);
             }
-            let manifests = resolved
-                .manifests_dir
-                .clone()
-                .unwrap_or_else(|| std::path::PathBuf::from("../manifests"));
-            let addr = resolved.bind_addr.clone();
-            tauri::async_runtime::spawn(async move {
-                if let Err(e) = owasidea_host::run(manifests, addr).await {
-                    eprintln!("host error: {e}");
-                }
-            });
+            if std::env::var("OWASIDEA_DEV_NO_HOST").as_deref() != Ok("1") {
+                let manifests = resolved
+                    .manifests_dir
+                    .clone()
+                    .unwrap_or_else(|| std::path::PathBuf::from("../manifests"));
+                let addr = resolved.bind_addr.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = owasidea_host::run(manifests, addr).await {
+                        eprintln!("host error: {e}");
+                    }
+                });
+            }
 
             let script_json = serde_json::json!({
                 "host": resolved.host_url,
