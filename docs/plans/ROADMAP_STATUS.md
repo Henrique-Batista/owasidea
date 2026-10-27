@@ -45,9 +45,9 @@ Status permitidos: `todo`, `doing`, `review`, `done`, `blocked`.
 | DL-02 | done | wt-config | e88b7b7 + ef52057 (merge b7aa2bc) | fmt/clippy/test + help flags | `--open/--no-ui/--no-host/--no-watch`; erros propagam; sem host duplicado |
 | DL-03 | done | wt-config | 1a3b597 (merge 1491d46) | fmt/clippy/test + call real no Shipyard | `call <plugin>.<fn>`; args inline/@file/stdin; timeout; erros |
 | DL-04 | done | main (release/1.0) | 1288751 | fmt/clippy/test + `--app` real | `call --app` com `--method/--path/--body`; `/app/{plugin}` |
-| DL-05 | todo | — | — | — | — |
+| DL-05 | done | wt-config | c64f4b5 (merge 2d97eb1) | fmt/clippy/test | histórico + SSE follow; filtro de nível; `--json` |
 | DL-06 | done | wt-host | 9dc2f94 + 1cc36b9 (merge 5c6ede5) | fmt/clippy/test + status real no Shipyard | health/build_id/plugins/services; `--watch`; JSON estável |
-| DL-07 | todo | — | — | — | — |
+| DL-07 | done | wt-ui | 5794bc9 (merge 0833b5d) | fmt/clippy/test | bloco next steps; stale bundle; links viewer |
 | DL-08 | todo | — | — | — | — |
 | CT-01 | done | wt-contracts | 06bd591 (merge ed25c20) | fmt/clippy/test isolado + Shipyard build | `params`/`results` estruturados; interface exports preservados |
 | CT-02 | done | wt-contracts | b7c0d48 (merge 1c7dc55) | fmt/clippy/test + Shipyard build | parser/validador de tipos com proptest; build valida params/results |
