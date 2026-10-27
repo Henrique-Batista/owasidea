@@ -108,6 +108,16 @@ enum Commands {
     /// Run the current build without file watching.
     #[command(about = "Run the current build without file watching.")]
     Run,
+    /// Print the JSON Schema for wasm-app.toml.
+    #[command(about = "Print the JSON Schema for wasm-app.toml.")]
+    Schema {
+        /// Optional output file.
+        #[arg(long)]
+        output: Option<PathBuf>,
+        /// Check mode (no-op placeholder).
+        #[arg(long)]
+        check: bool,
+    },
     /// Show host health, build id, plugins and services.
     #[command(about = "Show host health, build id, plugins and services.")]
     Status {
@@ -637,6 +647,25 @@ async fn main() -> anyhow::Result<()> {
                 no_watch,
             )
             .await
+        }
+        Commands::Schema { output, check } => {
+            let schema = schemars::schema_for!(crate::config::AppConfig);
+            let json = serde_json::to_string_pretty(&schema)? + "\n";
+            if check {
+                let out = output.ok_or_else(|| anyhow::anyhow!("--check requires --output"))?;
+                let actual = std::fs::read_to_string(&out)
+                    .map_err(|e| anyhow::anyhow!("cannot read {}: {}", out.display(), e))?;
+                if actual != json {
+                    anyhow::bail!("schema is out of date: {}", out.display());
+                }
+                Ok(())
+            } else if let Some(out) = output {
+                std::fs::write(out, json)?;
+                Ok(())
+            } else {
+                print!("{}", json);
+                Ok(())
+            }
         }
         Commands::Run => {
             let addr = cli
