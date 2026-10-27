@@ -572,3 +572,202 @@ fn call_command_reads_args_from_stdin() {
     .success()
     .stdout(predicates::str::contains("ok"));
 }
+
+#[test]
+fn verify_dist_valid_signed_component() {
+    use sha2::{Digest, Sha256};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let root = std::env::temp_dir().join(format!(
+        "owasidea-verify-test-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let dist = root.join("dist");
+    std::fs::create_dir_all(dist.join("manifests")).unwrap();
+    std::fs::create_dir_all(dist.join("plugins/demo")).unwrap();
+    let component = b"component bytes";
+    std::fs::write(dist.join("plugins/demo/demo.component.wasm"), component).unwrap();
+    let sha = format!("{:x}", Sha256::digest(component));
+    let manifest = serde_json::json!({
+        "name":"demo","version":"1.0.0","language":"rust","abi":"wasi-0.2",
+        "schema_version":1,"host_abi":owasidea_host::HOST_ABI,"min_host":owasidea_host::HOST_VERSION,
+        "runtime":"wasi-component","type":"library","component":"../plugins/demo/demo.component.wasm",
+        "exports":[],"imports":{"wasi":[],"host":[],"plugins":[]},
+        "permissions":{"filesystem":[],"http":{"outbound":[],"inbound":false},"kv":null,
+            "network":{"outbound":[],"inbound":[]},
+            "resources":{"max_memory_mb":64,"max_fuel":1000000,"timeout_ms":5000,"max_instances":1}},
+        "state":{"persistent":false,"storage":"none","root":null},
+        "composition":{"strategy":"build-time","entry":false},
+        "metadata":{"author":"","license":"MIT","description":"","sha256":sha}
+    });
+    std::fs::write(
+        dist.join("manifests/demo.manifest.json"),
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    std::fs::create_dir_all(dist.join("keys")).unwrap();
+    let mut keygen = Command::cargo_bin("owasidea").unwrap();
+    keygen
+        .args(["keygen", "--out"])
+        .arg(dist.join("keys"))
+        .assert()
+        .success();
+
+    let mut sign = Command::cargo_bin("owasidea").unwrap();
+    sign.args(["sign", "demo", "--manifest-dir"])
+        .arg(dist.join("manifests"))
+        .args(["--key"])
+        .arg(dist.join("keys/owasidea.key"))
+        .assert()
+        .success();
+
+    // valid
+    let mut verify = Command::cargo_bin("owasidea").unwrap();
+    let out = verify
+        .args(["verify"])
+        .arg(&dist)
+        .args(["--json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["ok"], true);
+    assert!(report["checked"].as_u64().unwrap() >= 1);
+    assert!(report["errors"].as_array().unwrap().is_empty());
+
+    // tampered component
+    std::fs::write(dist.join("plugins/demo/demo.component.wasm"), b"tampered").unwrap();
+    let mut verify2 = Command::cargo_bin("owasidea").unwrap();
+    verify2.args(["verify"]).arg(&dist).assert().failure();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn verify_dist_unsigned_or_missing_key_fails() {
+    use sha2::{Digest, Sha256};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let root = std::env::temp_dir().join(format!(
+        "owasidea-verify-unsigned-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let dist = root.join("dist");
+    std::fs::create_dir_all(dist.join("manifests")).unwrap();
+    std::fs::create_dir_all(dist.join("plugins/demo")).unwrap();
+    let component = b"component bytes";
+    std::fs::write(dist.join("plugins/demo/demo.component.wasm"), component).unwrap();
+    let sha = format!("{:x}", Sha256::digest(component));
+    let manifest = serde_json::json!({
+        "name":"demo","version":"1.0.0","language":"rust","abi":"wasi-0.2",
+        "schema_version":1,"host_abi":owasidea_host::HOST_ABI,"min_host":owasidea_host::HOST_VERSION,
+        "runtime":"wasi-component","type":"library","component":"../plugins/demo/demo.component.wasm",
+        "exports":[],"imports":{"wasi":[],"host":[],"plugins":[]},
+        "permissions":{"filesystem":[],"http":{"outbound":[],"inbound":false},"kv":null,
+            "network":{"outbound":[],"inbound":[]},
+            "resources":{"max_memory_mb":64,"max_fuel":1000000,"timeout_ms":5000,"max_instances":1}},
+        "state":{"persistent":false,"storage":"none","root":null},
+        "composition":{"strategy":"build-time","entry":false},
+        "metadata":{"author":"","license":"MIT","description":"","sha256":sha}
+    });
+    std::fs::write(
+        dist.join("manifests/demo.manifest.json"),
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    let mut verify = Command::cargo_bin("owasidea").unwrap();
+    verify.args(["verify"]).arg(&dist).assert().failure();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn verify_dist_ui_asset_hash_mismatch_fails() {
+    use sha2::{Digest, Sha256};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let root = std::env::temp_dir().join(format!(
+        "owasidea-verify-ui-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let dist = root.join("dist");
+    std::fs::create_dir_all(dist.join("manifests")).unwrap();
+    std::fs::create_dir_all(dist.join("ui/public/plugins/ui")).unwrap();
+    let asset = b"<html>hi</html>";
+    std::fs::write(dist.join("ui/public/plugins/ui/index.html"), asset).unwrap();
+    let file_digest = format!("{:x}", Sha256::digest(asset));
+    let mut files = serde_json::Map::new();
+    files.insert("index.html".to_string(), serde_json::json!(file_digest));
+    let bundle_digest_input: std::collections::BTreeMap<String, String> =
+        [("index.html".to_string(), file_digest.clone())]
+            .into_iter()
+            .collect();
+    // compute bundle digest same as cli
+    let mut h = Sha256::new();
+    for (p, d) in &bundle_digest_input {
+        h.update(p.as_bytes());
+        h.update([0]);
+        h.update(d.as_bytes());
+        h.update(b"\n");
+    }
+    let bundle_digest = format!("{:x}", h.finalize());
+    let manifest = serde_json::json!({
+        "name":"ui","version":"1.0.0","language":"yew","abi":"wasi-0.2",
+        "schema_version":1,"host_abi":owasidea_host::HOST_ABI,"min_host":owasidea_host::HOST_VERSION,
+        "runtime":"js-wasm","type":"ui","component":"",
+        "exports":[],"imports":{"wasi":[],"host":[],"plugins":[]},
+        "permissions":{"filesystem":[],"http":{"outbound":[],"inbound":false},"kv":null,
+            "network":{"outbound":[],"inbound":[]},
+            "resources":{"max_memory_mb":64,"max_fuel":1000000,"timeout_ms":5000,"max_instances":1}},
+        "state":{"persistent":false,"storage":"none","root":null},
+        "composition":{"strategy":"build-time","entry":false},
+        "metadata":{"author":"","license":"MIT","description":"","sha256":"",
+            "ui":{"entry":"index.html","sha256":bundle_digest,"files":files,"bridge":[]}}
+    });
+    std::fs::write(
+        dist.join("manifests/ui.manifest.json"),
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    std::fs::create_dir_all(dist.join("keys")).unwrap();
+    let mut keygen = Command::cargo_bin("owasidea").unwrap();
+    keygen
+        .args(["keygen", "--out"])
+        .arg(dist.join("keys"))
+        .assert()
+        .success();
+    let mut sign = Command::cargo_bin("owasidea").unwrap();
+    sign.args(["sign", "ui", "--manifest-dir"])
+        .arg(dist.join("manifests"))
+        .args(["--key"])
+        .arg(dist.join("keys/owasidea.key"))
+        .assert()
+        .success();
+
+    // valid first
+    let mut verify = Command::cargo_bin("owasidea").unwrap();
+    verify.args(["verify"]).arg(&dist).assert().success();
+
+    // tamper asset
+    std::fs::write(
+        dist.join("ui/public/plugins/ui/index.html"),
+        b"<html>tampered</html>",
+    )
+    .unwrap();
+    let mut verify2 = Command::cargo_bin("owasidea").unwrap();
+    verify2.args(["verify"]).arg(&dist).assert().failure();
+    std::fs::remove_dir_all(root).unwrap();
+}
