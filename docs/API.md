@@ -144,3 +144,8 @@ const out = await client.coreRust.ping();
 
 Calls use `POST /plugin/{name}/call` with `{ function, args }`. Failures throw
 `CallError` with `status`, `body`, `plugin`, `function`.
+
+## Manifest ABI fields (CT-08)
+
+Manifests include `schema_version`, `host_abi`, and `min_host`. The host rejects
+incompatible manifests at load time; see `docs/ABI.md`.

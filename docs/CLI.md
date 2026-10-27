@@ -137,6 +137,8 @@ Check generated manifests against `wasm-app.toml`:
 - component checksum matches
 - filesystem/KV/HTTP permissions match the config
 - UI manifests declare `runtime = "js-wasm"` and `type = "ui"`
+- manifest ABI fields (`schema_version`, `host_abi`, `min_host`) are compatible
+  with the host (see `docs/ABI.md`)
 
 Exits non-zero on drift. Run after `build`, especially in CI.
 

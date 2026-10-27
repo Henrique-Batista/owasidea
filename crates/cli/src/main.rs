@@ -1566,6 +1566,9 @@ fn generate_manifest(
         "name": name,
         "version": version,
         "language": language,
+        "schema_version": 1,
+        "host_abi": owasidea_host::HOST_ABI,
+        "min_host": owasidea_host::HOST_VERSION,
         "abi": abi,
         "runtime": "wasi-component",
         "type": kind,
@@ -2004,6 +2007,9 @@ fn build_ui_plugin(
         "version": plugin.version.as_deref().unwrap_or(app_version),
         "language": plugin.language,
         "abi": "webview-v1",
+        "schema_version": 1,
+        "host_abi": owasidea_host::HOST_ABI,
+        "min_host": owasidea_host::HOST_VERSION,
         "runtime": "js-wasm",
         "type": "ui",
         "component": "",
@@ -2956,6 +2962,72 @@ fn cmd_validate(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
         }
         let mraw = std::fs::read_to_string(&manifest_path)?;
         let manifest: serde_json::Value = serde_json::from_str(&mraw)?;
+        // CT-08 ABI fields
+        let sv = manifest["schema_version"].as_u64().unwrap_or(0);
+        if sv > 1 {
+            println!("{}: bad schema_version {}", name, sv);
+            errors += 1;
+        }
+        if sv == 1 {
+            match manifest["host_abi"].as_str() {
+                Some(ha) if ha == owasidea_host::HOST_ABI => {}
+                Some(ha) => {
+                    println!("{}: host_abi {} != {}", name, ha, owasidea_host::HOST_ABI);
+                    errors += 1;
+                }
+                None => {
+                    println!("{}: host_abi required for schema_version 1", name);
+                    errors += 1;
+                }
+            }
+            match manifest["min_host"].as_str() {
+                Some(mh) => {
+                    let required = semver::Version::parse(mh).ok();
+                    let host = semver::Version::parse(owasidea_host::HOST_VERSION).ok();
+                    let bad = match (required, host) {
+                        (Some(r), Some(h)) => r > h,
+                        _ => true,
+                    };
+                    if bad {
+                        println!(
+                            "{}: min_host {} > host {}",
+                            name,
+                            mh,
+                            owasidea_host::HOST_VERSION
+                        );
+                        errors += 1;
+                    }
+                }
+                None => {
+                    println!("{}: min_host required for schema_version 1", name);
+                    errors += 1;
+                }
+            }
+        } else {
+            if let Some(ha) = manifest["host_abi"].as_str() {
+                if ha != owasidea_host::HOST_ABI {
+                    println!("{}: host_abi {} != {}", name, ha, owasidea_host::HOST_ABI);
+                    errors += 1;
+                }
+            }
+            if let Some(mh) = manifest["min_host"].as_str() {
+                let required = semver::Version::parse(mh).ok();
+                let host = semver::Version::parse(owasidea_host::HOST_VERSION).ok();
+                let bad = match (required, host) {
+                    (Some(r), Some(h)) => r > h,
+                    _ => true,
+                };
+                if bad {
+                    println!(
+                        "{}: min_host {} > host {}",
+                        name,
+                        mh,
+                        owasidea_host::HOST_VERSION
+                    );
+                    errors += 1;
+                }
+            }
+        }
         if p.runtime.as_deref() == Some("js-wasm") {
             if manifest["runtime"].as_str() != Some("js-wasm")
                 || manifest["type"].as_str() != Some("ui")
