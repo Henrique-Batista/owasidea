@@ -159,3 +159,11 @@ Fields are labelled with the parameter `name`. The Invoke button validates arity
 client-side types, calls `POST /plugin/{name}/call`, and shows the returned
 `result`/`results`, HTTP status/body on error, and latency in milliseconds.
 fetch and curl snippets are generated from the submitted arguments.
+
+## Dev reload (DL-08)
+
+During `owasidea dev`, changes under `plugins/<name>/dist/**` (or `plugins/<name>/index.html`)
+are detected by the watcher. The CLI rebuilds that UI plugin's assets/index entry,
+regenerates `ui/public/ui-plugins.json`, and the UI polls the index every ~1.5s;
+when the version/hash changes, the plugin iframe is reloaded with its sandbox
+and allowlist preserved. Production (no watcher) keeps the existing behavior.
