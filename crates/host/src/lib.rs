@@ -2974,12 +2974,21 @@ fn compilation_cache() -> Option<wasmtime::Cache> {
     }
 }
 
+/// Only `*.manifest.json` files are plugin manifests. Other JSON files that
+/// live next to them (`permissions.lock.json`, `permissions.diff.json`, …) are
+/// side artifacts and must not be parsed as manifests.
+fn is_manifest_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".manifest.json"))
+}
+
 fn load_manifests(dir: &Path) -> Result<Vec<(Manifest, serde_json::Value, PathBuf)>> {
     let mut out = Vec::new();
     for entry in std::fs::read_dir(dir).with_context(|| format!("reading {dir:?}"))? {
         let entry = entry?;
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+        if !is_manifest_file(&path) {
             continue;
         }
         let raw = std::fs::read_to_string(&path)?;
@@ -3527,6 +3536,38 @@ mod tests {
         let raw = r#"{"name":"x","version":"0.1.0","language":"rust","abi":"wasi-0.2","runtime":"wasi-component","type":"library","component":"x.wasm","exports":[],"imports":{"wasi":[],"host":[],"plugins":[]},"permissions":{},"state":{},"composition":{},"metadata":{}}"#;
         let m: Manifest = serde_json::from_str(raw).unwrap();
         assert_eq!(m.name, "x");
+    }
+
+    #[test]
+    fn load_manifests_ignores_non_manifest_json() {
+        const VALID: &str = r#"{"name":"x","version":"0.1.0","language":"rust","abi":"wasi-0.2","runtime":"wasi-component","type":"library","component":"x.wasm","exports":[],"imports":{"wasi":[],"host":[],"plugins":[]},"permissions":{},"state":{},"composition":{},"metadata":{}}"#;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("x.manifest.json"), VALID).unwrap();
+        std::fs::write(
+            dir.path().join("permissions.lock.json"),
+            r#"{"plugins":{"x":{"host":[]}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("permissions.diff.json"),
+            r#"{"widened":[]}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("notes.json"), r#"{"hello":"world"}"#).unwrap();
+        std::fs::write(dir.path().join("README.md"), "not json").unwrap();
+
+        let loaded = load_manifests(dir.path()).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].0.name, "x");
+        assert_eq!(loaded[0].2.file_name().unwrap(), "x.manifest.json");
+    }
+
+    #[test]
+    fn load_manifests_still_rejects_broken_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("broken.manifest.json"), r#"{"name":42}"#).unwrap();
+        let error = load_manifests(dir.path()).unwrap_err().to_string();
+        assert!(error.contains("invalid manifest"), "{error}");
     }
 
     #[test]
