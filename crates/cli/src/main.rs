@@ -23,6 +23,7 @@ mod status;
 mod templates;
 #[cfg(test)]
 mod test_support;
+mod tui;
 mod type_parser;
 mod updater;
 mod validate;
@@ -151,7 +152,13 @@ enum Commands {
         no_host: bool,
         #[arg(long)]
         no_watch: bool,
+        /// Print logs instead of the interactive dashboard (also automatic without a TTY).
+        #[arg(long)]
+        no_tui: bool,
     },
+    /// Open the interactive dashboard for a running host.
+    #[command(about = "Open the interactive dashboard for a running host.")]
+    Tui,
     /// Run the current build without file watching.
     #[command(about = "Run the current build without file watching.")]
     Run,
@@ -913,12 +920,18 @@ async fn main() -> anyhow::Result<()> {
             no_ui,
             no_host,
             no_watch,
+            no_tui,
         } => {
             let addr = cli
                 .http_addr
                 .clone()
                 .or_else(|| read_host_addr(&cli.config))
                 .unwrap_or_else(|| "127.0.0.1:0".to_string());
+            let use_tui = !no_tui
+                && !cli.json
+                && !desktop
+                && std::io::stdin().is_terminal()
+                && std::io::stdout().is_terminal();
             cmd_dev(
                 &cli.config,
                 &cli.manifest_dir,
@@ -929,8 +942,33 @@ async fn main() -> anyhow::Result<()> {
                 no_ui,
                 no_host,
                 no_watch,
+                use_tui,
             )
             .await
+        }
+        Commands::Tui => {
+            tui::require_terminal()?;
+            let addr = cli
+                .http_addr
+                .clone()
+                .or_else(|| read_host_addr(&cli.config))
+                .unwrap_or_else(|| "127.0.0.1:8787".to_string());
+            let host_url = format!("http://{}", addr.trim_start_matches("http://"));
+            let app_name = read_app_config(&cli.config)
+                .ok()
+                .and_then(|cfg| cfg.app.and_then(|app| app.name))
+                .unwrap_or_else(|| "app".to_string());
+            let session = tui::Session {
+                app_name,
+                host_url,
+                ui_url: None,
+                dev: false,
+                config_path: cli.config.clone(),
+                manifest_dir: app_path(&app_root(&cli.config), &cli.manifest_dir),
+                children: Vec::new(),
+            };
+            let (tx, rx) = tui::channel();
+            tui::run(session, tx, rx).await
         }
         Commands::Schema { output, check } => {
             let schema = schemars::schema_for!(crate::config::AppConfig);
@@ -2871,6 +2909,7 @@ async fn cmd_dev(
     no_ui: bool,
     no_host: bool,
     no_watch: bool,
+    use_tui: bool,
 ) -> anyhow::Result<()> {
     let _ = read_app_config(config_path)?;
     if desktop && no_ui {
@@ -2935,7 +2974,9 @@ async fn cmd_dev(
         let ui_url = format!("http://127.0.0.1:{port}");
         match crate::config_render::write_tauri_dev_config(config_path, &ui_url) {
             Ok(path) => {
-                println!("Tauri dev config: {} (devUrl {})", path.display(), ui_url);
+                if !use_tui {
+                    println!("Tauri dev config: {} (devUrl {})", path.display(), ui_url);
+                }
                 tauri_dev_config_path = Some(path);
             }
             Err(error) => eprintln!("warning: could not write tauri.dev.conf.json: {error}"),
@@ -2979,38 +3020,48 @@ async fn cmd_dev(
         "OWASIDEA_DEV_WATCH_PATHS",
         serde_json::to_string(&reported_watch_paths)?,
     );
-    println!(
-        "UI URL:         {}",
-        ui_port
-            .map(|port| format!("http://127.0.0.1:{port}"))
-            .unwrap_or_else(|| "disabled (no ui/package.json)".to_string())
-    );
-    println!("Host URL:       {host_url}");
-    println!(
-        "Loaded plugins: {}",
-        loaded_plugin_names(&manifest_dir).join(", ")
-    );
-    println!(
-        "Watch paths:    {}",
-        if effective_watch {
-            displayed_watch_paths.join(", ")
-        } else {
-            "disabled by [dev].watch".to_string()
-        }
-    );
-
-    // DL-07: next steps block.
+    // The dashboard owns the terminal, so developer messages go to its Output
+    // view instead of stdout. Plain mode keeps the printed banner and logs.
+    let (tui_tx, tui_rx) = if use_tui {
+        let (tx, rx) = tui::channel();
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
+    };
+    let sink = match &tui_tx {
+        Some(tx) => tui::Sink::Tui(tx.clone()),
+        None => tui::Sink::Stdout,
+    };
     let ui_url_str = ui_port.map(|p| format!("http://127.0.0.1:{p}"));
     let plugins = loaded_plugin_names(&manifest_dir);
-    print!(
-        "{}",
-        crate::dev_next_steps::dev_next_steps(
-            ui_url_str.as_deref(),
-            &host_url,
-            &plugins,
-            stale_bundle,
-        )
-    );
+    if !use_tui {
+        println!(
+            "UI URL:         {}",
+            ui_url_str
+                .clone()
+                .unwrap_or_else(|| "disabled (no ui/package.json)".to_string())
+        );
+        println!("Host URL:       {host_url}");
+        println!("Loaded plugins: {}", plugins.join(", "));
+        println!(
+            "Watch paths:    {}",
+            if effective_watch {
+                displayed_watch_paths.join(", ")
+            } else {
+                "disabled by [dev].watch".to_string()
+            }
+        );
+        // DL-07: next steps block.
+        print!(
+            "{}",
+            crate::dev_next_steps::dev_next_steps(
+                ui_url_str.as_deref(),
+                &host_url,
+                &plugins,
+                stale_bundle,
+            )
+        );
+    }
 
     let mut children: Vec<std::process::Child> = Vec::new();
     if ui_present && !desktop && !no_ui {
@@ -3022,7 +3073,8 @@ async fn cmd_dev(
             );
         }
         let ui_port = ui_port.unwrap().to_string();
-        let child = std::process::Command::new("node")
+        let mut command = std::process::Command::new("node");
+        command
             .args([
                 "node_modules/vite/bin/vite.js",
                 "--host",
@@ -3032,12 +3084,25 @@ async fn cmd_dev(
                 "--strictPort",
             ])
             .env("OWASIDEA_HOST", host_url.clone())
-            .current_dir(&ui_dir)
-            .spawn()?;
-        children.push(child);
-        println!(
-            "[dev] UI ready at http://127.0.0.1:{ui_port} — press Ctrl+C to stop Vite and the host"
-        );
+            .current_dir(&ui_dir);
+        if use_tui {
+            // Vite reads single keys from stdin (its own `r`/`o`/`q` shortcuts);
+            // it must not share the terminal with the dashboard.
+            command
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+        }
+        let child = command.spawn()?;
+        match &tui_tx {
+            Some(tx) => children.push(tui::pipe_output(child, "ui", tx.clone())),
+            None => children.push(child),
+        }
+        if !use_tui {
+            println!(
+                "[dev] UI ready at http://127.0.0.1:{ui_port} — press Ctrl+C to stop Vite and the host"
+            );
+        }
     }
     if effective_watch {
         start_dev_watcher(
@@ -3046,7 +3111,45 @@ async fn cmd_dev(
             manifest_dir.to_path_buf(),
             host_url.clone(),
             dev.hot_reload,
+            sink.clone(),
         );
+    }
+
+    if let (Some(tx), Some(rx)) = (tui_tx, tui_rx) {
+        if !no_host {
+            // The host runs as a child so its logs are captured instead of
+            // written over the dashboard, same as `dev --desktop`.
+            let exe = std::env::current_exe()?;
+            let host_child = std::process::Command::new(&exe)
+                .arg("--config")
+                .arg(config_path)
+                .arg("--manifest-dir")
+                .arg(&manifest_dir)
+                .arg("--http-addr")
+                .arg(http_addr.clone())
+                .arg("run")
+                .current_dir(&root)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .context("failed to spawn host")?;
+            children.push(tui::pipe_output(host_child, "host", tx.clone()));
+        }
+        let app_name = read_app_config(config_path)
+            .ok()
+            .and_then(|cfg| cfg.app.and_then(|app| app.name))
+            .unwrap_or_else(|| "app".to_string());
+        let session = tui::Session {
+            app_name,
+            host_url: host_url.clone(),
+            ui_url: if no_ui { None } else { ui_url_str },
+            dev: true,
+            config_path: config_path.to_path_buf(),
+            manifest_dir: manifest_dir.to_path_buf(),
+            children,
+        };
+        return tui::run(session, tx, rx).await;
     }
 
     if desktop {
@@ -3087,6 +3190,7 @@ async fn cmd_dev(
                 .arg(http_addr.clone())
                 .arg("run")
                 .current_dir(&root)
+                .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .spawn()
@@ -3334,6 +3438,7 @@ fn start_dev_watcher(
     manifest_dir: PathBuf,
     host_url: String,
     hot_reload: bool,
+    sink: tui::Sink,
 ) {
     std::thread::spawn(move || {
         let root = plugins_dir.parent().map(PathBuf::from).unwrap_or_default();
@@ -3348,9 +3453,12 @@ fn start_dev_watcher(
                     continue;
                 }
                 if let Some(plugin) = plugin_changed_by_path(changed, &manifest_dir) {
-                    println!(
-                        "[dev] changed {}; validating/reloading {plugin}",
-                        changed.display()
+                    sink.info(
+                        "dev",
+                        format!(
+                            "changed {}; validating/reloading {plugin}",
+                            changed.display()
+                        ),
                     );
                     if hot_reload {
                         reload_plugins.insert(plugin.to_string());
@@ -3380,9 +3488,12 @@ fn start_dev_watcher(
                         )
                     )
                 {
-                    println!(
-                        "[dev] source changed: {}; run `owasidea build` to compile",
-                        changed.display()
+                    sink.info(
+                        "dev",
+                        format!(
+                            "source changed: {}; run `owasidea build` to compile",
+                            changed.display()
+                        ),
                     );
                 }
             }
@@ -3390,8 +3501,11 @@ fn start_dev_watcher(
                 // Debounce: wait for the directory copy to settle.
                 std::thread::sleep(std::time::Duration::from_millis(300));
                 for name in ui_plugins_to_rebuild {
-                    println!("[dev] UI plugin dist changed: {name}; rebuilding index");
-                    rebuild_ui_plugin_from_dist(&root, &name, &manifest_dir);
+                    sink.info(
+                        "dev",
+                        format!("UI plugin dist changed: {name}; rebuilding index"),
+                    );
+                    rebuild_ui_plugin_from_dist(&root, &name, &manifest_dir, &sink);
                 }
             }
             if !reload_plugins.is_empty() {
@@ -3399,12 +3513,13 @@ fn start_dev_watcher(
                     let url = format!("{host_url}/plugin/{plugin}/reload");
                     match reqwest::blocking::Client::new().post(url).send() {
                         Ok(response) if response.status().is_success() => {
-                            println!("[dev] reloaded {plugin}");
+                            sink.info("dev", format!("reloaded {plugin}"));
                         }
-                        Ok(response) => {
-                            eprintln!("[dev] reload {plugin} failed: {}", response.status())
-                        }
-                        Err(error) => eprintln!("[dev] reload {plugin} failed: {error}"),
+                        Ok(response) => sink.error(
+                            "dev",
+                            format!("reload {plugin} failed: {}", response.status()),
+                        ),
+                        Err(error) => sink.error("dev", format!("reload {plugin} failed: {error}")),
                     }
                 }
             }
@@ -3487,7 +3602,12 @@ fn ui_plugin_name_for_path(path: &Path, plugins_dir: &Path) -> Option<String> {
     }
 }
 
-fn rebuild_ui_plugin_from_dist(root: &Path, plugin_name: &str, manifest_dir: &Path) {
+fn rebuild_ui_plugin_from_dist(
+    root: &Path,
+    plugin_name: &str,
+    manifest_dir: &Path,
+    sink: &tui::Sink,
+) {
     let config_path = root.join("wasm-app.toml");
     let Ok(raw) = std::fs::read_to_string(&config_path) else {
         return;
@@ -3542,10 +3662,16 @@ fn rebuild_ui_plugin_from_dist(root: &Path, plugin_name: &str, manifest_dir: &Pa
                     &index_path,
                     serde_json::to_string_pretty(&ui_index).unwrap_or_default() + "\n",
                 );
-                println!("[dev] regenerated UI index: {}", index_path.display());
+                sink.info(
+                    "dev",
+                    format!("regenerated UI index: {}", index_path.display()),
+                );
             }
         }
-        Err(error) => eprintln!("[dev] UI plugin rebuild {plugin_name} failed: {error}"),
+        Err(error) => sink.error(
+            "dev",
+            format!("UI plugin rebuild {plugin_name} failed: {error}"),
+        ),
     }
 }
 

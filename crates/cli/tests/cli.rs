@@ -1918,3 +1918,24 @@ fn build_fails_when_go_plugin_has_neither_wit_nor_component() {
     );
     std::fs::remove_dir_all(&root).unwrap();
 }
+
+#[test]
+fn tui_refuses_without_a_terminal() {
+    let mut cmd = Command::cargo_bin("owasidea").unwrap();
+    cmd.args(["tui"]);
+    let output = cmd.output().unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("interactive terminal"), "stderr: {stderr}");
+}
+
+#[test]
+fn tui_and_dev_document_no_tui_fallback() {
+    let mut tui = Command::cargo_bin("owasidea").unwrap();
+    let output = tui.args(["tui", "--help"]).output().unwrap();
+    assert!(output.status.success());
+    let mut dev = Command::cargo_bin("owasidea").unwrap();
+    let output = dev.args(["dev", "--help"]).output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--no-tui"));
+}
