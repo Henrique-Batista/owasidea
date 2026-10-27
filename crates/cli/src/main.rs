@@ -554,7 +554,7 @@ fn shell_command(command: &str) -> std::process::Command {
     {
         let mut cmd = std::process::Command::new("cmd");
         cmd.args(["/C", command]);
-        return cmd;
+        cmd
     }
     #[cfg(not(windows))]
     {
@@ -795,9 +795,11 @@ pub(crate) fn copy_dir_all(source: &Path, destination: &Path) -> anyhow::Result<
         if file_type.is_dir() {
             copy_dir_all(&path, &target)?;
         } else if file_type.is_symlink() {
-            let link = std::fs::read_link(&path)?;
             #[cfg(unix)]
-            std::os::unix::fs::symlink(&link, &target)?;
+            {
+                let link = std::fs::read_link(&path)?;
+                std::os::unix::fs::symlink(&link, &target)?;
+            }
             #[cfg(not(unix))]
             std::fs::copy(&path, &target)?;
         } else if file_type.is_file() {
