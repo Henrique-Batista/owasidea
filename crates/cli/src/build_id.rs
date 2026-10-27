@@ -115,10 +115,10 @@ pub fn ensure_env_from_manifests(manifest_dir: &std::path::Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use crate::test_support::ENV_LOCK as LOCK;
 
-    // Env vars are process-global; serialize tests.
-    static LOCK: Mutex<()> = Mutex::new(());
+    // Env vars are process-global; the crate-wide lock serializes every test
+    // that mutates or reads them, including `config_render`.
 
     #[test]
     fn override_takes_precedence() {

@@ -147,7 +147,28 @@ Check generated manifests against `wasm-app.toml`:
 - manifest ABI fields (`schema_version`, `host_abi`, `min_host`) are compatible
   with the host (see `docs/ABI.md`)
 
-Exits non-zero on drift. Run after `build`, especially in CI.
+Deprecated-but-working manifests produce warnings instead of errors (one line
+per warning; wrapped here for readability):
+
+```text
+warning: notes: ABI_LEGACY_MANIFEST: deprecated legacy manifest (no integer
+schema_version field); host ABI 1 still accepts it with defaults, but a future
+host ABI will reject it. Regenerate with `owasidea build`
+(see docs/ABI_POLICY.md).
+warning: notes: ABI_MISSING_HOST_FIELDS: manifest has no host_abi or min_host;
+the host applies defaults. Regenerate with `owasidea build`
+(see docs/ABI_POLICY.md).
+```
+
+Warning codes (`ABI_LEGACY_MANIFEST`, `ABI_MISSING_HOST_FIELDS`) are stable;
+match the code, not the prose. Warnings go to stdout and do **not** change the
+exit status: the last line is `Validation OK with N deprecation warning(s)` and
+the command exits `0`. Incompatibilities the host cannot honour (unknown
+`schema_version`, `host_abi` mismatch, `min_host` newer than the host) are
+errors.
+
+Exits non-zero on drift. Run after `build`, especially in CI. Policy and removal
+window: `docs/ABI_POLICY.md`; 0.x upgrade: `docs/MIGRATION_0_X_TO_1_0.md`.
 
 ### `verify <dist-dir> [--json]`
 

@@ -686,9 +686,8 @@ pub fn cmd_config_render(config_path: &Path, target: &str, check: bool) -> anyho
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::test_support::ENV_LOCK;
 
     fn temp_root() -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(

@@ -354,3 +354,8 @@ Calls use `POST /plugin/{name}/call` with `{ function, args }`. Failures throw
 
 Manifests include `schema_version`, `host_abi`, and `min_host`. The host rejects
 incompatible manifests at load time; see `docs/ABI.md`.
+
+Legacy manifests (no `schema_version`) are still accepted under host ABI 1 and
+are deprecated: `owasidea validate` warns (`ABI_LEGACY_MANIFEST`,
+`ABI_MISSING_HOST_FIELDS`) without failing. Regenerate with `owasidea build`.
+Policy: `docs/ABI_POLICY.md`; 0.x upgrade: `docs/MIGRATION_0_X_TO_1_0.md`.

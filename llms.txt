@@ -15,6 +15,9 @@
 - [Updater](docs/UPDATER.md): Tauri updater, latest.json, stable/beta channels, local static-server test.
 - [Code signing](docs/CODE_SIGNING.md): Windows Authenticode, macOS Developer ID/notarization, CI secrets, safe skip without a certificate.
 - [Release](docs/RELEASE.md): gates, profiles, signing keys, CI secrets, publish/rollback.
+- [ABI policy](docs/ABI_POLICY.md): semver rules, breaking changes, deprecation window, warning vs error.
+- [Migration 0.x to 1.0](docs/MIGRATION_0_X_TO_1_0.md): config, manifest, bridge, updater, ABI and CLI steps.
+- [Changelog](CHANGELOG.md): what shipped in each release.
 - [Clean build environments](docs/CLEAN_BUILD.md): bubblewrap isolation for AppImage, plus Arch devtools/Debian debootstrap chroots without Docker.
 - [Reference app](examples/shipyard/README.md): real six-language app with isolated Svelte/React UI and Tauri packaging.
 - [Architecture](docs/ARCHITECTURE.md): host, runtime, manifests, capability broker.
