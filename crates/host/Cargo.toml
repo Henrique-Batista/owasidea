@@ -15,6 +15,9 @@ path = "src/main.rs"
 
 [features]
 default = []
+# Experimental long-call jobs + SSE progress + cancel (ADR-0005, RL-06).
+# Off by default: no new routes, no job manager, and `/call` is unchanged.
+streaming = []
 # Optional OpenTelemetry tracing (RL-05). Off by default: no new dependencies,
 # no span construction, and no OTLP exporter unless this feature is enabled and
 # `OTEL_EXPORTER_OTLP_ENDPOINT` is set.
@@ -64,3 +67,4 @@ tracing-opentelemetry = { version = "0.34", optional = true }
 reqwest = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }
+tower = { version = "0.5", features = ["util"] }

@@ -33,6 +33,13 @@ pub unsafe fn _export_compute_cabi<T: Guest>(arg0: i32, arg1: i32) -> i32 {
 }
 #[doc(hidden)]
 #[allow(non_snake_case)]
+pub unsafe fn _export_slow_sum_cabi<T: Guest>(arg0: u32) -> i32 {
+    #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+    let result0 = T::slow_sum(arg0);
+    _rt::as_i32(result0)
+}
+#[doc(hidden)]
+#[allow(non_snake_case)]
 pub unsafe fn _export_remember_cabi<T: Guest>(
     arg0: *mut u8,
     arg1: usize,
@@ -65,6 +72,7 @@ pub trait Guest {
     fn greet(name: _rt::String) -> _rt::String;
     fn compute(a: i32, b: i32) -> i32;
     fn remember(key: _rt::String, value: _rt::String) -> _rt::String;
+    fn slow_sum(count: u32) -> u32;
 }
 #[doc(hidden)]
 macro_rules! __export_world_example_cabi {
@@ -77,7 +85,9 @@ macro_rules! __export_world_example_cabi {
         #[unsafe (export_name = "compute")] unsafe extern "C" fn export_compute(arg0 :
         i32, arg1 : i32,) -> i32 { unsafe { $($path_to_types)*::
         _export_compute_cabi::<$ty > (arg0, arg1) } } #[unsafe (export_name =
-        "remember")] unsafe extern "C" fn export_remember(arg0 : * mut u8, arg1 : usize,
+        "slow-sum")] unsafe extern "C" fn export_slow_sum(arg0 : u32,) -> i32 { unsafe {
+        $($path_to_types)*:: _export_slow_sum_cabi::<$ty > (arg0) } } #[unsafe (export_name
+        = "remember")] unsafe extern "C" fn export_remember(arg0 : * mut u8, arg1 : usize,
         arg2 : * mut u8, arg3 : usize,) -> * mut u8 { unsafe { $($path_to_types)*::
         _export_remember_cabi::<$ty > (arg0, arg1, arg2, arg3) } } #[unsafe (export_name
         = "cabi_post_remember")] unsafe extern "C" fn _post_return_remember(arg0 : * mut

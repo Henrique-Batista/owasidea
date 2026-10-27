@@ -3344,6 +3344,7 @@ dependencies = [
  "sha2",
  "tokio",
  "tokio-stream",
+ "tower",
  "tower-http",
  "tracing",
  "tracing-opentelemetry",

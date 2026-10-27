@@ -7,4 +7,7 @@ world example {
     export greet: func(name: string) -> string;
     export compute: func(a: s32, b: s32) -> s32;
     export remember: func(key: string, value: string) -> string;
+    // Long-running CPU export used by the experimental streaming jobs
+    // prototype (ADR-0005). The host can run it as a job and cancel it.
+    export slow-sum: func(count: u32) -> u32;
 }

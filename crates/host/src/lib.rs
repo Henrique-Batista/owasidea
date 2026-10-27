@@ -34,12 +34,24 @@ use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpCtxView, WasiHttpView};
 mod otel;
 mod plugin_metrics;
 
+// Experimental long-call jobs (ADR-0005, RL-06). Off by default so the stable
+// `/call` surface and its routes are byte-for-byte unchanged.
+#[cfg(feature = "streaming")]
+mod jobs;
+
 // ---------------------------------------------------------------------------
 // Host ABI version (CT-08)
 // ---------------------------------------------------------------------------
 
 pub const HOST_ABI: &str = "1";
 pub const HOST_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Default timeout for one library call when the manifest does not set
+/// `permissions.resources.timeout_ms`.
+pub(crate) const DEFAULT_CALL_TIMEOUT_MS: u64 = 30_000;
+/// Hard ceiling for long-call jobs (ADR-0005). Manifests may reduce it.
+#[cfg(feature = "streaming")]
+pub(crate) const MAX_CALL_TIMEOUT_MS: u64 = 300_000;
 
 // ---------------------------------------------------------------------------
 // Manifest (subset used by the POC host)
@@ -328,6 +340,8 @@ struct AppState {
     dev_watch_paths: Vec<String>,
     dev_last_reload: Arc<std::sync::RwLock<std::collections::BTreeMap<String, ReloadStatus>>>,
     manifests_dir: PathBuf,
+    #[cfg(feature = "streaming")]
+    jobs: jobs::JobManager,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1489,6 +1503,76 @@ async fn complete(
     result
 }
 
+/// Invoke one export with positional JSON args and return the JSON response
+/// body plus fuel consumed. Shared by `/call` and experimental jobs so both
+/// paths use identical WIT type validation and fuel accounting.
+async fn invoke_export(
+    engine: &Engine,
+    plugin: &PluginRuntime,
+    function: &str,
+    args: &[serde_json::Value],
+    request_id: u64,
+) -> Result<(serde_json::Value, u64), (StatusCode, String)> {
+    let initial_fuel = plugin
+        .manifest
+        .permissions
+        .resources
+        .max_fuel
+        .unwrap_or(1_000_000_000);
+    let (mut store, instance) = instantiate(engine, plugin).await.map_err(internal)?;
+    store.data_mut().request_id = request_id;
+    // Resolve function: top-level first, then inside exported interfaces.
+    let func = if let Some(f) = instance.get_func(&mut store, function) {
+        f
+    } else {
+        let mut resolved = None;
+        for exp in &plugin.manifest.exports {
+            if let Some(idx) = instance.get_export_index(&mut store, None, &exp.name) {
+                // ensure it's an instance export
+                if let Some(func_idx) = instance.get_export_index(&mut store, Some(&idx), function)
+                {
+                    if let Some(f) = instance.get_func(&mut store, func_idx) {
+                        resolved = Some(f);
+                        break;
+                    }
+                }
+            }
+        }
+        resolved.ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("export {function} not found"),
+            )
+        })?
+    };
+    let ty = func.ty(&store);
+    if ty.params().count() != args.len() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("expected {} args, got {}", ty.params().count(), args.len()),
+        ));
+    }
+    let mut params = Vec::new();
+    for (param, arg) in ty.params().zip(args.iter()) {
+        params.push(json_to_val(&param.1, arg).map_err(|e| (StatusCode::BAD_REQUEST, e))?);
+    }
+    let mut results = ty.results().map(|ty| default_val(&ty)).collect::<Vec<_>>();
+    func.call_async(&mut store, &params, &mut results)
+        .await
+        .map_err(internal)?;
+    let fuel_used = store
+        .get_fuel()
+        .map(|remaining| initial_fuel.saturating_sub(remaining))
+        .unwrap_or(0);
+    let json_results: Vec<serde_json::Value> = results.iter().map(val_to_json).collect();
+    let body = if json_results.len() == 1 {
+        serde_json::json!({ "result": json_results[0] })
+    } else {
+        serde_json::json!({ "results": json_results })
+    };
+    Ok((body, fuel_used))
+}
+
 async fn call_export(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
@@ -1497,79 +1581,23 @@ async fn call_export(
     let p = state
         .plugin(&name)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
-    let timeout_ms = p.manifest.permissions.resources.timeout_ms.unwrap_or(30000);
+    let timeout_ms = p
+        .manifest
+        .permissions
+        .resources
+        .timeout_ms
+        .unwrap_or(DEFAULT_CALL_TIMEOUT_MS);
     let rid = state
         .requests
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         + 1;
-    let initial_fuel = p
-        .manifest
-        .permissions
-        .resources
-        .max_fuel
-        .unwrap_or(1_000_000_000);
     let mut fuel_used = 0u64;
     let start = std::time::Instant::now();
     let span = otel::call_span(&name, &req.function, "library");
     let work = async {
-        let (mut store, instance) = instantiate(&state.engine, p.as_ref())
-            .await
-            .map_err(internal)?;
-        store.data_mut().request_id = rid;
-        // Resolve function: top-level first, then inside exported interfaces.
-        let func = if let Some(f) = instance.get_func(&mut store, &req.function) {
-            f
-        } else {
-            let mut resolved = None;
-            for exp in &p.manifest.exports {
-                if let Some(idx) = instance.get_export_index(&mut store, None, &exp.name) {
-                    // ensure it's an instance export
-                    if let Some(func_idx) =
-                        instance.get_export_index(&mut store, Some(&idx), &req.function)
-                    {
-                        if let Some(f) = instance.get_func(&mut store, func_idx) {
-                            resolved = Some(f);
-                            break;
-                        }
-                    }
-                }
-            }
-            resolved.ok_or_else(|| {
-                (
-                    StatusCode::NOT_FOUND,
-                    format!("export {} not found", req.function),
-                )
-            })?
-        };
-        let ty = func.ty(&store);
-        if ty.params().count() != req.args.len() {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                format!(
-                    "expected {} args, got {}",
-                    ty.params().count(),
-                    req.args.len()
-                ),
-            ));
-        }
-        let mut params = Vec::new();
-        for (param, arg) in ty.params().zip(req.args.iter()) {
-            params.push(json_to_val(&param.1, arg).map_err(|e| (StatusCode::BAD_REQUEST, e))?);
-        }
-        let mut results = ty.results().map(|ty| default_val(&ty)).collect::<Vec<_>>();
-        func.call_async(&mut store, &params, &mut results)
-            .await
-            .map_err(internal)?;
-        fuel_used = store
-            .get_fuel()
-            .map(|remaining| initial_fuel.saturating_sub(remaining))
-            .unwrap_or(0);
-        let json_results: Vec<serde_json::Value> = results.iter().map(val_to_json).collect();
-        let body = if json_results.len() == 1 {
-            serde_json::json!({ "result": json_results[0] })
-        } else {
-            serde_json::json!({ "results": json_results })
-        };
+        let (body, used) =
+            invoke_export(&state.engine, p.as_ref(), &req.function, &req.args, rid).await?;
+        fuel_used = used;
         Ok::<_, (StatusCode, String)>(Json(body))
     }
     .instrument(span.clone());
@@ -3119,7 +3147,7 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
         startup_started.elapsed().as_millis()
     );
 
-    let plugin_metrics: plugin_metrics::PluginMetricsMap = std::sync::RwLock::new(
+    let plugin_metrics: Arc<plugin_metrics::PluginMetricsMap> = Arc::new(std::sync::RwLock::new(
         plugins
             .keys()
             .map(|name| {
@@ -3129,17 +3157,29 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
                 )
             })
             .collect(),
-    );
+    ));
+    let plugins = Arc::new(std::sync::RwLock::new(plugins));
+    let requests = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let errors = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+    #[cfg(feature = "streaming")]
+    let jobs = jobs::JobManager::new(Arc::new(jobs::HostJobExecutor::new(
+        engine.clone(),
+        plugins.clone(),
+        plugin_metrics.clone(),
+        requests.clone(),
+    )));
+
     let state = AppState {
         engine,
-        plugins: Arc::new(std::sync::RwLock::new(plugins)),
+        plugins,
         ui_plugins: Arc::new(ui_plugins),
         tailcat_session: Arc::new(Mutex::new(None)),
         services: Arc::new(Mutex::new(HashMap::new())),
         service_health: Arc::new(Mutex::new(HashMap::new())),
-        requests: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        errors: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        plugin_metrics: Arc::new(plugin_metrics),
+        requests,
+        errors,
+        plugin_metrics,
         dev_mode: std::env::var("OWASIDEA_DEV_MODE")
             .is_ok_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes")),
         dev_hot_reload: std::env::var("OWASIDEA_DEV_HOT_RELOAD")
@@ -3150,51 +3190,73 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
             .unwrap_or_default(),
         dev_last_reload: Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
         manifests_dir: manifests_dir.clone(),
+        #[cfg(feature = "streaming")]
+        jobs,
     };
 
-    async fn count_requests(
-        State(state): State<AppState>,
-        req: axum::http::Request<Body>,
-        next: middleware::Next,
-    ) -> Response {
-        state
-            .requests
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let reload_plugin = req
-            .uri()
-            .path()
-            .split('/')
-            .filter(|part| !part.is_empty())
-            .map(str::to_string)
-            .collect::<Vec<_>>();
-        let resp = next.run(req).await;
-        if resp.status().is_client_error() || resp.status().is_server_error() {
-            state
-                .errors
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-        if state.dev_mode
-            && reload_plugin.len() == 3
-            && reload_plugin[0] == "plugin"
-            && reload_plugin[2] == "reload"
-        {
-            if let Ok(mut records) = state.dev_last_reload.write() {
-                records.insert(
-                    reload_plugin[1].to_string(),
-                    ReloadStatus {
-                        ok: resp.status().is_success(),
-                        http_status: resp.status().as_u16(),
-                        timestamp_unix: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs(),
-                    },
-                );
-            }
-        }
-        resp
-    }
+    let app = build_router(state)?;
 
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    let local_addr = listener.local_addr()?;
+    tracing::info!("listening on http://{}", local_addr);
+    println!("host listening on http://{}", local_addr);
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await?;
+
+    // Flush buffered spans before the process exits.
+    if let Some(telemetry) = telemetry {
+        telemetry.shutdown();
+    }
+    Ok(())
+}
+
+async fn count_requests(
+    State(state): State<AppState>,
+    req: axum::http::Request<Body>,
+    next: middleware::Next,
+) -> Response {
+    state
+        .requests
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let reload_plugin = req
+        .uri()
+        .path()
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let resp = next.run(req).await;
+    if resp.status().is_client_error() || resp.status().is_server_error() {
+        state
+            .errors
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    if state.dev_mode
+        && reload_plugin.len() == 3
+        && reload_plugin[0] == "plugin"
+        && reload_plugin[2] == "reload"
+    {
+        if let Ok(mut records) = state.dev_last_reload.write() {
+            records.insert(
+                reload_plugin[1].to_string(),
+                ReloadStatus {
+                    ok: resp.status().is_success(),
+                    http_status: resp.status().as_u16(),
+                    timestamp_unix: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                },
+            );
+        }
+    }
+    resp
+}
+
+fn build_router(state: AppState) -> Result<Router> {
     let app = Router::new()
         .route("/health", get(health))
         .route("/overview", get(overview))
@@ -3233,34 +3295,26 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
         .route("/app/{name}/", axum::routing::any(proxy_app))
         .route("/app/{name}", axum::routing::any(proxy_app));
 
+    // Experimental long-call jobs (ADR-0005). Registered only with the feature.
+    #[cfg(feature = "streaming")]
+    let app = app
+        .route("/plugin/{name}/call/jobs", post(jobs::create_job))
+        .route("/jobs/{id}", get(jobs::get_job))
+        .route("/jobs/{id}/events", get(jobs::job_events))
+        .route("/jobs/{id}/cancel", post(jobs::cancel_job));
+
     // W3C traceparent propagation: only compiled with the `otel` feature, and a
     // passthrough at runtime unless OTLP export is configured.
     #[cfg(feature = "otel")]
     let app = app.layer(middleware::from_fn(otel::trace_context));
 
-    let app = app
+    Ok(app
         .layer(cors_layer()?)
         .layer(middleware::from_fn_with_state(
             state.clone(),
             count_requests,
         ))
-        .with_state(state);
-
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-    let local_addr = listener.local_addr()?;
-    tracing::info!("listening on http://{}", local_addr);
-    println!("host listening on http://{}", local_addr);
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await?;
-
-    // Flush buffered spans before the process exits.
-    if let Some(telemetry) = telemetry {
-        telemetry.shutdown();
-    }
-    Ok(())
+        .with_state(state))
 }
 
 #[cfg(test)]
@@ -3408,6 +3462,61 @@ mod tests {
             dev_watch_paths: Vec::new(),
             dev_last_reload: Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
             manifests_dir: PathBuf::from("."),
+            #[cfg(feature = "streaming")]
+            jobs: jobs::test_manager(),
+        }
+    }
+
+    #[cfg(not(feature = "streaming"))]
+    #[tokio::test]
+    async fn job_routes_are_absent_without_streaming_feature() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let state = test_app_state(std::sync::RwLock::new(HashMap::new()));
+        let router = build_router(state).expect("router");
+
+        let call = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/plugin/notes/call")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"function":"greet","args":["x"]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(call.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(call.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("unknown plugin"));
+
+        for (method, uri) in [
+            ("POST", "/plugin/notes/call/jobs"),
+            ("GET", "/jobs/abc"),
+            ("GET", "/jobs/abc/events"),
+            ("POST", "/jobs/abc/cancel"),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "{method} {uri} must not be routed without the streaming feature"
+            );
         }
     }
 
