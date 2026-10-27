@@ -3,11 +3,13 @@
 #
 # Creates a temporary app with `owasidea init --preset minimal`, scaffolds
 # Rust/Go/TypeScript library plugins with `owasidea plugin new`, runs
-# `owasidea build`, and validates every generated manifest.
+# `owasidea build`, and validates every generated manifest. Also scaffolds
+# `--preset full` and runs `npm install` + `vite build` on the generated UI so
+# the dashboard (main.ts + bridge.ts) is proven to build.
 #
 # Usage:
 #   cargo build -p owasidea-cli
-#   scripts/test-templates.sh [--langs rust,go,typescript] [--strict] [--keep]
+#   scripts/test-templates.sh [--langs rust,go,typescript] [--strict] [--keep] [--no-ui]
 #
 # Environment:
 #   OWASIDEA_BIN              CLI binary (default: $CARGO_TARGET_DIR/debug/owasidea,
@@ -15,15 +17,17 @@
 #   OWASIDEA_TEMPLATE_LANGS   comma-separated languages (default: rust,go,typescript)
 #   OWASIDEA_TEMPLATE_STRICT  "1" fails when a toolchain is missing instead of skipping
 #   OWASIDEA_TEMPLATE_KEEP    "1" keeps the temporary app and prints its path
+#   OWASIDEA_TEMPLATE_UI      "0" skips the full-preset UI build (default: "1")
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 langs="${OWASIDEA_TEMPLATE_LANGS:-rust,go,typescript}"
 strict="${OWASIDEA_TEMPLATE_STRICT:-0}"
 keep="${OWASIDEA_TEMPLATE_KEEP:-0}"
+ui_build="${OWASIDEA_TEMPLATE_UI:-1}"
 
 usage() {
-  sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,/^set -euo pipefail$/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'
 }
 
 while [ $# -gt 0 ]; do
@@ -41,6 +45,10 @@ while [ $# -gt 0 ]; do
       keep=1
       shift
       ;;
+    --no-ui)
+      ui_build=0
+      shift
+      ;;
     -h | --help)
       usage
       exit 0
@@ -55,6 +63,7 @@ done
 
 case "$strict" in 1 | true | yes) strict=1 ;; *) strict=0 ;; esac
 case "$keep" in 1 | true | yes) keep=1 ;; *) keep=0 ;; esac
+case "$ui_build" in 0 | false | no) ui_build=0 ;; *) ui_build=1 ;; esac
 
 if [ -n "${CARGO_TARGET_DIR:-}" ]; then
   case "$CARGO_TARGET_DIR" in
@@ -160,6 +169,53 @@ app="$work/app"
 expected=""
 echo "==> scaffolding app ($app)"
 "$bin" init "$app" --yes --preset minimal >/dev/null
+if [ -e "$app/ui" ]; then
+  echo "error: init --preset minimal must not scaffold ui/ (found $app/ui)" >&2
+  exit 1
+fi
+
+# G0: the full preset ships the dashboard (main.ts imports ./bridge.ts); prove
+# the generated UI actually builds, not just that files exist.
+if [ "$ui_build" = 1 ]; then
+  if ! have node || ! have npm; then
+    if [ "$strict" = 1 ]; then
+      echo "error: cannot build the full-preset UI: missing node/npm" >&2
+      exit 1
+    fi
+    echo "skip: full-preset UI build (missing node/npm; set OWASIDEA_TEMPLATE_STRICT=1 to fail)"
+  else
+    ui_app="$work/app-full"
+    echo "==> scaffolding app with UI ($ui_app)"
+    "$bin" init "$ui_app" --yes --preset full >/dev/null
+    for file in package.json index.html main.ts bridge.ts vite.config.ts tsconfig.json; do
+      if [ ! -f "$ui_app/ui/$file" ]; then
+        echo "error: init --preset full did not scaffold ui/$file" >&2
+        exit 1
+      fi
+    done
+    if ! grep -q "from './bridge.ts'" "$ui_app/ui/main.ts"; then
+      echo "error: ui/main.ts no longer imports ./bridge.ts; update this check" >&2
+      exit 1
+    fi
+    echo "==> npm install (full-preset UI)"
+    if ! (cd "$ui_app/ui" && npm install --no-audit --no-fund >/dev/null); then
+      echo "error: npm install failed for the init --preset full UI ($ui_app/ui)" >&2
+      exit 1
+    fi
+    ui_log="$work/ui-build.log"
+    echo "==> npm run build (full-preset UI)"
+    if ! (cd "$ui_app/ui" && OWASIDEA_HOST=http://127.0.0.1:8787 npm run build >"$ui_log" 2>&1); then
+      cat "$ui_log" >&2 || true
+      echo "error: vite build failed for the init --preset full UI" >&2
+      exit 1
+    fi
+    if [ ! -f "$ui_app/ui/dist/index.html" ]; then
+      echo "error: full-preset UI build produced no dist/index.html" >&2
+      exit 1
+    fi
+    echo "ok   full-preset UI builds (main.ts + bridge.ts)"
+  fi
+fi
 
 for lang in "${selected[@]}"; do
   case "$lang" in
