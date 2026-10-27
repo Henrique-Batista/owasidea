@@ -9,6 +9,7 @@ mod dev_desktop;
 mod dev_next_steps;
 mod logs;
 mod status;
+mod templates;
 mod type_parser;
 mod wit_types;
 use config::*;
@@ -777,20 +778,7 @@ fn cmd_init(dir: Option<PathBuf>, json: bool) -> anyhow::Result<()> {
         } else {
             "my-app".to_string()
         };
-        let content = format!(
-            r#"[app]
-name = "{app_name}"
-version = "0.1.0"
-identifier = "dev.example.{app_name}"
-
-[host]
-addr = "127.0.0.1:8787"
-
-[dev]
-watch = true
-hot_reload = true
-"#
-        );
+        let content = templates::render(templates::INIT_WASM_APP_TOML, &[("app_name", &app_name)]);
         std::fs::write(&cfg, content)?;
     }
     for sub in ["plugins", "manifests", "ui", "docs"] {
@@ -1025,13 +1013,10 @@ fn cmd_plugin_new(
         }
         let dist = dir.join("dist");
         std::fs::create_dir_all(&dist)?;
-        std::fs::write(
-            dist.join("index.html"),
-            "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"></head><body><main id=\"app\">UI plugin scaffold</main></body></html>\n",
-        )?;
+        std::fs::write(dist.join("index.html"), templates::UI_INDEX_HTML)?;
         std::fs::write(
             dir.join("README.md"),
-            format!("# {name} UI plugin\n\nLanguage/framework: {lang}\nRuntime: js-wasm (webview-only)\n\nBuild a static browser bundle into `dist/` with an `index.html` entry, then configure this plugin in `wasm-app.toml` with `type = \\\"ui\\\"`, `runtime = \\\"js-wasm\\\"`, and an optional `ui_build = [...]` command. The framework loads it in a sandboxed iframe.\n"),
+            templates::render(templates::UI_README, &[("name", &name), ("lang", &lang)]),
         )?;
         register_plugin_config(config_path, &name, &lang, &kind, &runtime)?;
         if json {
@@ -1057,164 +1042,84 @@ fn cmd_plugin_new(
     std::fs::create_dir_all(dir.join("wit"))?;
     std::fs::create_dir_all(dir.join("src"))?;
     let wit = if kind == "service" {
-        format!("package poc:{name}@0.1.0;\n\nworld {name} {{\n    export start-service: func() -> result<string, string>;\n    export service-status: func() -> bool;\n}}\n")
+        templates::render(templates::WIT_SERVICE, &[("name", &name)])
     } else {
-        format!("package poc:{name}@0.1.0;\n\nworld {name} {{\n    export greet: func(name: string) -> string;\n}}\n")
+        templates::render(templates::WIT_LIBRARY, &[("name", &name)])
     };
     std::fs::write(dir.join("wit").join(format!("{name}.wit")), wit)?;
     match lang.as_str() {
         "rust" => {
             std::fs::write(
                 dir.join("Cargo.toml"),
-                format!(
-                    "[workspace]\n\n[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n\n[dependencies]\nwit-bindgen = \"0.41\"\n\n[package.metadata.component]\npackage = \"poc:{name}\"\n[package.metadata.component.target]\npath = \"wit\"\nworld = \"{name}\"\n"
-                ),
+                templates::render(templates::RUST_CARGO, &[("name", &name)]),
             )?;
             let source = if kind == "service" {
-                format!("wit_bindgen::generate!({{ world: \"{name}\", path: \"wit\" }});\n\nuse std::sync::atomic::{{AtomicBool, Ordering}};\nstatic RUNNING: AtomicBool = AtomicBool::new(false);\n\nstruct Component;\nimpl Guest for Component {{\n    fn start_service() -> Result<String, String> {{\n        RUNNING.store(true, Ordering::SeqCst);\n        Ok(\"service started\".to_string())\n    }}\n    fn service_status() -> bool {{\n        RUNNING.load(Ordering::SeqCst)\n    }}\n}}\nexport!(Component);\n")
+                templates::render(templates::RUST_LIB_SERVICE, &[("name", &name)])
             } else {
-                format!("wit_bindgen::generate!({{ world: \"{name}\", path: \"wit\", generate_all }});\n\nstruct Component;\nimpl Guest for Component {{\n    fn greet(name: String) -> String {{\n        format!(\"Hello, {{}}! (from Rust)\", name)\n    }}\n}}\nexport!(Component);\n")
+                templates::render(templates::RUST_LIB, &[("name", &name)])
             };
             std::fs::write(dir.join("src").join("lib.rs"), source)?;
         }
         "go" => {
             std::fs::write(
                 dir.join("go.mod"),
-                format!("module owasidea/{name}\n\ngo 1.27.1\n\nrequire github.com/bytecodealliance/componentize-go v0.5.1\n\ntool github.com/bytecodealliance/componentize-go\n"),
+                templates::render(templates::GO_MOD, &[("name", &name)]),
             )?;
-            std::fs::write(
-                dir.join("main.go"),
-                "package main\n\nimport \"fmt\"\n\nfunc main() {}\n\nfunc Greet(name string) string {\n    return fmt.Sprintf(\"Hello, %s! (from Go)\", name)\n}\n",
-            )?;
+            std::fs::write(dir.join("main.go"), templates::GO_MAIN)?;
         }
         "typescript" | "javascript" => {
             std::fs::write(
                 dir.join("package.json"),
-                format!(
-                    "{{\n  \"name\": \"{name}\",\n  \"private\": true,\n  \"type\": \"module\",\n  \"scripts\": {{\n    \"build\": \"jco componentize src/index.ts --wit wit --world-name {name} -o {name}.component.wasm\"\n  }},\n  \"devDependencies\": {{\n    \"@bytecodealliance/jco\": \"1.39.0\",\n    \"@bytecodealliance/componentize-js\": \"0.23.0\"\n  }}\n}}\n"
-                ),
+                templates::render(templates::TS_PACKAGE_JSON, &[("name", &name)]),
             )?;
             std::fs::write(
                 dir.join("src").join("index.ts"),
-                format!(
-                    "/** @owasidea-world {name} */\n/** @owasidea-export */\nexport function greet(name: string): string {{\n  return `Hello, ${{name}}! (from TypeScript)`;\n}}\n"
-                ),
+                templates::render(templates::TS_INDEX, &[("name", &name)]),
             )?;
         }
         "csharp" => {
             if kind == "executable" {
                 std::fs::write(
                     dir.join(format!("{name}.csproj")),
-                    format!(
-                        r#"<Project Sdk="Microsoft.NET.Sdk">
-
-  <PropertyGroup>
-    <OutputType>Exe</OutputType>
-    <TargetFramework>net10.0</TargetFramework>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
-    <RuntimeIdentifier>wasi-wasm</RuntimeIdentifier>
-    <PublishTrimmed>true</PublishTrimmed>
-  </PropertyGroup>
-</Project>
-"#
-                    ),
+                    templates::CSHARP_EXECUTABLE_CSPROJ,
                 )?;
-                std::fs::write(
-                    dir.join("Program.cs"),
-                    "using System;\nConsole.WriteLine(\"Hello from C# WASI component!\");\n",
-                )?;
+                std::fs::write(dir.join("Program.cs"), templates::CSHARP_PROGRAM_CS)?;
             } else {
                 std::fs::create_dir_all(dir.join("wit"))?;
                 std::fs::create_dir_all(dir.join("wit/deps/host"))?;
                 std::fs::write(
                     dir.join(format!("{name}.csproj")),
-                    format!(
-                        r#"<Project Sdk="Microsoft.NET.Sdk">
-
-  <PropertyGroup>
-    <OutputType>Library</OutputType>
-    <TargetFramework>net10.0</TargetFramework>
-    <RootNamespace>{name}</RootNamespace>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
-    <RuntimeIdentifier>wasi-wasm</RuntimeIdentifier>
-    <UseAppHost>false</UseAppHost>
-    <PublishTrimmed>true</PublishTrimmed>
-    <InvariantGlobalization>true</InvariantGlobalization>
-    <SelfContained>true</SelfContained>
-  </PropertyGroup>
-
-  <ItemGroup>
-    <PackageReference Include="BytecodeAlliance.Componentize.DotNet.Wasm.SDK" Version="0.8.0-preview*" />
-    <PackageReference Include="runtime.linux-x64.microsoft.dotnet.ilcompiler.llvm" Version="10.0.0-rc.1.26306.1" Condition="$([MSBuild]::IsOSPlatform('Linux'))" />
-    <PackageReference Include="runtime.win-x64.microsoft.dotnet.ilcompiler.llvm" Version="10.0.0-rc.1.26306.1" Condition="$([MSBuild]::IsOSPlatform('Windows'))" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <Wit Update="wit/{name}.wit" World="library" />
-  </ItemGroup>
-</Project>
-"#
-                    ),
+                    templates::render(templates::CSHARP_LIBRARY_CSPROJ, &[("name", &name)]),
                 )?;
                 std::fs::write(
                     dir.join("wit").join(format!("{name}.wit")),
-                    format!(
-                        "package poc:{name}@0.1.0;\n\ninterface api {{\n    greet: func(name: string) -> string;\n}}\n\nworld library {{\n    export api;\n}}\n"
-                    ),
+                    templates::render(templates::CSHARP_WIT, &[("name", &name)]),
                 )?;
                 std::fs::write(
                     dir.join("wit/deps/host/host.wit"),
-                    "package poc:host@0.1.0;\n\ninterface host-log {\n    log: func(msg: string);\n}\n",
+                    templates::CSHARP_HOST_WIT,
                 )?;
                 std::fs::write(
                     dir.join(format!("{}Impl.cs", name)),
-                    format!(
-                        "namespace LibraryWorld.wit.Exports.poc.{name}.v0_1_0;\n\npublic class ApiExportsImpl : IApiExports\n{{\n    public static string Greet(string name)\n    {{\n        return $\"Hello, {{name}}! (from C#)\";\n    }}\n}}\n",
-                        name = name
-                    ),
+                    templates::render(templates::CSHARP_IMPL, &[("name", &name)]),
                 )?;
-                std::fs::write(
-                    dir.join("nuget.config"),
-                    r#"<configuration>
-  <packageSources>
-    <clear />
-    <add key="dotnet-experimental" value="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-experimental/nuget/v3/index.json" />
-    <add key="nuget" value="https://api.nuget.org/v3/index.json" />
-  </packageSources>
-</configuration>
-"#,
-                )?;
+                std::fs::write(dir.join("nuget.config"), templates::CSHARP_NUGET_CONFIG)?;
             }
+            std::fs::create_dir_all(dir.join("wit"))?;
+            std::fs::create_dir_all(dir.join("wit/deps/host"))?;
             std::fs::write(
                 dir.join("wit").join(format!("{name}.wit")),
-                format!(
-                    "package poc:{name}@0.1.0;\n\ninterface api {{\n    greet: func(name: string) -> string;\n}}\n\nworld library {{\n    export api;\n}}\n"
-                ),
+                templates::render(templates::CSHARP_WIT, &[("name", &name)]),
             )?;
             std::fs::write(
                 dir.join("wit/deps/host/host.wit"),
-                "package poc:host@0.1.0;\n\ninterface host-log {\n    log: func(msg: string);\n}\n",
+                templates::CSHARP_HOST_WIT,
             )?;
             std::fs::write(
                 dir.join(format!("{}Impl.cs", name)),
-                format!(
-                    "namespace LibraryWorld.wit.Exports.poc.{name}.v0_1_0;\n\npublic class ApiExportsImpl : IApiExports\n{{\n    public static string Greet(string name)\n    {{\n        return $\"Hello, {{name}}! (from C#)\";\n    }}\n}}\n",
-                    name = name
-                ),
+                templates::render(templates::CSHARP_IMPL, &[("name", &name)]),
             )?;
-            std::fs::write(
-                dir.join("nuget.config"),
-                r#"<configuration>
-  <packageSources>
-    <clear />
-    <add key="dotnet-experimental" value="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-experimental/nuget/v3/index.json" />
-    <add key="nuget" value="https://api.nuget.org/v3/index.json" />
-  </packageSources>
-</configuration>
-"#,
-            )?;
+            std::fs::write(dir.join("nuget.config"), templates::CSHARP_NUGET_CONFIG)?;
         }
         "c" | "cpp" | "c++" => {
             let ext = if lang == "c" { "c" } else { "cpp" };
@@ -1228,32 +1133,32 @@ fn cmd_plugin_new(
             std::fs::create_dir_all(dir.join("src"))?;
             std::fs::write(
                 dir.join("wit").join(format!("{name}.wit")),
-                format!(
-                    "package poc:{name}@0.1.0;\n\ninterface api {{\n    greet: func(name: string) -> string;\n}}\n\nworld {name} {{\n    export api;\n}}\n"
-                ),
+                templates::render(templates::C_WIT, &[("name", &name)]),
             )?;
+            let source = if lang == "c" {
+                format!("src/{name}.c")
+            } else {
+                format!("src/{name}.cpp")
+            };
+            let lang_kind = if lang == "c" { "c" } else { "cpp" };
             std::fs::write(
                 dir.join("Makefile"),
-                format!(
-                    "WASI_SDK ?= $(WASI_SDK_PATH)\nADAPTER ?= $(WASI_PREVIEW1_ADAPTER)\nifeq ($(OS),Windows_NT)\nEXE := .exe\nelse\nEXE :=\nendif\nifndef WASI_SDK\n$(error Set WASI_SDK or WASI_SDK_PATH)\nendif\nifndef ADAPTER\n$(error Set WASI_PREVIEW1_ADAPTER to the reactor adapter wasm)\nendif\nCC = $(WASI_SDK)/bin/{compiler}$(EXE)\n\nall:\n\twit-bindgen {lang} wit/{name}.wit --out-dir src\n\t$(CC) --target=wasm32-wasip1 {stdflag} -O2 -c {source} -o src/{name}.o\n\t$(CC) --target=wasm32-wasip1 {stdflag} -O2 -c src/impl.{ext} -o src/impl.o\n\t$(CC) --target=wasm32-wasip1 {stdflag} -O2 src/{name}_component_type.o src/{name}.o src/impl.o -o {name}.wasm -mexec-model=reactor\n\twasm-tools component new {name}.wasm --adapt $(ADAPTER) -o {name}.component.wasm\n",
-                    lang = if lang == "c" { "c" } else { "cpp" },
-                    compiler = compiler,
-                    stdflag = stdflag,
-                    source = if lang == "c" { format!("src/{name}.c") } else { format!("src/{name}.cpp") },
-                    name = name,
-                    ext = ext,
+                templates::render(
+                    templates::C_MAKEFILE,
+                    &[
+                        ("name", &name),
+                        ("lang", lang_kind),
+                        ("compiler", compiler),
+                        ("stdflag", stdflag),
+                        ("source", &source),
+                        ("ext", ext),
+                    ],
                 ),
             )?;
             let impl_content = if lang == "c" {
-                format!(
-                    "#include \"{name}.h\"\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n\nvoid exports_poc_{name}_api_greet({name}_string_t *name, {name}_string_t *ret) {{\n    size_t len = 7 + name->len + 11 + 1;\n    char *buf = (char*)malloc(len);\n    snprintf(buf, len, \"Hello, %.*s! (from C)\", (int)name->len, (char*)name->ptr);\n    {name}_string_dup(ret, buf);\n    free(buf);\n}}\n",
-                    name = name
-                )
+                templates::render(templates::C_IMPL, &[("name", &name)])
             } else {
-                format!(
-                    "#include \"{name}_cpp.h\"\n#include <cstring>\n#include <cstdlib>\n\nnamespace exports::poc::{name}::api {{\n    wit::string Greet(wit::string name) {{\n        const char* prefix = \"Hello, \";\n        const char* suffix = \"! (from C++)\";\n        size_t len = 7 + name.size() + 12;\n        char* buf = (char*)malloc(len + 1);\n        memcpy(buf, prefix, 7);\n        memcpy(buf + 7, name.data(), name.size());\n        memcpy(buf + 7 + name.size(), suffix, 12);\n        buf[len] = '\\0';\n        auto result = wit::string(buf, len);\n        return result;\n    }}\n}}\n",
-                    name = name
-                )
+                templates::render(templates::CPP_IMPL, &[("name", &name)])
             };
             std::fs::write(dir.join("src").join(format!("impl.{ext}")), impl_content)?;
         }
@@ -1261,7 +1166,10 @@ fn cmd_plugin_new(
     }
     std::fs::write(
         dir.join("README.md"),
-        format!("# {name}\n\nLanguage: {lang}\nType: {kind}\n"),
+        templates::render(
+            templates::PLUGIN_README,
+            &[("name", &name), ("lang", &lang), ("kind", &kind)],
+        ),
     )?;
     register_plugin_config(config_path, &name, &lang, &kind, &runtime)?;
     if json {

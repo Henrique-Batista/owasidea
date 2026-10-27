@@ -1,0 +1,11 @@
+[app]
+name = "{{app_name}}"
+version = "0.1.0"
+identifier = "dev.example.{{app_name}}"
+
+[host]
+addr = "127.0.0.1:8787"
+
+[dev]
+watch = true
+hot_reload = true

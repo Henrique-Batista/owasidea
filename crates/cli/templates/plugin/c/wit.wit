@@ -1,0 +1,9 @@
+package poc:{{name}}@0.1.0;
+
+interface api {
+    greet: func(name: string) -> string;
+}
+
+world {{name}} {
+    export api;
+}

@@ -1,0 +1,6 @@
+package poc:{{name}}@0.1.0;
+
+world {{name}} {
+    export start-service: func() -> result<string, string>;
+    export service-status: func() -> bool;
+}
