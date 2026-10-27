@@ -24,6 +24,8 @@ fn bundle_help_documents_host_lib_isolation() {
     assert!(stdout.contains("--isolate-host-libs"));
     assert!(stdout.contains("--mask-path"));
     assert!(stdout.contains("--profile"));
+    assert!(stdout.contains("--provenance"));
+    assert!(stdout.contains("--no-sbom"));
 }
 
 #[test]
@@ -964,4 +966,99 @@ fn latest_rejects_unconfigured_updater() {
         .failure()
         .stderr(predicates::str::contains("updater is not configured"));
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn sbom_is_valid_deterministic_and_checkable() {
+    use std::path::Path;
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("wasm-app.toml");
+    let dist = dir.path().join("dist");
+    let output = dist.join("sbom.cdx.json");
+    std::fs::write(&config, "[app]\nname = \"demo\"\nversion = \"0.1.0\"\n").unwrap();
+    std::fs::create_dir_all(&dist).unwrap();
+    std::fs::write(
+        dir.path().join("Cargo.lock"),
+        "version = 4\n\n[[package]]\nname = \"serde\"\nversion = \"1.0.0\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("package-lock.json"),
+        r#"{"name":"demo","lockfileVersion":3,"packages":{"":{"name":"demo","version":"0.1.0"},"node_modules/plain":{"version":"1.2.3"}}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("go.mod"),
+        "module example.com/demo\n\ngo 1.27.1\n\nrequire golang.org/x/sys v0.37.0\n",
+    )
+    .unwrap();
+
+    let run = |extra: &[&str]| {
+        let mut cmd = Command::cargo_bin("owasidea").unwrap();
+        cmd.args(["--config"])
+            .arg(&config)
+            .args(["sbom", "--output"])
+            .arg(&output)
+            .args(extra)
+            .env("SOURCE_DATE_EPOCH", "1700000000");
+        cmd.output().unwrap()
+    };
+
+    let first = run(&[]);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first_bytes = std::fs::read(&output).unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&first_bytes).unwrap();
+    assert_eq!(value["bomFormat"], "CycloneDX");
+    assert_eq!(value["specVersion"], "1.5");
+    assert_eq!(value["metadata"]["timestamp"], "2023-11-14T22:13:20Z");
+    assert_eq!(value["components"].as_array().unwrap().len(), 3);
+    assert_eq!(value["metadata"]["component"]["name"], "demo");
+
+    let second = run(&[]);
+    assert!(second.status.success());
+    assert_eq!(first_bytes, std::fs::read(&output).unwrap());
+
+    let check = run(&["--check"]);
+    assert!(
+        check.status.success(),
+        "{}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+
+    let mut tampered = first_bytes.clone();
+    tampered.push(b' ');
+    std::fs::write(&output, tampered).unwrap();
+    let stale = run(&["--check"]);
+    assert!(!stale.status.success());
+    assert!(String::from_utf8_lossy(&stale.stderr).contains("stale"));
+
+    std::fs::write(dist.join("app.deb"), b"deb").unwrap();
+    let artifacts = dist.to_string_lossy().to_string();
+    let provenance = run(&["--provenance", "--artifacts", &artifacts]);
+    assert!(
+        provenance.status.success(),
+        "{}",
+        String::from_utf8_lossy(&provenance.stderr)
+    );
+    let raw = std::fs::read(dist.join("provenance.intoto.json")).unwrap();
+    let statement: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+    assert_eq!(statement["_type"], "https://in-toto.io/Statement/v1");
+    assert_eq!(
+        statement["predicate"]["buildDefinition"]["externalParameters"]["sourceDateEpoch"],
+        1_700_000_000u64
+    );
+    let names: Vec<&str> = statement["subject"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|subject| subject["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"app.deb"));
+    assert!(names.contains(&"sbom.cdx.json"));
+    assert!(Path::new(&output).is_file());
 }

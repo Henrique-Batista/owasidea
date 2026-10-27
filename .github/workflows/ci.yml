@@ -83,6 +83,9 @@ jobs:
       - name: Code-signing planner checks (RL-03)
         run: scripts/test-signing-plan.sh
 
+      - name: SBOM/provenance checks (RL-04)
+        run: scripts/test-sbom.sh
+
       - name: owasidea doctor --json
         run: owasidea doctor --json
 
@@ -192,6 +195,25 @@ jobs:
       - name: Bundle deb
         working-directory: examples/shipyard
         run: owasidea bundle --no-build --bundles deb
+
+      - name: SBOM and provenance (RL-04)
+        working-directory: examples/shipyard
+        run: |
+          set -euo pipefail
+          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          owasidea sbom --output dist/sbom.cdx.json --provenance --artifacts dist
+          owasidea sbom --format spdx --output dist/sbom.spdx.json
+          owasidea sbom --output dist/sbom.cdx.json --check
+
+      - name: Upload SBOM and provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-provenance
+          path: |
+            examples/shipyard/dist/sbom.cdx.json
+            examples/shipyard/dist/sbom.spdx.json
+            examples/shipyard/dist/provenance.intoto.json
+          if-no-files-found: error
 
       - name: Verify latest.json (updater, optional)
         if: ${{ env.OWASIDEA_UPDATER_ENDPOINT != '' && env.OWASIDEA_UPDATER_PUBKEY != '' && env.TAURI_SIGNING_PRIVATE_KEY != '' }}
