@@ -5509,7 +5509,7 @@ fn rust_type_to_wit(ty: &syn::Type) -> String {
                     }
                     "result<string, string>".to_string()
                 }
-                "Vec" => {
+                "Vec" | "VecDeque" => {
                     if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
                         if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
                             return format!("list<{}>", rust_type_to_wit(inner));
@@ -5517,11 +5517,58 @@ fn rust_type_to_wit(ty: &syn::Type) -> String {
                     }
                     "list<string>".to_string()
                 }
-                other => other.to_lowercase(),
+                "Box" | "Arc" | "Rc" => {
+                    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                        if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
+                            return rust_type_to_wit(inner);
+                        }
+                    }
+                    "string".to_string()
+                }
+                // A named type is passed through so a project-owned WIT type
+                // with the same name can be used. Records/enums declared in
+                // Rust still need a WIT contract.
+                other => to_kebab_case(other),
             }
         }
         syn::Type::Reference(r) => rust_type_to_wit(&r.elem),
+        syn::Type::Paren(p) => rust_type_to_wit(&p.elem),
+        syn::Type::Group(g) => rust_type_to_wit(&g.elem),
+        syn::Type::Slice(s) => format!("list<{}>", rust_type_to_wit(&s.elem)),
+        syn::Type::Array(a) => format!("list<{}>", rust_type_to_wit(&a.elem)),
+        syn::Type::Tuple(t) => {
+            let items: Vec<String> = t.elems.iter().map(rust_type_to_wit).collect();
+            if items.is_empty() {
+                "tuple<>".to_string()
+            } else {
+                format!("tuple<{}>", items.join(", "))
+            }
+        }
         _ => "string".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod rust_type_tests {
+    use super::rust_type_to_wit;
+
+    fn wit(source: &str) -> String {
+        let ty: syn::Type = syn::parse_str(source).unwrap();
+        rust_type_to_wit(&ty)
+    }
+
+    #[test]
+    fn maps_common_rust_types() {
+        assert_eq!(wit("String"), "string");
+        assert_eq!(wit("&str"), "string");
+        assert_eq!(wit("&[u8]"), "list<u8>");
+        assert_eq!(wit("[u8; 32]"), "list<u8>");
+        assert_eq!(wit("Vec<Option<String>>"), "list<option<string>>");
+        assert_eq!(wit("(u32, String)"), "tuple<u32, string>");
+        assert_eq!(wit("Result<Vec<u8>, String>"), "result<list<u8>, string>");
+        assert_eq!(wit("Box<String>"), "string");
+        assert_eq!(wit("Arc<Vec<u32>>"), "list<u32>");
+        assert_eq!(wit("HttpStatus"), "http-status");
     }
 }
 

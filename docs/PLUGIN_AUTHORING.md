@@ -38,6 +38,12 @@ world = "<name>"
 A `wit/` directory next to an attribute plugin is an error: remove it or set
 `wit_source = "wit"`. Committing `.owasidea/wit` is never necessary.
 
+The attribute mapper covers scalars, `String`/`&str`, `Vec`, slices, arrays,
+`Option`, `Result`, tuples, `Box`/`Arc`/`Rc`, and kebab-cased named types. Rust
+records, enums, variants, flags and resources are not generated yet: for those,
+keep a WIT contract and set `wit_source = "wit"` (the build can still check it
+against markers).
+
 ## C/C++ (wasi-sdk + wasm-tools + wit-bindgen)
 
 1. Scaffold: `owasidea plugin new <name> --lang c|cpp`.
