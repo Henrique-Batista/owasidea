@@ -103,6 +103,15 @@ First supported release. The `v1.0.0` tag is cut by the release gate
   `smoke`, `inspect`, `call`, `logs`, `client`, `bundle`, `latest`, `validate`,
   `verify`, `keygen`, `sign`, `signing plan`, `config render`, `registry
   search|install|update|outdated`, `explain`, `schema`, `status`.
+- **Toolchain installer**: `owasidea doctor --install-all`, repeatable
+  `--install <tool>`, and the compatibility `--fix` now build a platform-aware
+  plan from `tools.lock` for every required and optional toolchain
+  (`rustc`/`cargo`, cargo-component, wasm-tools, Go, Node/npm, jco, .NET,
+  componentize-go/dotnet, trunk, wasmtime, python3 and wasi-sdk). Dry-run is the
+  default; `--yes`/`--execute` runs it, `--allow-sudo` opts into `sudo`
+  commands, `--force` replans present tools, and `--json` emits
+  `{tool, required, present, action, command, platform, reason}` entries plus a
+  summary. Commands run in dependency order and duplicates are executed once.
 - **Desktop**: Tauri 2 shell embedding the host; deb/rpm/AppImage/NSIS
   packaging; CSP rendered from `wasm-app.toml`; optional host-lib isolation for
   AppImage builds.

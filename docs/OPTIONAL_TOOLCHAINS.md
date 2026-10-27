@@ -4,7 +4,9 @@ The framework core is Rust + Wasmtime and the CLI only needs Rust, Node/npm and
 (optionally) Go to scaffold and run an app. Everything else is **per language**
 or **per packaging target**: a missing toolchain only blocks the plugins that
 use it. `owasidea doctor` reports both groups; the required group gates the
-command, the optional group is informational.
+command, the optional group is informational. `owasidea doctor --install-all`
+plans every supported toolchain for the current OS (see the One-command install
+section below).
 
 See also [`GET_STARTED.md`](GET_STARTED.md#2-prerequisites) for the short
 prerequisite table and [`PLUGIN_AUTHORING.md`](PLUGIN_AUTHORING.md) for the
@@ -22,41 +24,61 @@ Required (exit non-zero when missing):
 | `go` | `go version` | Go plugins |
 | `node`, `npm` | `node --version`, `npm --version` | UI, TypeScript plugins |
 
-Optional (reported only):
+Optional (reported; install with `--install-all` / `--install <tool>`):
 
 | Probe | Needed for | Notes |
 |---|---|---|
 | `clang` | C/C++ plugins | wasi-sdk ships its own `clang`; a system `clang` is not required |
 | `dotnet` | C# plugins | .NET 10 SDK, `net10.0` + `wasi-wasm` |
 | `jco` | TypeScript plugins | normally a **local** npm devDependency, not a global binary |
+| `componentize-go` | Go plugins | normally a Go tool dependency in `go.mod`; a global binary is optional |
 | `componentize-dotnet` | C# (legacy probe) | the example builds through the NuGet SDK, not a global CLI |
 | `trunk` | Yew UI plugins | `ui_build = ["trunk", "build", "--release"]` |
+| `wasmtime` | ad-hoc CLI use | the host embeds Wasmtime; the external CLI is optional |
 | `python3` | helper scripts | not used by the CLI itself |
 | `wasi-sdk` | C/C++ plugins | detected at `/opt/wasi-sdk`, `~/.local/wasi-sdk`, `./wasi-sdk` |
 | `wasi reactor adapter` | C/C++ plugins | `WASI_PREVIEW1_ADAPTER`, wasi-sdk `share/`, or Cargo registry |
 
 `owasidea doctor --json` prints one object per probe with
 `{"tool", "ok", "optional"}`; wasi-sdk and the adapter also carry `path`.
-Scripts should read that JSON instead of parsing the table.
+Scripts should read that JSON instead of parsing the table. With an install
+selection (`--install-all`, `--install`, `--fix`, `--dry-run`), `--json`
+instead emits the plan document described in [`CLI.md`](CLI.md).
 
-## `doctor --fix` and `tools.lock`
+## One-command install (`doctor --install-*`)
+
+`doctor` can plan and run the install commands from `tools.lock` for the
+current OS. Planning is the default; nothing runs without `--yes` (or
+`--execute`):
 
 ```bash
-owasidea doctor --fix        # print install commands for missing required tools
-owasidea doctor --fix --yes  # run them when they contain no sudo
+owasidea doctor --install-all                      # print the full plan
+owasidea doctor --install-all --yes                # run non-sudo commands
+owasidea doctor --install-all --yes --allow-sudo   # Linux: also run sudo
+owasidea doctor --install jco --install trunk --yes
+owasidea doctor --fix --yes                        # compatibility: required only
+owasidea doctor --install-all --json               # machine-readable plan
 ```
 
-- `tools.lock` (repository root) maps a **required** tool name to a per-OS
-  install command. `doctor` reads `./tools.lock` from the current working
-  directory, so run it from the repository root (or copy the file).
-- Names must match the required probe names exactly: `rustc`, `cargo`,
-  `cargo-component`, `wasm-tools`, `go`, `node`, `npm`.
-- Without `--yes` nothing is executed. With `--yes`, a command containing
-  `sudo` is still only printed, never run.
-- `min_version` is documentation: doctor does not compare versions today.
-- Optional tools are **not** auto-installed. Install them with the commands
-  below; this keeps `--yes` from pulling large toolchains into a machine that
-  does not build those languages.
+- `tools.lock` (repository root, or the nearest ancestor) maps a tool name to a
+  per-OS `linux` / `macos` / `windows` command.
+- Required: `rustc`, `cargo`, `cargo-component`, `wasm-tools`, `go`, `node`,
+  `npm`. Optional: `jco`, `dotnet`, `componentize-go`,
+  `componentize-dotnet`, `trunk`, `wasmtime`, `python3`, `wasi-sdk`.
+- `--fix` is an alias for missing required tools. Optional toolchains are only
+  planned with `--install-all` or `--install <tool>`.
+- Without `--allow-sudo`, a command containing `sudo` is printed as
+  `SKIP sudo` and is not executed, even with `--yes`. `doctor` never prompts.
+- `min_version` is compared when the probe prints a parseable version; at
+  minimum, presence still gates the check. `--force` re-plans installs for
+  tools that are already present.
+- Commands run in dependency order (rustup/cargo before cargo-installed tools,
+  Go before componentize-go, Node/npm before jco, .NET before
+  componentize-dotnet) and duplicate commands are only run once.
+- `wasi-sdk` has no shell command: the plan uses the built-in downloader. Its
+  presence is detected at `/opt/wasi-sdk`, `~/.local/wasi-sdk`,
+  `$WASI_SDK_DIR` or `./wasi-sdk`.
+- A plain `owasidea doctor` (no install flags) only reports; it never installs.
 
 Example entry:
 
@@ -67,6 +89,19 @@ name = "wasm-tools"
 linux = "cargo install wasm-tools --locked"
 macos = "cargo install wasm-tools --locked"
 windows = "cargo install wasm-tools --locked"
+```
+
+Optional entries set `optional = true` so they cannot make `doctor` exit
+non-zero:
+
+```toml
+[[tools]]
+name = "trunk"
+optional = true
+[tools.install]
+linux = "cargo install trunk --locked"
+macos = "cargo install trunk --locked"
+windows = "cargo install trunk --locked"
 ```
 
 ## TypeScript (`jco`)
@@ -176,12 +211,21 @@ GTK3, libsoup3, `patchelf` and `librsvg`; AppImage additionally uses
 
 ## Limitations
 
-- `doctor --fix` never installs optional tools and never runs `sudo`.
-- Version checks are not enforced by doctor; the pins above are the versions
-  the reference app and CI use.
+- `doctor --fix` only covers required tools; use `--install-all` or
+  `--install <tool>` for optional toolchains. `sudo` commands only run with
+  both `--yes` and `--allow-sudo`.
+- Version checks are best-effort: `doctor` compares a probe's version when it
+  can parse one, but the plain report remains presence-only and the pins above
+  are still the versions the reference app and CI use.
+- The Linux Go/NPM commands use the distribution packages (`golang-go`,
+  `nodejs`/`npm`), which may lag behind the pinned versions. If the plan keeps
+  reporting `go` below `1.27.1`, install the official toolchain and re-run
+  `doctor`.
 - The TypeScript global `jco` probe does not reflect a plugin's local
   `node_modules`; trust `npm install` plus `owasidea build`.
 - wasi-sdk download supports `x86_64` and `aarch64` only; other architectures
   must install it manually and set `WASI_SDK_PATH`.
+- Windows `winget` commands need a shell that can show the UAC prompt; the CLI
+  cannot elevate for you.
 - Missing optional toolchains are a build error **for that plugin only**; they
   are not a framework or host limitation.

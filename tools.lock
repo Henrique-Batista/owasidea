@@ -1,18 +1,23 @@
+# Toolchain source for `owasidea doctor --install-all/--install <tool>`.
+# Each entry is one tool; commands are per OS. `optional = true` tools never
+# make doctor exit non-zero. wasi-sdk has no shell command: doctor uses its
+# built-in downloader (`owasidea doctor --install-wasi-sdk`).
+
 [[tools]]
 name = "rustc"
 min_version = "1.80"
 [tools.install]
-linux = "rustup toolchain install 1.80"
-macos = "rustup toolchain install 1.80"
-windows = "rustup toolchain install 1.80"
+linux = "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+macos = "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+windows = "winget install --id Rustlang.Rustup -e"
 
 [[tools]]
 name = "cargo"
 min_version = "1.80"
 [tools.install]
-linux = "rustup update"
-macos = "rustup update"
-windows = "rustup update"
+linux = "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+macos = "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+windows = "winget install --id Rustlang.Rustup -e"
 
 [[tools]]
 name = "cargo-component"
@@ -50,3 +55,65 @@ name = "npm"
 linux = "sudo apt-get install -y npm"
 macos = "brew install node@20"
 windows = "winget install --id OpenJS.NodeJS.LTS -e"
+
+[[tools]]
+name = "jco"
+optional = true
+min_version = "1.39.0"
+[tools.install]
+linux = "npm install -g @bytecodealliance/jco"
+macos = "npm install -g @bytecodealliance/jco"
+windows = "npm install -g @bytecodealliance/jco"
+
+[[tools]]
+name = "dotnet"
+optional = true
+min_version = "10.0"
+[tools.install]
+linux = "sudo apt-get install -y dotnet-sdk-10.0"
+macos = "brew install --cask dotnet-sdk"
+windows = "winget install --id Microsoft.DotNet.SDK.10 -e"
+
+[[tools]]
+name = "componentize-go"
+optional = true
+[tools.install]
+linux = "go install github.com/bytecodealliance/componentize-go@latest"
+macos = "go install github.com/bytecodealliance/componentize-go@latest"
+windows = "go install github.com/bytecodealliance/componentize-go@latest"
+
+[[tools]]
+name = "componentize-dotnet"
+optional = true
+[tools.install]
+linux = "dotnet workload install wasi-experimental"
+macos = "dotnet workload install wasi-experimental"
+windows = "dotnet workload install wasi-experimental"
+
+[[tools]]
+name = "trunk"
+optional = true
+[tools.install]
+linux = "cargo install trunk --locked"
+macos = "cargo install trunk --locked"
+windows = "cargo install trunk --locked"
+
+[[tools]]
+name = "wasmtime"
+optional = true
+[tools.install]
+linux = "curl -sSf https://wasmtime.dev/install.sh | bash"
+macos = "brew install wasmtime"
+windows = "winget install --id BytecodeAlliance.Wasmtime -e"
+
+[[tools]]
+name = "python3"
+optional = true
+[tools.install]
+linux = "sudo apt-get install -y python3"
+macos = "brew install python3"
+windows = "winget install --id Python.Python.3.13 -e"
+
+[[tools]]
+name = "wasi-sdk"
+optional = true

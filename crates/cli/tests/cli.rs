@@ -9,6 +9,55 @@ fn doctor_json() {
 }
 
 #[test]
+fn doctor_install_all_json_plans_without_executing() {
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut cmd = Command::cargo_bin("owasidea").unwrap();
+    let output = cmd
+        .current_dir(&repo)
+        .args(["doctor", "--install-all", "--json", "--dry-run"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|error| {
+        panic!("doctor --json must be one JSON document: {error}\n{stdout}")
+    });
+    assert_eq!(value["dry_run"], true);
+    assert_eq!(value["platform"], std::env::consts::OS);
+    let entries = value["entries"].as_array().unwrap();
+    assert!(entries.len() >= 15, "entries: {entries:?}");
+    for entry in entries {
+        for key in [
+            "tool", "required", "present", "action", "command", "platform", "reason",
+        ] {
+            assert!(
+                entry.get(key).is_some(),
+                "plan entry is missing {key}: {entry}"
+            );
+        }
+    }
+    assert_eq!(value["summary"]["total"], entries.len());
+    assert!(
+        !stdout.contains("running ("),
+        "a dry run must not execute install commands:\n{stdout}"
+    );
+}
+
+#[test]
+fn doctor_install_unknown_tool_fails() {
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut cmd = Command::cargo_bin("owasidea").unwrap();
+    let output = cmd
+        .current_dir(&repo)
+        .args(["doctor", "--install", "nope", "--json"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unknown tool `nope`"), "{stderr}");
+    assert!(stderr.contains("cargo-component"), "{stderr}");
+}
+
+#[test]
 fn inspect_missing() {
     let mut cmd = Command::cargo_bin("owasidea").unwrap();
     cmd.args(["inspect", "nope", "--manifest-dir", "manifests"]);
