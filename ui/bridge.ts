@@ -81,15 +81,28 @@ export function attachBridge(
   frame: HTMLIFrameElement,
   plugin: BridgePlugin,
   host: string,
-  controlNonce: string
+  nonceParam?: string
 ): () => void {
   const bridgeList = Array.isArray(plugin.bridge) ? plugin.bridge.slice() : [];
   if (bridgeList.length === 0) return () => {};
 
   const timeoutMs = resolveBridgeTimeoutMs(plugin);
   // The nonce travels in the iframe URL (document-bound) and must come back in
-  // the SDK's `ready` message before any port is transferred.
-  if (typeof controlNonce !== 'string' || controlNonce.length === 0) return () => {};
+  // the SDK's `ready` message before any port is transferred. Callers that set
+  // `src` themselves pass it; otherwise it is appended here, still before the
+  // load listener is armed.
+  let controlNonce = typeof nonceParam === 'string' ? nonceParam : '';
+  if (!controlNonce) {
+    try {
+      controlNonce = createBridgeNonce();
+    } catch {
+      return () => {};
+    }
+    const src = frame.getAttribute('src') ?? '';
+    if (src && src !== 'about:blank' && !src.includes(`${BRIDGE_NONCE_PARAM}=`)) {
+      frame.src = bridgeSrcWithNonce(src, controlNonce);
+    }
+  }
 
   let disposed = false;
   // The handshake is armed exactly once, for the first document load that the
