@@ -62,9 +62,9 @@ Status permitidos: `todo`, `doing`, `review`, `done`, `blocked`.
 | AX-03 | done | wt-authoring | 4688d11 (merge 06f026f) | fmt/clippy/test | README com build/call/permissões/teste; WIT C# sem duplicação |
 | AX-04 | done | wt-config | c978b06 (merge 58dc4d3) | fmt/clippy/test + dry-run sem arquivos | `--template/--with-test/--no-register/--dry-run`; presets init |
 | AX-05 | done | wt-authoring | c1399e9 (merge 2561634) | fmt/clippy/test + UI build + Playwright 11/11 | catálogo `OWASIDEA_E_*`; `explain`; UI mostra hint/docs |
-| AX-06 | todo | — | — | — | — |
+| AX-06 | done | wt-config | 5689baf + fc95870 (merge fec01b4) | fmt/clippy/test | `doctor --fix/--yes`; `tools.lock`; dry-run sem sudo |
 | AX-07 | done | wt-authoring | 861cd23 + 1b82fea (merge 09f3ce2) | fmt/clippy/test + schema --check | JSON Schema (`additionalProperties:false`); comando `schema`; docs |
-| AX-08 | todo | — | — | — | — |
+| AX-08 | done | wt-authoring | 47cc2db (merge b50c283) | fmt/clippy/test | `plugin add` com preview de permissões; `--dry-run`; sem overwrite |
 | PX-01 | todo | — | — | — | — |
 | PX-02 | todo | — | — | — | — |
 | PX-03 | todo | — | — | — | — |
