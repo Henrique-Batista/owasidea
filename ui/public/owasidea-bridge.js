@@ -1,6 +1,8 @@
 const BRIDGE_HANDSHAKE_TIMEOUT_MS = 5000;
 const BRIDGE_DEFAULT_TIMEOUT_MS = 10000;
 const BRIDGE_MAX_TIMEOUT_MS = 30000;
+const BRIDGE_PROTOCOL_VERSION = 1;
+const BRIDGE_NONCE_PARAM = '__owasidea_bridge';
 
 class BridgeError extends Error {
   constructor(code, message) {
@@ -106,7 +108,8 @@ function createBridge(port, nonce) {
     return true;
   }
 
-  // send hello
+  // send hello over the transferred port; the parent matches it against the
+  // nonce it generated for this iframe session.
   try { port.postMessage({ type: 'owasidea:bridge:hello', nonce }); } catch {}
 
   return { call, cancel, port };
@@ -116,16 +119,82 @@ let _initResolve = null;
 let _initPromise = new Promise((res) => { _initResolve = res; });
 let _initReceived = null;
 
-function _handleInit(e) {
+// The dashboard mounts this document with a one-time nonce in the query string.
+// It is the only document-bound value available in a sandboxed (opaque origin)
+// iframe: a navigated document does not carry it, so it cannot obtain a port.
+let _urlNonce = null;
+try {
+  _urlNonce = new URLSearchParams(location.search).get(BRIDGE_NONCE_PARAM);
+} catch {}
+// Keep the plugin's own URL clean for apps that parse query strings.
+if (_urlNonce) {
+  try {
+    const url = new URL(location.href);
+    url.searchParams.delete(BRIDGE_NONCE_PARAM);
+    history.replaceState(history.state, '', url.toString());
+  } catch {}
+}
+
+function _parentWindow() {
+  if (typeof window === 'undefined') return null;
+  try {
+    return window.parent && window.parent !== window ? window.parent : null;
+  } catch {
+    return null;
+  }
+}
+
+// Announce readiness to the dashboard. The message carries no secret; it only
+// tells the parent that this document's SDK is listening, so the parent can
+// transfer the MessagePort to the verified document.
+function announce() {
+  const parent = _parentWindow();
+  if (!parent || _initReceived || !_urlNonce) return;
+  try {
+    parent.postMessage(
+      { type: 'owasidea:bridge:ready', version: BRIDGE_PROTOCOL_VERSION, nonce: _urlNonce },
+      '*'
+    );
+  } catch {}
+}
+
+function _handleMessage(e) {
   const data = e && e.data;
-  if (!data || data.type !== 'owasidea:bridge:init') return;
+  if (!data || typeof data !== 'object') return;
+  // Only the embedding dashboard may drive the handshake; ignore messages from
+  // other windows/frames.
+  if (e.source !== window.parent) return;
+
+  if (data.type === 'owasidea:bridge:probe') {
+    if (data.version !== BRIDGE_PROTOCOL_VERSION) return;
+    if (!_initReceived) announce();
+    return;
+  }
+
+  if (data.type !== 'owasidea:bridge:init') return;
+  if (data.version !== BRIDGE_PROTOCOL_VERSION) return;
+  // Refuse init that does not match the nonce this document was mounted with.
+  if (typeof data.nonce !== 'string' || data.nonce.length === 0) return;
+  if (!_urlNonce || data.nonce !== _urlNonce) return;
   const p = e.ports && e.ports[0];
-  if (!p || _initReceived) return;
+  if (!p || typeof p.postMessage !== 'function') return;
+  if (_initReceived) {
+    // Single-use handshake: a second init for this document is refused.
+    try { p.close(); } catch {}
+    return;
+  }
   _initReceived = { port: p, nonce: data.nonce };
   if (_initResolve) _initResolve(_initReceived);
 }
+
 if (typeof window !== 'undefined') {
-  window.addEventListener('message', _handleInit);
+  window.addEventListener('message', _handleMessage);
+  // The parent may attach after this script ran, so announce once on load and
+  // rely on `probe` for late attach. Announce immediately when possible.
+  announce();
+  if (typeof document !== 'undefined' && document.readyState !== 'complete') {
+    document.addEventListener('DOMContentLoaded', announce, { once: true });
+  }
 }
 
 export function connect() {
@@ -136,6 +205,8 @@ export function connect() {
       settled = true;
       reject(new BridgeError('BRIDGE_DISABLED', 'handshake timeout'));
     }, BRIDGE_HANDSHAKE_TIMEOUT_MS);
+
+    if (!_initReceived) announce();
 
     (async () => {
       try {

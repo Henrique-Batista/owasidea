@@ -166,8 +166,9 @@ fetch and curl snippets are generated from the submitted arguments.
 During `owasidea dev`, changes under `plugins/<name>/dist/**` (or `plugins/<name>/index.html`)
 are detected by the watcher. The CLI rebuilds that UI plugin's assets/index entry,
 regenerates `ui/public/ui-plugins.json`, and the UI polls the index every ~1.5s;
-when the version/hash changes, the plugin iframe is reloaded with its sandbox
-and allowlist preserved. Production (no watcher) keeps the existing behavior.
+when the version/hash changes, the dashboard re-verifies the assets and mounts a
+**new** iframe with a fresh bridge nonce (the live iframe is never re-armed).
+Production (no watcher) keeps the existing behavior.
 
 ## Bridge SDK (CT-07)
 
@@ -196,6 +197,22 @@ const result = await bridge.call('changelog-ts', 'render', ['v1.0.0', ['feat: ad
 `connect()` resolves with `{ call, cancel }`. `call()` returns a Promise that
 resolves with `result`/`results` or rejects with `BridgeError { code, message }`.
 Use `bridge.cancel(id)` when you retain the request id.
+
+The SDK must be the copy produced by `owasidea build` (it is hashed with the
+bundle). The dashboard mounts the iframe with a one-time
+`?__owasidea_bridge=<nonce>` parameter and only transfers a `MessagePort` after
+the SDK echoes that nonce in a `ready` control message from the iframe's own
+window. Bundles built before this handshake existed stay isolated and
+`connect()` rejects with `BRIDGE_DISABLED` until they are rebuilt.
+
+A plugin that navigates away (reload, `location.href`, redirect) loses the
+bridge permanently: the dashboard closes the port, cancels in-flight calls and
+never re-sends `init` to the new document. If you need a reload, rebuild the
+plugin so the dashboard swaps the iframe.
+
+Bridge timeout: the dashboard uses 10 s by default, or the manifest's
+`permissions.resources.timeout_ms` / `metadata.ui.timeout_ms` when present,
+capped at 30 s.
 
 ### Allowlist
 

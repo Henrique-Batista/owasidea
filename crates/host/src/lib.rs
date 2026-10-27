@@ -1142,6 +1142,20 @@ struct UiPluginInfo {
     files: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     bridge: Vec<String>,
+    /// Bridge timeout declared by the manifest (ms). Absent means the parent
+    /// uses the 10 s default from ADR-0004; the parent caps it at 30 s.
+    #[serde(rename = "timeoutMs", skip_serializing_if = "Option::is_none")]
+    timeout_ms: Option<u64>,
+}
+
+fn ui_bridge_timeout_ms(ui: &serde_json::Value, manifest: &serde_json::Value) -> Option<u64> {
+    ui.get("timeout_ms")
+        .and_then(serde_json::Value::as_u64)
+        .or_else(|| {
+            manifest
+                .pointer("/permissions/resources/timeout_ms")
+                .and_then(serde_json::Value::as_u64)
+        })
 }
 
 async fn health() -> &'static str {
@@ -3121,6 +3135,7 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
                             .collect()
                     })
                     .unwrap_or_default(),
+                timeout_ms: ui_bridge_timeout_ms(ui, &manifest_value),
             });
             tracing::info!(
                 "skipping js-wasm plugin {} (served by the webview UI, not Wasmtime)",
@@ -3603,6 +3618,24 @@ mod tests {
         assert_eq!(value["address"], serde_json::Value::Null);
         assert_eq!(value["last_error"], "no start-service export");
         assert_eq!(value["restarts"], 2);
+    }
+
+    #[test]
+    fn ui_bridge_timeout_reads_manifest_and_defaults_to_none() {
+        let ui = serde_json::json!({ "entry": "index.html" });
+        let manifest =
+            serde_json::json!({ "permissions": { "resources": { "timeout_ms": 1500 } } });
+        assert_eq!(ui_bridge_timeout_ms(&ui, &manifest), Some(1500));
+
+        let ui_with_timeout = serde_json::json!({ "timeout_ms": 2500 });
+        assert_eq!(
+            ui_bridge_timeout_ms(&ui_with_timeout, &manifest),
+            Some(2500)
+        );
+
+        let no_timeout =
+            serde_json::json!({ "permissions": { "resources": { "timeout_ms": null } } });
+        assert_eq!(ui_bridge_timeout_ms(&ui, &no_timeout), None);
     }
 
     #[tokio::test]
