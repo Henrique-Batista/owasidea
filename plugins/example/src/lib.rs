@@ -25,6 +25,15 @@ impl Guest for Example {
         host_log::log(&format!("remembered {key}"));
         format!("stored {key}")
     }
+
+    fn slow_sum(count: u32) -> u32 {
+        host_log::log(&format!("slow-sum called with {count}"));
+        let mut sum: u32 = 0;
+        for value in 0..count {
+            sum = sum.wrapping_add(value);
+        }
+        sum
+    }
 }
 
 export!(Example);

@@ -1,7 +1,7 @@
 # Roadmap 1.0 — Status tracker
 
 Status do plano: **em execução**
-Última atualização: 2026-10-26
+Última atualização: 2026-10-27
 Fonte de escopo: [`ROADMAP_IMPLEMENTATION_PLAN.md`](ROADMAP_IMPLEMENTATION_PLAN.md)
 
 ## Legenda
@@ -79,7 +79,7 @@ Status permitidos: `todo`, `doing`, `review`, `done`, `blocked`.
 | RL-03 | done | wt-release | — | fmt/clippy/test (unit + CLI), YAML parse, skip/dry-run matrix | `owasidea signing plan`; PFX/Azure Windows + Developer ID/notarization macOS; CI opcional; docs/CODE_SIGNING.md |
 | RL-04 | todo | — | — | — | — |
 | RL-05 | done | wt-host | b6b1a66 (merge 434383d) | fmt/clippy/test com e sem feature `otel`; teste live OTLP | spans `plugin.call`/`http.request`; endpoint OTLP; desligado sem feature/env |
-| RL-06 | todo | — | — | — | — |
+| RL-06 | review | wt-host | — | fmt/clippy/test com e sem feature `streaming`; hardening SEC | ADR-0005 + jobs/SSE/cancel; ressalvas SEC corrigidas (cancel/queued, limites, panic, SSE, bind) |
 | RL-07 | todo | — | — | — | — |
 | G0 | todo | — | — | — | — |
 | G1 | todo | — | — | — | — |

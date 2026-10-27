@@ -209,6 +209,114 @@ Status response:
   are exact WIT names; kebab-case stays kebab-case (`next-version`,
   `save-report`).
 
+## Streaming jobs (RL-06, experimental)
+
+Long-call jobs are compiled in only with the `streaming` feature:
+
+```bash
+cargo build -p owasidea-host --features streaming
+```
+
+Without the feature the routes below do not exist (`404`) and
+`POST /plugin/{name}/call` is unchanged. See ADR-0005 for the design and
+limitations.
+
+| Route | Purpose |
+| --- | --- |
+| `POST /plugin/{name}/call/jobs` | create a job for a `library`/`hybrid` export |
+| `GET /jobs/{id}` | job status, result/error, and buffered events |
+| `GET /jobs/{id}/events` | SSE stream (`event: job`, then `event: end`) |
+| `POST /jobs/{id}/cancel` | cancel a job (idempotent) |
+
+Create:
+
+```json
+{ "function": "slow-sum", "args": [500000000] }
+```
+
+`202 Accepted`:
+
+```json
+{
+  "job_id": "9f0c…",
+  "state": "queued",
+  "status_url": "/jobs/9f0c…",
+  "events_url": "/jobs/9f0c…/events",
+  "cancel_url": "/jobs/9f0c…/cancel"
+}
+```
+
+States are `queued`, `running`, `succeeded`, `failed`, and `cancelled`.
+`GET /jobs/{id}` returns the job with `events` (a bounded snapshot) and, when
+terminal, `result` or `error`. `args` use the same positional JSON/WIT type
+rules as `/call`; an unknown export becomes a failed job (the component is only
+instantiated when the job runs).
+
+SSE events carry a monotonic `seq` in the `id` field:
+
+```
+event: job
+id: 3
+data: {"seq":3,"ts":1793000000512,"event":"progress","data":{"elapsed_ms":500}}
+
+event: end
+data: {"state":"succeeded"}
+```
+
+`event: end` is always last and closes the stream. A client that connects after
+the job finished receives the buffered events and the `end` immediately. Send
+`Last-Event-ID: <seq>` to resume after a known event; if the ring already
+dropped events, the stream emits `event: dropped` with
+`{"requested_after":N,"first_available":M}` before the replay. A result larger
+than 256 KiB is returned as `{"truncated":true,"original_bytes":N}`, and the
+`finished` event carries `"truncated":true`. Every `/jobs/*` response sets
+`Cache-Control: no-store`.
+
+Cancel returns `200` with the current job. Cancelling a terminal job does not
+change it. A job cancelled while still `queued` never emits `started` and ends
+`cancelled`. The prototype drops the executor future; it cannot preempt a guest
+that never yields. An executor panic fails the job (`job panicked`) and releases
+its slot.
+
+Limits (per host process):
+
+- 8 active jobs (`429` beyond that);
+- 64 retained terminal jobs;
+- 256 events per job (oldest dropped first);
+- 64 KiB serialized `args` (`413`);
+- 256-byte function name (`400`);
+- 256 KiB serialized result (larger becomes truncated metadata);
+- 8 KiB per event `data` (larger payloads become `{"truncated":true}`);
+- 4 SSE readers per job and 64 globally (`429` beyond that);
+- timeout `clamp(manifest permissions.resources.timeout_ms, 1, 300000)` ms,
+  default 30 s; a timeout marks the job `failed`, it is not a `504`;
+- `progress` heartbeat every 500 ms while the call runs.
+
+Job ids are 128-bit random values. If the RNG fails, creation returns `500`
+instead of falling back to a predictable id. Job ids are not written to logs;
+HTTP traces redact `/jobs/<id>` to `/jobs/{id}`.
+
+The host refuses to bind a non-loopback address unless
+`--allow-non-loopback` or `OWASIDEA_ALLOW_NON_LOOPBACK=1` is set.
+
+Jobs share the plugin's `instance_slots` (`permissions.resources.max_instances`,
+default 1), so a long job serializes other calls to the same plugin unless the
+manifest allows more instances.
+
+Example (`plugins/example`):
+
+```bash
+curl -s -X POST localhost:8787/plugin/example/call/jobs \
+  -H 'content-type: application/json' \
+  -d '{"function":"slow-sum","args":[500000000]}'
+curl -N localhost:8787/jobs/<job_id>/events
+```
+
+Job calls are counted in the plugin's `/metrics` counters. There is no job queue
+metric or persistence yet; jobs and events are lost when the host restarts.
+Guest-driven progress through a WIT `progress` import is specified in ADR-0005
+but not implemented in this prototype.
+
 ## Executable plugins (embedded WASI HTTP)
 
 - `* /app/{name}` and `/app/{name}/{*path}` → dispatched to the component's

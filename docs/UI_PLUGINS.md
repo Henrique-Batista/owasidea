@@ -202,3 +202,10 @@ Use `bridge.cancel(id)` when you retain the request id.
 Only entries listed in `bridge` (and validated at build time against the
 headless plugin manifest/exports) are callable. Calls to other functions return
 `NOT_ALLOWED`. Manifests without `bridge` behave as before (fully isolated).
+
+### Streaming jobs
+
+The experimental long-call jobs API (ADR-0005, feature `streaming`) is
+host-only: the bridge remains request/response and does not expose job events or
+cancellation to UI plugins. A UI plugin that needs progress must use its own
+allowlisted request/response call until the bridge protocol gains streaming.

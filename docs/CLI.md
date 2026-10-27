@@ -208,7 +208,9 @@ print a message and require `owasidea build`.
 
 Run the current manifests without building or watching. The host address comes
 from `--http-addr`, then `[host].addr`, then `127.0.0.1:0`. Signing environment
-from `[signing]` is applied automatically.
+from `[signing]` is applied automatically. The host refuses non-loopback bind
+addresses unless `OWASIDEA_ALLOW_NON_LOOPBACK=1` is set (the standalone host
+binary also accepts `--allow-non-loopback`).
 
 ### `inspect <plugin> [--json]`
 

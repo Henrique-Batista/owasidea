@@ -245,7 +245,7 @@ pub(crate) async fn trace_context(request: Request<Body>, next: Next) -> Respons
     }
 
     let method = request.method().as_str().to_string();
-    let path = request.uri().path().to_string();
+    let path = redact_request_path(request.uri().path());
     let span = tracing::info_span!(
         "http.request",
         otel.kind = "server",
@@ -268,6 +268,17 @@ pub(crate) async fn trace_context(request: Request<Body>, next: Next) -> Respons
         if status.is_success() { "ok" } else { "error" },
     );
     response
+}
+
+#[cfg(feature = "otel")]
+fn redact_request_path(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("/jobs/") {
+        return match rest.split_once('/') {
+            Some((_, tail)) => format!("/jobs/{{id}}/{tail}"),
+            None => "/jobs/{id}".to_string(),
+        };
+    }
+    path.to_string()
 }
 
 #[cfg(feature = "otel")]
@@ -435,6 +446,25 @@ mod tests {
             assert_eq!(
                 fields.get("otel.status_code").map(String::as_str),
                 Some("error")
+            );
+        }
+
+        #[test]
+        #[cfg(feature = "otel")]
+        fn job_ids_are_redacted_from_http_spans() {
+            assert_eq!(redact_request_path("/jobs/abcdef"), "/jobs/{id}");
+            assert_eq!(
+                redact_request_path("/jobs/abcdef/events"),
+                "/jobs/{id}/events"
+            );
+            assert_eq!(
+                redact_request_path("/jobs/abcdef/cancel"),
+                "/jobs/{id}/cancel"
+            );
+            assert_eq!(redact_request_path("/plugins"), "/plugins");
+            assert_eq!(
+                redact_request_path("/plugin/x/call/jobs"),
+                "/plugin/x/call/jobs"
             );
         }
 
