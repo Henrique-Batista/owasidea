@@ -229,7 +229,18 @@ async function renderPluginDetail(name: string) {
         if (latEl) latEl.textContent = `${ms} ms`;
         if (!response.ok) {
           if (out) out.textContent = '';
-          if (errEl) errEl.textContent = `HTTP ${response.status}: ${typeof parsed === 'string' ? parsed : JSON.stringify(parsed)}`;
+          let msg = `HTTP ${response.status}: ${typeof parsed === 'string' ? parsed : JSON.stringify(parsed)}`;
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            const code = parsed.code ? ` [${parsed.code}]` : '';
+            const message = parsed.message ? parsed.message : '';
+            const hint = parsed.hint ? `\nhint: ${parsed.hint}` : '';
+            const docs = parsed.docs ? `\ndocs: ${parsed.docs}` : '';
+            if (message || hint || docs) {
+              msg = `${code ? code.trim() + ' ' : ''}${message || msg}${hint}${docs}`.trim();
+              if (!message) msg = `HTTP ${response.status}: ${msg}`;
+            }
+          }
+          if (errEl) errEl.textContent = msg;
           return;
         }
         if (out) out.textContent = JSON.stringify(parsed, null, 2);
