@@ -55,7 +55,7 @@ Status permitidos: `todo`, `doing`, `review`, `done`, `blocked`.
 | CT-04 | done | wt-ui | 1fc070c + 03caa8e (merge 9de58de) | cargo gates + UI build + Playwright 8/8 | forms genéricos por `params`; resultado/erro/ms; snippets |
 | CT-05 | done | wt-authoring | ae399b0 + 1a26839 (merge 131dccb) | REV aprovado; SEC aprovado com ressalvas | ADR-0004: MessageChannel + nonce + allowlist; SDK same-origin; gates WebKit/WebView2 |
 | CT-06 | done | wt-ui | 1ad071f + e68a3e5 (merge e72fdbe) | cargo gates + UI build + Playwright 11/11; SEC aprovado | bridge opt-in MessageChannel/nonce/allowlist; timeout/cancel/reload |
-| CT-07 | todo | — | — | — | — |
+| CT-07 | done | wt-ui | 4fda7b1 + 3e17d75 + d0f9547 (merge 22e5850) | Playwright raiz 11/11 + Shipyard 7/7 | SDK same-origin; board-svelte chama changelog-ts.render |
 | CT-08 | done | wt-host | bf344eb + 63b308f (merge 28cd8b1) | fmt/clippy/test + Shipyard build/smoke; SEC aprovado | schema_version/host_abi/min_host; legado aceito; semver |
 | AX-01 | todo | — | — | — | — |
 | AX-02 | todo | — | — | — | — |
@@ -98,3 +98,4 @@ Status permitidos: `todo`, `doing`, `review`, `done`, `blocked`.
 | FIX-04 | todo | — | — | — | P2: teste e2e de hot reload/409 e SSE (mapear em DL-05/PX-06) |
 | FIX-05 | todo | — | — | — | P2: verificar bundle Tauri deb/rpm/AppImage no CI (mapear em RL/CI) |
 | FIX-06 | todo | — | — | — | P2: documentar toolchains opcionais ausentes (mapear em AX-06) |
+| FIX-07 | done | wt-host | 40b1c02 (merge 975855d) | fmt/clippy/test + Shipyard host assinado + Playwright 7/7 | verificação de assinatura sobre JSON cru; interop CLI/host |
