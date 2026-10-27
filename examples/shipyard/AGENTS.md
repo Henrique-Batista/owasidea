@@ -46,8 +46,10 @@ disks.
 2. Add its WIT contract. Use exact kebab-case names.
 3. Add `[plugins.<name>]` in `wasm-app.toml` with path/language/type.
 4. Add KV/fs/http/network permissions only for WIT imports.
-5. Run `owasidea build`; run `owasidea test` for the full suite.
-6. Add the component file to `desktop/tauri.conf.json` `bundle.resources`.
+5. Run `owasidea build`; run `owasidea test` for the full suite. Signing needs
+   `owasidea keygen --out keys` once (the example does not auto-generate keys).
+6. Packaging resources are generated from `wasm-app.toml`; no manual
+   `desktop/tauri.conf.json` edit is needed for a new plugin.
 7. Add assertions under `[[smoke.calls]]`, `[[smoke.http]]` or
    `[[smoke.services]]` in `wasm-app.toml`.
 8. For UI, add a Playwright test in `tests/ui.spec.ts`.

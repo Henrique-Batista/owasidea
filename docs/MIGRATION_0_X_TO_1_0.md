@@ -165,9 +165,11 @@ What you need to know as an app author:
 
   Regenerating removes the warning. Removal follows the two-minor/six-month
   window in [`ABI_POLICY.md`](ABI_POLICY.md#4-deprecation-window).
-- `owasidea verify dist/` applies the same ABI checks to a release artifact and
-  reports stable codes (`HOST_ABI_MISMATCH`, `HOST_ABI_MISSING`, `MIN_HOST`,
-  `MIN_HOST_MISSING`, `SCHEMA_VERSION`).
+- `owasidea verify dist/ --public-key <release.pub>` applies the same ABI checks
+  to a release artifact and reports stable codes (`HOST_ABI_MISMATCH`,
+  `HOST_ABI_MISSING`, `MIN_HOST`, `MIN_HOST_MISSING`, `SCHEMA_VERSION`). The
+  trust root must be pinned (`--public-key`/`OWASIDEA_PUBLIC_KEY`);
+  `TRUST_ROOT_UNPINNED` rejects a key staged inside `dist/`.
 
 ## 6. CLI flags and commands
 
@@ -261,7 +263,7 @@ owasidea smoke
 owasidea test
 ```
 
-Release-time checks: `owasidea verify dist/<profile>` and
-`owasidea config render --check`. Rollback is a `git checkout` of
+Release-time checks: `owasidea verify dist/<profile> --public-key <release.pub>`
+and `owasidea config render --check`. Rollback is a `git checkout` of
 `wasm-app.toml` plus `owasidea build`; generated manifests are not tracked, so
 there is nothing else to revert.

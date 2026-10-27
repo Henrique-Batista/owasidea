@@ -3,6 +3,11 @@
 # - Full matrix (build+smoke+Playwright+bundle) runs only on push to
 #   release/1.0 and tags, at most 2x per day to avoid burning CI quota.
 # - No cron schedules are defined; avoid unbounded matrix runs.
+# - Third-party actions are referenced by major tag (`@v4`). Pinning every
+#   action to a commit SHA is the intended hardening (G1 low); until the SHA
+#   list is maintained, review tag updates and keep `permissions` minimal.
+# - Steps that consume signing secrets run only on push/tag builds; PRs never
+#   receive `secrets.*` and must not attempt to import certificates.
 
 name: CI
 
@@ -183,6 +188,14 @@ jobs:
       - name: Put owasidea on PATH
         run: echo "$PWD/target/debug" >> "$GITHUB_PATH"
 
+      # G1: the example never generates signing keys implicitly. CI creates an
+      # ephemeral demo key (gitignored) and pins it for `verify`.
+      - name: Generate example signing key
+        working-directory: examples/shipyard
+        run: |
+          set -euo pipefail
+          test -f keys/owasidea.key || owasidea keygen --out keys
+
       - name: Install optional plugin toolchains (C#/C/C++)
         run: |
           dotnet workload install wasi-experimental \
@@ -214,7 +227,7 @@ jobs:
 
       - name: Verify dist (manifests, components, signatures, UI index)
         working-directory: examples/shipyard
-        run: owasidea verify dist/ --json
+        run: owasidea verify dist/ --json --public-key keys/owasidea.pub
 
       - name: Upload Linux packages
         uses: actions/upload-artifact@v4
@@ -340,6 +353,12 @@ jobs:
       - name: Put owasidea on PATH
         run: echo "$PWD/target/debug" >> "$GITHUB_PATH"
 
+      - name: Generate example signing key
+        working-directory: examples/shipyard
+        run: |
+          set -euo pipefail
+          test -f keys/owasidea.key || owasidea keygen --out keys
+
       - name: Install optional plugin toolchains (C#/C/C++)
         if: steps.appimage.outputs.available == 'true'
         run: |
@@ -360,7 +379,7 @@ jobs:
       - name: Verify dist (manifests, components, signatures, UI index)
         if: steps.appimage.outputs.available == 'true'
         working-directory: examples/shipyard
-        run: owasidea verify dist/ --json
+        run: owasidea verify dist/ --json --public-key keys/owasidea.pub
 
       - name: Upload AppImage
         if: steps.appimage.outputs.available == 'true'
@@ -448,6 +467,9 @@ jobs:
         run: echo "$PWD/target/debug" >> "$GITHUB_PATH"
 
       - name: Plan code signing (Windows, optional)
+        # G1: signing secrets are only consumed on push/tag builds; PRs from
+        # forks must not see them and the job must not attempt to import certs.
+        if: github.event_name != 'pull_request'
         id: signing
         shell: bash
         env:
@@ -464,7 +486,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Import Windows signing certificate (PFX)
-        if: ${{ steps.signing.outputs.import_certificate == 'true' }}
+        if: ${{ github.event_name != 'pull_request' && steps.signing.outputs.import_certificate == 'true' }}
         shell: pwsh
         env:
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
@@ -484,12 +506,19 @@ jobs:
           }
 
       - name: Install Azure Artifact Signing CLI
-        if: ${{ steps.signing.outputs.mode == 'windows-trusted-signing' && contains(env.OWASIDEA_WINDOWS_SIGN_COMMAND, 'artifact-signing-cli') }}
+        if: ${{ github.event_name != 'pull_request' && steps.signing.outputs.mode == 'windows-trusted-signing' && contains(env.OWASIDEA_WINDOWS_SIGN_COMMAND, 'artifact-signing-cli') }}
         run: cargo install artifact-signing-cli --locked
 
       - name: owasidea doctor --json (optional toolchains)
         continue-on-error: true
         run: owasidea doctor --json
+
+      - name: Generate example signing key
+        shell: bash
+        working-directory: examples/shipyard
+        run: |
+          set -euo pipefail
+          test -f keys/owasidea.key || owasidea keygen --out keys
 
       - name: Shipyard build (Rust/Go/TS; C#/C/C++ optional/continue-on-error)
         working-directory: examples/shipyard
@@ -497,6 +526,9 @@ jobs:
         run: owasidea build
 
       - name: Bundle NSIS
+        # G1: this step receives Azure signing secrets, so it runs only for
+        # push/tag builds (never for pull_request).
+        if: github.event_name != 'pull_request'
         working-directory: examples/shipyard
         continue-on-error: true
         env:
@@ -508,7 +540,7 @@ jobs:
         run: owasidea bundle --no-build --bundles nsis
 
       - name: Verify Authenticode signatures (optional)
-        if: ${{ steps.signing.outputs.sign == 'true' }}
+        if: ${{ github.event_name != 'pull_request' && steps.signing.outputs.sign == 'true' }}
         shell: pwsh
         working-directory: examples/shipyard
         run: |
@@ -531,11 +563,17 @@ jobs:
           }
 
       - name: Code signing skipped (no Windows certificate)
-        if: ${{ steps.signing.outputs.mode == 'skip' }}
+        if: ${{ github.event_name != 'pull_request' && steps.signing.outputs.mode == 'skip' }}
         run: |
           echo "Windows installers stay unsigned: set the WINDOWS_CERTIFICATE and"
           echo "WINDOWS_CERTIFICATE_PASSWORD secrets, or OWASIDEA_WINDOWS_SIGN_COMMAND"
           echo "for Azure Artifact Signing. See docs/CODE_SIGNING.md."
+
+      - name: Code signing skipped on pull requests
+        if: github.event_name == 'pull_request'
+        run: |
+          echo "Signing steps are skipped on pull_request: signing secrets are"
+          echo "only available to push/tag builds. See docs/CODE_SIGNING.md."
 
   macos:
     name: macOS (app/dmg, sign + notarize optional)
@@ -611,6 +649,12 @@ jobs:
         run: |
           sudo dotnet workload install wasi-experimental
           owasidea doctor --install-wasi-sdk
+
+      - name: Generate example signing key
+        working-directory: examples/shipyard
+        run: |
+          set -euo pipefail
+          test -f keys/owasidea.key || owasidea keygen --out keys
 
       - name: Plan code signing (macOS, optional)
         id: signing

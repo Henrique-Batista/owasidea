@@ -104,10 +104,11 @@ crates/desktop/tauri.windows.conf.json
 examples/shipyard/desktop/tauri.windows.conf.json
 ```
 
-They also select the `.ico` icon. Keep `bundle.resources` in the base config;
-platform configs merge with it. The built installer is a normal Tauri/NSIS
-executable and installs the host plus the generated manifests/components under
-the resource directory.
+They also select the `.ico` icon. `owasidea bundle` generates
+`bundle.resources` in `tauri.generated.conf.json`; keep only targets/icons in
+the base config, since platform configs merge with the generated file. The
+built installer is a normal Tauri/NSIS executable and installs the host plus the
+generated manifests/components under the resource directory.
 
 The Tauri updater uses the NSIS `.exe` (`windows-x86_64` in `latest.json`);
 `.msi` is only used when no `.exe` was produced. Updater artifacts must be

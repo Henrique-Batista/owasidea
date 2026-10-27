@@ -22,6 +22,19 @@ below; see [`docs/UPDATER.md`](docs/UPDATER.md).
 
 ### Fixed
 
+- `crates/desktop` now creates and sets `OWASIDEA_DATA_DIR` to the platform
+  app-data directory, and resolves the bundled trust key, before starting the
+  host (G0).
+- `bundle.resources` is generated from `wasm-app.toml` (manifests, headless
+  components, trust key, `runtime.json`) instead of being hand-maintained in
+  `tauri.conf.json` (G0).
+- `owasidea verify` requires a pinned trust root (`--public-key` or
+  `OWASIDEA_PUBLIC_KEY`) and rejects a key staged inside `dist/` with
+  `TRUST_ROOT_UNPINNED`; `--allow-dist-trust` is opt-in (G1).
+- `examples/shipyard` no longer sets `[signing].generate = true`; create the
+  demo key with `owasidea keygen --out keys` (G1).
+- Windows CI signing steps (plan, PFX import, NSIS bundle, Authenticode) run
+  only on push/tag builds, never on `pull_request` (G1).
 - `owasidea validate --json` now emits a stable `{ok, plugins, errors,
   warnings}` document (per-plugin status, ABI warnings included) and still exits
   non-zero on drift; text output is unchanged without `--json` (FIX-02).
