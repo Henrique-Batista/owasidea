@@ -383,3 +383,5 @@ line/column. All supported fields:
 ## Build id (RF-07)
 
 `owasidea build` computes a deterministic `build_id` and records it in every manifest (`metadata.build_id`), `owasidea.runtime.json`, and exposes it via `OWASIDEA_BUILD_ID`. Override with `OWASIDEA_BUILD_ID`; for reproducible builds set `SOURCE_DATE_EPOCH`. Format: `<git-short-sha>-<epoch>`.
+
+Skew detection (RF-08): the UI compares its runtime `build_id` (`window.__OWASIDEA__.build_id`) with the host `/overview` `build_id`; when both are present and differ it renders a "UI bundle anterior ao host" banner. `owasidea dev` prints a warning when the UI runtime bundle build id differs from (or is missing vs) the host manifest build id.

@@ -2027,6 +2027,25 @@ async fn cmd_dev(
     }
     let manifest_dir = app_path(&root, manifest_dir);
     build_id::ensure_env_from_manifests(&manifest_dir);
+    // RF-08: warn on UI/host build skew.
+    if root.join("ui").join("package.json").is_file() {
+        let manifest_bid = build_id::resolve_from_manifests(&manifest_dir);
+        let runtime_bid = build_id::read_runtime_build_id(&root);
+        match (runtime_bid, manifest_bid) {
+            (Some(rb), Some(mb)) if rb != mb => {
+                eprintln!(
+                    "warning: UI bundle build id ({}) differs from host build id ({}); rebuild the UI bundle",
+                    rb, mb
+                );
+            }
+            (None, _) => {
+                eprintln!(
+                    "warning: UI runtime bundle missing or stale (ui/.owasidea/runtime.json); run `owasidea build`"
+                );
+            }
+            _ => {}
+        }
+    }
     if !build {
         if let Ok(cfg) = read_app_config(config_path) {
             sign_all(&root, &manifest_dir, cfg.signing.as_ref())?;
