@@ -219,3 +219,68 @@ apenas um commit inicial (`339d967`, `LICENSE` MIT); a história foi integrada e
 
 Publicados: `main`, `release/1.0` e a tag `v1.0.0` (recriada no commit final;
 antes apontava para `c4aaf80`, tag local nunca publicada).
+
+## 11. Contratos sem WIT por atributos (Rust)
+
+Objetivo: o desenvolvedor Rust não precisa criar, ler ou versionar arquivos WIT.
+
+### 11.1 O que mudou
+
+- Novo `wit_source` por plugin em `wasm-app.toml`: `auto` (padrão), `wit` ou
+  `attributes`. `auto` usa `wit/` quando existe e, caso contrário, gera a partir
+  dos marcadores.
+- Marcadores: `#[owasidea::world("<name>")]`, `#[owasidea::export]`,
+  `#[owasidea::host_log]`, `#[owasidea::host_kv]`.
+- O contrato gerado é **artefato**: Rust grava `.owasidea/wit/<world>.wit` e
+  `.owasidea/wit/deps/host/host.wit`; o metadata do `Cargo.toml` aponta para lá.
+  Nada disso é versionado.
+- `owasidea build` regenera o contrato antes de compilar, sem silenciar erros, e
+  poda `*.wit` órfãos quando o world é renomeado.
+- **Drift**: marcadores + `wit/` escrito à mão no mesmo plugin falham o build;
+  `wit_source = "wit"` compara os marcadores com o arquivo e falha se
+  divergirem.
+- Nomes Rust viram nomes WIT: `start_service` → `start-service`,
+  `some_arg` → `some-arg`.
+- Tipos cobertos: escalares, `String`/`&str`, `Vec`, slices, arrays, `Option`,
+  `Result`, tuplas, `Box`/`Arc`/`Rc` e tipos nomeados em kebab-case.
+- `plugin new --lang rust` cria o plugin **sem** `wit/`, semeia `.owasidea/wit`
+  e registra `wit_source = "attributes"`.
+- O erro de capability agora mostra o trecho exato de `wasm-app.toml` a adicionar
+  (`kv = "<name>:read-write"`) ou o marcador/linha a remover.
+
+### 11.2 Arquivos principais
+
+- `crates/cli/src/wit_flow.rs` — seleção de fonte, leitura do alvo no Cargo,
+  drift, poda e escrita do artefato.
+- `crates/cli/src/main.rs` — `render_wit_source`/`write_wit`, kebab-case e mapa
+  de tipos Rust.
+- `crates/cli/templates/plugin/rust/*` — template por atributos.
+- `examples/hello` e `plugins/attr-example` — apps migrados, sem `wit/`.
+- `crates/cli/tests/wit_flow.rs` — integração do comando e do scaffold.
+
+### 11.3 Evidência
+
+| Gate | Resultado |
+| --- | --- |
+| `cargo test -p owasidea-cli -p owasidea-host` | unit 189, integração 44 + 3 (`wit_flow`), host 34 + 3 + 3, 0 falhas |
+| `examples/hello` | build **sem `wit/`**, smoke 2/2, Playwright 3/3 |
+| `plugins/attr-example` | `owasidea wit generate` + `cargo component build` sem `wit/` |
+| App da raiz (`owasidea build`) | 10 plugins; `attr-example` gerado, demais em modo `wit` |
+| Shipyard (`build` + `smoke --no-build`) | pass; 11 manifests assinados e 19 checks |
+| `scripts/test-templates.sh --langs rust` | template Rust por atributos compila e valida |
+| Drift | `wit/` legado ao lado de atributos: build rejeitado com mensagem de remoção |
+| Rename de world | `old.wit` gerado é removido; só `<world>.wit` permanece |
+
+### 11.4 Limites explícitos
+
+- Records, enums, variants, flags e resources ainda **não** são gerados a partir
+  de Rust; esses plugins continuam em `wit_source = "wit"`. O guia
+  [`PLUGIN_AUTHORING.md`](../PLUGIN_AUTHORING.md#rust-cargo-component) registra o
+  limite.
+- Go, TypeScript, C#, C e C++ continuam usando `wit/`; o gerador por comentários
+  existe, mas o fluxo principal sem WIT desta entrega é Rust.
+- No checkout local o template usa uma dependência de path para
+  `crates/owasidea`; um CLI publicado deve resolver o crate `owasidea` da mesma
+  forma que os demais crates do framework.
+- O CI Windows deste commit ainda não foi observado; a rodada anterior expôs e
+  corrigiu problemas de path/ambiente, e estes testes novos são multiplataforma.
