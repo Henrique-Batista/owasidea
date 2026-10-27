@@ -43,7 +43,7 @@ Status permitidos: `todo`, `doing`, `review`, `done`, `blocked`.
 | RF-09 | done | wt-config | 9911b66 (merge 6219525) | build direto sem env falha; com env passa | Vite exige OWASIDEA_HOST; docs atualizadas |
 | DL-01 | done | wt-config | 48b62a5 (merge 529d331) | fmt/clippy/test + desktop check + Shipyard build/smoke | `dev --desktop`; host/Vite/Tauri sem duplicação; shutdown polling |
 | DL-02 | done | wt-config | e88b7b7 + ef52057 (merge b7aa2bc) | fmt/clippy/test + help flags | `--open/--no-ui/--no-host/--no-watch`; erros propagam; sem host duplicado |
-| DL-03 | todo | — | — | — | — |
+| DL-03 | done | wt-config | 1a3b597 (merge 1491d46) | fmt/clippy/test + call real no Shipyard | `call <plugin>.<fn>`; args inline/@file/stdin; timeout; erros |
 | DL-04 | todo | — | — | — | — |
 | DL-05 | todo | — | — | — | — |
 | DL-06 | todo | — | — | — | — |
@@ -52,7 +52,7 @@ Status permitidos: `todo`, `doing`, `review`, `done`, `blocked`.
 | CT-01 | done | wt-contracts | 06bd591 (merge ed25c20) | fmt/clippy/test isolado + Shipyard build | `params`/`results` estruturados; interface exports preservados |
 | CT-02 | done | wt-contracts | b7c0d48 (merge 1c7dc55) | fmt/clippy/test + Shipyard build | parser/validador de tipos com proptest; build valida params/results |
 | CT-03 | done | wt-contracts | 09e811e (merge d15aad6) | fmt/clippy/test + client --check no Shipyard | `createClient` TS tipado; `CallError`; timeout; `--check` |
-| CT-04 | todo | — | — | — | — |
+| CT-04 | done | wt-ui | 1fc070c + 03caa8e (merge 9de58de) | cargo gates + UI build + Playwright 8/8 | forms genéricos por `params`; resultado/erro/ms; snippets |
 | CT-05 | todo | — | — | — | — |
 | CT-06 | todo | — | — | — | — |
 | CT-07 | todo | — | — | — | — |
