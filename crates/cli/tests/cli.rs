@@ -23,6 +23,16 @@ fn bundle_help_documents_host_lib_isolation() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("--isolate-host-libs"));
     assert!(stdout.contains("--mask-path"));
+    assert!(stdout.contains("--profile"));
+}
+
+#[test]
+fn bundle_rejects_unknown_profile() {
+    let mut cmd = Command::cargo_bin("owasidea").unwrap();
+    cmd.args(["bundle", "--no-build", "--profile", "qa"]);
+    cmd.assert()
+        .failure()
+        .stderr(predicates::str::contains("unknown bundle profile"));
 }
 
 #[test]

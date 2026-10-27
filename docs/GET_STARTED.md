@@ -156,7 +156,12 @@ owasidea bundle                              # all targets from config
 owasidea bundle --bundles deb                # only .deb
 owasidea bundle --bundles deb,rpm,appimage   # explicit Linux targets
 owasidea bundle --bundles nsis,msi           # Windows
+owasidea bundle --profile staging --bundles deb   # overlay + dist/staging
 ```
+
+Profiles (`dev`, `staging`, `prod`) merge an optional `wasm-app.<profile>.toml`
+over `wasm-app.toml` and write artifacts to `dist/<profile>`; the base config is
+never edited. See [`CLI.md`](CLI.md#bundle-profiles).
 
 AppImage uses `linuxdeploy`. The CLI enables extract-and-run and disables strip
 automatically. If linuxdeploy fails on a host with VMware gdk-pixbuf libraries,

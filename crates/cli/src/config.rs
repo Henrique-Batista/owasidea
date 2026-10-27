@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-#[derive(serde::Deserialize, Debug, Default, schemars::JsonSchema)]
+#[derive(serde::Deserialize, Debug, Default, Clone, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AppConfig {
     pub app: Option<AppSection>,
@@ -96,14 +96,14 @@ impl AppConfig {
     }
 }
 
-#[derive(serde::Deserialize, Debug, Default, schemars::JsonSchema)]
+#[derive(serde::Deserialize, Debug, Default, Clone, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HostSection {
     #[serde(default)]
     pub addr: Option<String>,
 }
 
-#[derive(serde::Deserialize, Debug, Default, schemars::JsonSchema)]
+#[derive(serde::Deserialize, Debug, Default, Clone, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AppSection {
     pub name: Option<String>,
@@ -111,7 +111,7 @@ pub struct AppSection {
     pub identifier: Option<String>,
 }
 
-#[derive(serde::Deserialize, Debug, Default, schemars::JsonSchema)]
+#[derive(serde::Deserialize, Debug, Default, Clone, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DesktopSection {
     #[serde(default)]
@@ -122,7 +122,7 @@ pub struct DesktopSection {
     pub output: Option<String>,
 }
 
-#[derive(serde::Deserialize, Debug, Default, schemars::JsonSchema)]
+#[derive(serde::Deserialize, Debug, Default, Clone, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DevSection {
     #[serde(default = "default_true")]
@@ -133,7 +133,7 @@ pub struct DevSection {
     pub ui_addr: Option<String>,
 }
 
-#[derive(serde::Deserialize, Debug, Default, schemars::JsonSchema)]
+#[derive(serde::Deserialize, Debug, Default, Clone, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SigningSection {
     #[serde(default)]
@@ -146,7 +146,7 @@ pub struct SigningSection {
     pub require: Option<bool>,
 }
 
-#[derive(serde::Deserialize, Debug, Default, schemars::JsonSchema)]
+#[derive(serde::Deserialize, Debug, Default, Clone, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TestSection {
     #[serde(default)]

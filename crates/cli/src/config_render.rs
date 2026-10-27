@@ -28,7 +28,7 @@ pub fn parse_target(s: &str) -> anyhow::Result<RenderScope> {
     }
 }
 
-fn host_url(cfg: &AppConfig) -> String {
+pub(crate) fn host_url(cfg: &AppConfig) -> String {
     let addr = cfg
         .host
         .as_ref()
@@ -94,7 +94,7 @@ pub fn safe_resolve(root: &Path, raw: &str) -> anyhow::Result<PathBuf> {
     }
 }
 
-fn ui_dir(root: &Path, cfg: &AppConfig) -> anyhow::Result<PathBuf> {
+pub(crate) fn ui_dir(root: &Path, cfg: &AppConfig) -> anyhow::Result<PathBuf> {
     let ui = cfg
         .desktop
         .as_ref()
@@ -257,7 +257,7 @@ fn add_origin_to_csp_inner(csp: &str, origin: &str, dev: bool) -> String {
     directives.join("; ")
 }
 
-fn atomic_write(path: &Path, content: &[u8]) -> anyhow::Result<()> {
+pub(crate) fn atomic_write(path: &Path, content: &[u8]) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -267,7 +267,7 @@ fn atomic_write(path: &Path, content: &[u8]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn resolve_build_id(root: &Path) -> Option<String> {
+pub(crate) fn resolve_build_id(root: &Path) -> Option<String> {
     if let Ok(v) = std::env::var("OWASIDEA_BUILD_ID") {
         let v = v.trim();
         if !v.is_empty() {
@@ -295,7 +295,7 @@ fn resolve_build_id(root: &Path) -> Option<String> {
     None
 }
 
-fn runtime_content(cfg: &AppConfig, build_id: Option<String>) -> serde_json::Value {
+pub(crate) fn runtime_content(cfg: &AppConfig, build_id: Option<String>) -> serde_json::Value {
     let build_id = build_id.or_else(|| {
         std::env::var("OWASIDEA_BUILD_ID")
             .ok()
@@ -318,12 +318,43 @@ fn playwright_content(cfg: &AppConfig) -> serde_json::Value {
 }
 
 fn tauri_content(root: &Path, cfg: &AppConfig) -> anyhow::Result<serde_json::Value> {
+    tauri_content_for(root, cfg, None)
+}
+
+/// Render `tauri.generated.conf.json` content from the effective config.
+///
+/// `profile` additionally projects `[app]` into the Tauri identity
+/// (`productName`, `version`, `identifier`) so profile overlays can publish a
+/// distinct app identity without editing the base config. The base
+/// `tauri.conf.json` is only read.
+pub(crate) fn tauri_content_for(
+    root: &Path,
+    cfg: &AppConfig,
+    profile: Option<&str>,
+) -> anyhow::Result<serde_json::Value> {
     let dd = desktop_dir(root, cfg)?;
     let base_path = dd.join("tauri.conf.json");
     let raw = std::fs::read_to_string(&base_path)
         .map_err(|e| anyhow::anyhow!("cannot read {}: {}", base_path.display(), e))?;
     let mut value: serde_json::Value = serde_json::from_str(&raw)?;
+    if profile.is_some() {
+        if let Some(app) = cfg.app.as_ref() {
+            let object = value
+                .as_object_mut()
+                .ok_or_else(|| anyhow::anyhow!("tauri.conf.json root must be object"))?;
+            for (key, slot) in [
+                ("productName", app.name.as_ref()),
+                ("version", app.version.as_ref()),
+                ("identifier", app.identifier.as_ref()),
+            ] {
+                if let Some(slot) = slot {
+                    object.insert(key.to_string(), serde_json::Value::String(slot.clone()));
+                }
+            }
+        }
+    }
     let dev_url = ui_url(cfg);
+
     if let Some(build) = value.get_mut("build").and_then(|v| v.as_object_mut()) {
         build.insert(
             "devUrl".to_string(),
@@ -508,6 +539,22 @@ pub fn render_targets(
     Ok(outputs)
 }
 
+/// Write `tauri.generated.conf.json` from an already-merged config (bundle
+/// profile). Returns the generated file path.
+pub(crate) fn render_tauri_for_profile(
+    root: &Path,
+    cfg: &AppConfig,
+    profile: Option<&str>,
+) -> anyhow::Result<PathBuf> {
+    let dd = desktop_dir(root, cfg)?;
+    let path = dd.join("tauri.generated.conf.json");
+    let value = tauri_content_for(root, cfg, profile)?;
+    let mut bytes = serde_json::to_vec_pretty(&value)?;
+    bytes.push(b'\n');
+    atomic_write(&path, &bytes)?;
+    Ok(path)
+}
+
 pub fn cmd_config_render(config_path: &Path, target: &str, check: bool) -> anyhow::Result<()> {
     let scope = parse_target(target)?;
     render_targets(config_path, scope, check)?;
@@ -592,6 +639,106 @@ mod tests {
         let cfg = AppConfig::default();
         let v = runtime_content(&cfg, resolve_build_id(&root));
         assert_eq!(v["build_id"], "abc-123");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn profile_root(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "owasidea-profile-render-test-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("desktop")).unwrap();
+        std::fs::write(
+            dir.join("desktop").join("tauri.conf.json"),
+            r#"{
+              "productName": "Owasidea",
+              "version": "0.1.0",
+              "identifier": "dev.owasidea.app",
+              "build": { "frontendDist": "../ui/dist", "devUrl": "http://127.0.0.1:5173" },
+              "app": {
+                "security": {
+                  "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:8787"
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+        dir
+    }
+
+    fn profile_cfg(host: &str, name: &str, identifier: &str) -> AppConfig {
+        AppConfig {
+            app: Some(AppSection {
+                name: Some(name.to_string()),
+                version: Some("2.0.0".to_string()),
+                identifier: Some(identifier.to_string()),
+            }),
+            host: Some(HostSection {
+                addr: Some(host.to_string()),
+            }),
+            desktop: Some(DesktopSection {
+                path: Some("desktop".to_string()),
+                ui: Some("ui".to_string()),
+                output: Some("dist".to_string()),
+            }),
+            ..AppConfig::default()
+        }
+    }
+
+    #[test]
+    fn profile_tauri_config_uses_merged_identity_and_csp() {
+        let root = profile_root("identity");
+        let dev = profile_cfg(
+            "127.0.0.1:9100",
+            "Shipyard Dev",
+            "dev.owasidea.shipyard.dev",
+        );
+        let prod = profile_cfg("127.0.0.1:9200", "Shipyard", "dev.owasidea.shipyard");
+
+        let dev_value = tauri_content_for(&root, &dev, Some("dev")).unwrap();
+        let prod_value = tauri_content_for(&root, &prod, Some("prod")).unwrap();
+        assert_ne!(dev_value, prod_value);
+
+        assert_eq!(dev_value["productName"], "Shipyard Dev");
+        assert_eq!(dev_value["version"], "2.0.0");
+        assert_eq!(dev_value["identifier"], "dev.owasidea.shipyard.dev");
+        let dev_csp = dev_value["app"]["security"]["csp"].as_str().unwrap();
+        assert!(dev_csp.contains("http://127.0.0.1:9100"), "csp: {dev_csp}");
+        assert!(!dev_csp.contains("127.0.0.1:9200"), "csp: {dev_csp}");
+        let prod_csp = prod_value["app"]["security"]["csp"].as_str().unwrap();
+        assert!(
+            prod_csp.contains("http://127.0.0.1:9200"),
+            "csp: {prod_csp}"
+        );
+        assert!(csp_is_strict(dev_csp));
+        assert!(csp_is_strict(prod_csp));
+
+        // Without a profile the base tauri.conf.json identity is preserved.
+        let base = tauri_content_for(&root, &dev, None).unwrap();
+        assert_eq!(base["productName"], "Owasidea");
+        assert_eq!(base["identifier"], "dev.owasidea.app");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn render_tauri_for_profile_writes_distinct_configs() {
+        let root = profile_root("render");
+        let dev = profile_cfg(
+            "127.0.0.1:9100",
+            "Shipyard Dev",
+            "dev.owasidea.shipyard.dev",
+        );
+        let prod = profile_cfg("127.0.0.1:9200", "Shipyard", "dev.owasidea.shipyard");
+
+        let path = render_tauri_for_profile(&root, &dev, Some("dev")).unwrap();
+        assert_eq!(path, root.join("desktop").join("tauri.generated.conf.json"));
+        let dev_raw = std::fs::read_to_string(&path).unwrap();
+        render_tauri_for_profile(&root, &prod, Some("prod")).unwrap();
+        let prod_raw = std::fs::read_to_string(&path).unwrap();
+        assert_ne!(dev_raw, prod_raw);
+        assert!(dev_raw.contains("9100"));
+        assert!(prod_raw.contains("9200"));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

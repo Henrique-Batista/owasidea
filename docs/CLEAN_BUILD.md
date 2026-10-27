@@ -30,6 +30,22 @@ Hiding /usr/lib/vmware from the bundler
 
 See [`APPIMAGE.md`](APPIMAGE.md) for why this is necessary.
 
+## Profile release builds
+
+Release channels use bundle profiles instead of hand-editing `wasm-app.toml`:
+`wasm-app.<profile>.toml` is merged over the base config and the artifacts go to
+`dist/<profile>`. Build the production channel with the same clean environment:
+
+```bash
+owasidea bundle --profile prod --bundles deb,rpm
+owasidea bundle --profile prod --bundles appimage --isolate-host-libs
+```
+
+The overlay is read inside the chroot like any other project file, so keep it in
+the repository and never commit generated `dist/` output. See
+[`CLI.md`](CLI.md#bundle-profiles) for the merge rules and what each profile
+changes (host, CSP, Tauri identity, runtime descriptor, artifact directory).
+
 ## Option B: clean chroot (hermetic release)
 
 Use this when you want a build root that contains only official packages, for
