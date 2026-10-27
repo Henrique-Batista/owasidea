@@ -190,6 +190,24 @@ from `[signing]` is applied automatically.
 Show the generated manifest, and for headless plugins the formatted WIT.
 `--json` prints the raw manifest.
 
+### `call <plugin>.<function> [--args <json|@file|->] [--json] [--timeout <secs>]`
+
+Call a plugin export over the host HTTP API. `--args` accepts a JSON array
+inline, `@file` to read from a file, or `-` for stdin (defaults to `[]`).
+`--json` prints the raw response; otherwise pretty-prints it. `--timeout`
+sets the request timeout in seconds (default 30). The host address comes from
+`--http-addr`, then `[host].addr`, then `127.0.0.1:8787`. The host is not
+started by this command.
+
+Examples:
+
+```sh
+owasidea call core-rust.ping
+owasidea call core-rust.score --args '[["feat"],9,10]'
+owasidea call core-rust.echo --args @args.json
+echo '[1,2]' | owasidea call core-rust.sum --args -
+```
+
 ### `client --lang ts -o <file> [--check]`
 
 Generate a typed TypeScript client from the manifests in `--manifest-dir`.

@@ -471,3 +471,104 @@ fn dev_help_documents_desktop_flag() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("--desktop"));
 }
+
+#[test]
+fn call_command_success_and_http_error() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut stream = match stream {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let mut buf = vec![0u8; 8192];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]);
+            let (status, body) = if req.contains("\"function\":\"fail\"")
+                || req.contains("\"function\": \"fail\"")
+            {
+                ("400 Bad Request", r#"{"error":"boom"}"#)
+            } else {
+                ("200 OK", r#"{"result":42}"#)
+            };
+            let resp = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(resp.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+
+    // success
+    let mut cmd = assert_cmd::Command::cargo_bin("owasidea").unwrap();
+    cmd.args([
+        "--http-addr",
+        &addr,
+        "call",
+        "core-rust.ping",
+        "--args",
+        "[]",
+        "--json",
+    ])
+    .assert()
+    .success()
+    .stdout(predicates::str::contains("42"));
+
+    // http error
+    let mut cmd = assert_cmd::Command::cargo_bin("owasidea").unwrap();
+    cmd.args([
+        "--http-addr",
+        &addr,
+        "call",
+        "core-rust.fail",
+        "--args",
+        "[]",
+    ])
+    .assert()
+    .failure();
+}
+
+#[test]
+fn call_command_reads_args_from_stdin() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut stream = stream.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let _ = stream.read(&mut buf);
+            let body = r#"{"result":"ok"}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(resp.as_bytes());
+        }
+    });
+
+    let mut cmd = assert_cmd::Command::cargo_bin("owasidea").unwrap();
+    cmd.args([
+        "--http-addr",
+        &addr,
+        "call",
+        "core-rust.ping",
+        "--args",
+        "-",
+    ])
+    .write_stdin("[7]")
+    .assert()
+    .success()
+    .stdout(predicates::str::contains("ok"));
+}
