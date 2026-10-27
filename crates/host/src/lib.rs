@@ -1954,6 +1954,41 @@ async fn service_status_impl(
     )))
 }
 
+/// Default timeout for the typed POC routes (`dial-tcp`, `tls-probe`, …) when
+/// the manifest does not set `permissions.resources.timeout_ms`.
+pub(crate) const DEFAULT_POC_TIMEOUT_MS: u64 = 10_000;
+
+fn poc_timeout_ms(plugin: &PluginRuntime) -> u64 {
+    plugin
+        .manifest
+        .permissions
+        .resources
+        .timeout_ms
+        .unwrap_or(DEFAULT_POC_TIMEOUT_MS)
+        .max(1)
+}
+
+/// Run one typed POC route call under the manifest timeout (default 10 s) and
+/// answer `504` instead of hanging. Dropping the future on timeout drops the
+/// `Store`, which returns its `max_instances` slot to the plugin semaphore.
+async fn poc_call<F, T>(
+    plugin: &PluginRuntime,
+    operation: &str,
+    work: F,
+) -> Result<T, (StatusCode, String)>
+where
+    F: std::future::Future<Output = Result<T, (StatusCode, String)>>,
+{
+    let timeout_ms = poc_timeout_ms(plugin);
+    match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), work).await {
+        Ok(result) => result,
+        Err(_) => Err((
+            StatusCode::GATEWAY_TIMEOUT,
+            format!("{operation} timed out after {timeout_ms} ms"),
+        )),
+    }
+}
+
 async fn echo_udp(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
@@ -1962,17 +1997,20 @@ async fn echo_udp(
     let p = state
         .plugin(&name)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
-    let (mut store, instance) = instantiate(&state.engine, p.as_ref())
-        .await
-        .map_err(internal)?;
-    let func = instance
-        .get_typed_func::<(u16,), (Result<String, String>,)>(&mut store, "echo-udp")
-        .map_err(internal)?;
-    let (output,) = func
-        .call_async(&mut store, (req.port,))
-        .await
-        .map_err(internal)?;
-    match output {
+    let work = async {
+        let (mut store, instance) = instantiate(&state.engine, p.as_ref())
+            .await
+            .map_err(internal)?;
+        let func = instance
+            .get_typed_func::<(u16,), (Result<String, String>,)>(&mut store, "echo-udp")
+            .map_err(internal)?;
+        let (output,) = func
+            .call_async(&mut store, (req.port,))
+            .await
+            .map_err(internal)?;
+        Ok::<_, (StatusCode, String)>(output)
+    };
+    match poc_call(&p, "echo-udp", work).await? {
         Ok(s) => Ok(Json(OutputRes { output: s })),
         Err(e) => Err((StatusCode::BAD_REQUEST, e)),
     }
@@ -1986,17 +2024,20 @@ async fn dial_echo(
     let p = state
         .plugin(&name)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
-    let (mut store, instance) = instantiate(&state.engine, p.as_ref())
-        .await
-        .map_err(internal)?;
-    let func = instance
-        .get_typed_func::<(String, u16), (Result<String, String>,)>(&mut store, "dial-echo")
-        .map_err(internal)?;
-    let (output,) = func
-        .call_async(&mut store, (req.host, req.port))
-        .await
-        .map_err(internal)?;
-    match output {
+    let work = async {
+        let (mut store, instance) = instantiate(&state.engine, p.as_ref())
+            .await
+            .map_err(internal)?;
+        let func = instance
+            .get_typed_func::<(String, u16), (Result<String, String>,)>(&mut store, "dial-echo")
+            .map_err(internal)?;
+        let (output,) = func
+            .call_async(&mut store, (req.host, req.port))
+            .await
+            .map_err(internal)?;
+        Ok::<_, (StatusCode, String)>(output)
+    };
+    match poc_call(&p, "dial-echo", work).await? {
         Ok(s) => Ok(Json(OutputRes { output: s })),
         Err(e) => Err((StatusCode::BAD_REQUEST, e)),
     }
@@ -2010,17 +2051,23 @@ async fn tls_probe(
     let p = state
         .plugin(&name)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
-    let (mut store, instance) = instantiate(&state.engine, p.as_ref())
-        .await
-        .map_err(internal)?;
-    let func = instance
-        .get_typed_func::<(String, u16, String), (Result<String, String>,)>(&mut store, "tls-probe")
-        .map_err(internal)?;
-    let (output,) = func
-        .call_async(&mut store, (req.host, req.port, req.server_name))
-        .await
-        .map_err(internal)?;
-    match output {
+    let work = async {
+        let (mut store, instance) = instantiate(&state.engine, p.as_ref())
+            .await
+            .map_err(internal)?;
+        let func = instance
+            .get_typed_func::<(String, u16, String), (Result<String, String>,)>(
+                &mut store,
+                "tls-probe",
+            )
+            .map_err(internal)?;
+        let (output,) = func
+            .call_async(&mut store, (req.host, req.port, req.server_name))
+            .await
+            .map_err(internal)?;
+        Ok::<_, (StatusCode, String)>(output)
+    };
+    match poc_call(&p, "tls-probe", work).await? {
         Ok(s) => Ok(Json(OutputRes { output: s })),
         Err(e) => Err((StatusCode::BAD_REQUEST, e)),
     }
@@ -2335,17 +2382,20 @@ async fn start_server(
     let p = state
         .plugin(&name)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
-    let (mut store, instance) = instantiate(&state.engine, p.as_ref())
-        .await
-        .map_err(internal)?;
-    let func = instance
-        .get_typed_func::<(String,), (Result<String, String>,)>(&mut store, "start-server")
-        .map_err(internal)?;
-    let (output,) = func
-        .call_async(&mut store, (req.region_json,))
-        .await
-        .map_err(internal)?;
-    match output {
+    let work = async {
+        let (mut store, instance) = instantiate(&state.engine, p.as_ref())
+            .await
+            .map_err(internal)?;
+        let func = instance
+            .get_typed_func::<(String,), (Result<String, String>,)>(&mut store, "start-server")
+            .map_err(internal)?;
+        let (output,) = func
+            .call_async(&mut store, (req.region_json,))
+            .await
+            .map_err(internal)?;
+        Ok::<_, (StatusCode, String)>(output)
+    };
+    match poc_call(&p, "start-server", work).await? {
         Ok(s) => Ok(Json(OutputRes { output: s })),
         Err(e) => Err((StatusCode::BAD_REQUEST, e)),
     }
@@ -2359,17 +2409,20 @@ async fn dial_tcp(
     let p = state
         .plugin(&name)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
-    let (mut store, instance) = instantiate(&state.engine, p.as_ref())
-        .await
-        .map_err(internal)?;
-    let func = instance
-        .get_typed_func::<(String, u16), (Result<String, String>,)>(&mut store, "dial-tcp")
-        .map_err(internal)?;
-    let (output,) = func
-        .call_async(&mut store, (req.host, req.port))
-        .await
-        .map_err(internal)?;
-    match output {
+    let work = async {
+        let (mut store, instance) = instantiate(&state.engine, p.as_ref())
+            .await
+            .map_err(internal)?;
+        let func = instance
+            .get_typed_func::<(String, u16), (Result<String, String>,)>(&mut store, "dial-tcp")
+            .map_err(internal)?;
+        let (output,) = func
+            .call_async(&mut store, (req.host, req.port))
+            .await
+            .map_err(internal)?;
+        Ok::<_, (StatusCode, String)>(output)
+    };
+    match poc_call(&p, "dial-tcp", work).await? {
         Ok(s) => Ok(Json(OutputRes { output: s })),
         Err(e) => Err((StatusCode::BAD_REQUEST, e)),
     }
@@ -2383,17 +2436,20 @@ async fn parse_address(
     let p = state
         .plugin(&name)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
-    let (mut store, instance) = instantiate(&state.engine, p.as_ref())
-        .await
-        .map_err(internal)?;
-    let func = instance
-        .get_typed_func::<(String,), (Result<String, String>,)>(&mut store, "parse-address")
-        .map_err(internal)?;
-    let (output,) = func
-        .call_async(&mut store, (req.addr,))
-        .await
-        .map_err(internal)?;
-    match output {
+    let work = async {
+        let (mut store, instance) = instantiate(&state.engine, p.as_ref())
+            .await
+            .map_err(internal)?;
+        let func = instance
+            .get_typed_func::<(String,), (Result<String, String>,)>(&mut store, "parse-address")
+            .map_err(internal)?;
+        let (output,) = func
+            .call_async(&mut store, (req.addr,))
+            .await
+            .map_err(internal)?;
+        Ok::<_, (StatusCode, String)>(output)
+    };
+    match poc_call(&p, "parse-address", work).await? {
         Ok(s) => Ok(Json(OutputRes { output: s })),
         Err(e) => Err((StatusCode::BAD_REQUEST, e)),
     }
@@ -2407,17 +2463,20 @@ async fn bind_udp(
     let p = state
         .plugin(&name)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
-    let (mut store, instance) = instantiate(&state.engine, p.as_ref())
-        .await
-        .map_err(internal)?;
-    let func = instance
-        .get_typed_func::<(u16,), (Result<String, String>,)>(&mut store, "bind-udp")
-        .map_err(internal)?;
-    let (output,) = func
-        .call_async(&mut store, (req.port,))
-        .await
-        .map_err(internal)?;
-    match output {
+    let work = async {
+        let (mut store, instance) = instantiate(&state.engine, p.as_ref())
+            .await
+            .map_err(internal)?;
+        let func = instance
+            .get_typed_func::<(u16,), (Result<String, String>,)>(&mut store, "bind-udp")
+            .map_err(internal)?;
+        let (output,) = func
+            .call_async(&mut store, (req.port,))
+            .await
+            .map_err(internal)?;
+        Ok::<_, (StatusCode, String)>(output)
+    };
+    match poc_call(&p, "bind-udp", work).await? {
         Ok(s) => Ok(Json(OutputRes { output: s })),
         Err(e) => Err((StatusCode::BAD_REQUEST, e)),
     }
@@ -2714,6 +2773,68 @@ fn open_kv_db(name: &str) -> Result<rusqlite::Connection> {
 // Executable plugin proxy (POC)
 // ---------------------------------------------------------------------------
 
+/// Response headers an executable plugin may set. Everything else (cookies,
+/// CORS grants, framing, content-encoding, …) is dropped: `/app/{name}` is
+/// served on the host origin, so a guest must not be able to set them.
+const PROXIED_RESPONSE_HEADERS: [header::HeaderName; 6] = [
+    header::CONTENT_TYPE,
+    header::CONTENT_LENGTH,
+    header::CACHE_CONTROL,
+    header::ETAG,
+    header::LAST_MODIFIED,
+    header::EXPIRES,
+];
+
+/// Inert content types the proxy is willing to forward unchanged. HTML, XML,
+/// JavaScript and CSS are served as `text/plain` so guest markup/script cannot
+/// execute on the host origin; unknown types fall back to plain text too.
+fn safe_content_type(value: Option<&HeaderValue>) -> HeaderValue {
+    const PLAIN: HeaderValue = HeaderValue::from_static("text/plain; charset=utf-8");
+    let raw = value.and_then(|value| value.to_str().ok()).unwrap_or("");
+    let essence = raw
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    match essence.as_str() {
+        "text/plain"
+        | "application/json"
+        | "text/csv"
+        | "application/octet-stream"
+        | "image/png"
+        | "image/jpeg"
+        | "image/gif"
+        | "image/webp" => HeaderValue::from_str(raw).unwrap_or(PLAIN),
+        _ => PLAIN,
+    }
+}
+
+/// Replace the guest's response headers with the allowlist plus host-enforced
+/// hardening headers (`nosniff`, CSP `sandbox`).
+fn sanitize_proxied_response(parts: &mut axum::http::response::Parts) {
+    let guest = std::mem::take(&mut parts.headers);
+    let mut headers = axum::http::HeaderMap::new();
+    for name in PROXIED_RESPONSE_HEADERS {
+        if let Some(value) = guest.get(&name) {
+            headers.insert(name, value.clone());
+        }
+    }
+    headers.insert(
+        header::CONTENT_TYPE,
+        safe_content_type(guest.get(header::CONTENT_TYPE)),
+    );
+    headers.insert(
+        header::HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::HeaderName::from_static("content-security-policy"),
+        HeaderValue::from_static("sandbox"),
+    );
+    parts.headers = headers;
+}
+
 async fn proxy_app(
     State(state): State<AppState>,
     AxumPath(params): AxumPath<HashMap<String, String>>,
@@ -2809,7 +2930,8 @@ async fn proxy_app(
                 ));
             }
         };
-        let (parts, body) = guest_response.into_parts();
+        let (mut parts, body) = guest_response.into_parts();
+        sanitize_proxied_response(&mut parts);
         Ok::<_, (StatusCode, String)>(Response::from_parts(parts, Body::new(body)))
     }
     .instrument(span.clone())
@@ -3316,7 +3438,20 @@ async fn count_requests(
 }
 
 fn build_router(state: AppState) -> Result<Router> {
-    let app = Router::new()
+    let tailcat_routes = tailcat_routes_enabled(&state);
+    build_router_inner(state, tailcat_routes)
+}
+
+/// Tailcat is an optional example integration, not part of the generic host
+/// surface. Its hardcoded routes are registered only when the plugin is loaded
+/// or `OWASIDEA_ENABLE_TAILCAT=1` is set; otherwise they 404 like any unknown
+/// route (see docs/API.md).
+fn tailcat_routes_enabled(state: &AppState) -> bool {
+    state.plugin("tailcat-wasi").is_some() || env_flag("OWASIDEA_ENABLE_TAILCAT")
+}
+
+fn build_router_inner(state: AppState, tailcat_routes: bool) -> Result<Router> {
+    let mut app = Router::new()
         .route("/health", get(health))
         .route("/overview", get(overview))
         .route("/metrics", get(metrics))
@@ -3342,17 +3477,21 @@ fn build_router(state: AppState) -> Result<Router> {
         .route("/plugin/{name}/parse-address", post(parse_address))
         .route("/plugin/{name}/dial-tcp", post(dial_tcp))
         .route("/plugin/{name}/start-server", post(start_server))
-        .route("/plugin/tailcat-wasi/start-service", post(start_service))
-        .route("/plugin/tailcat-wasi/stop-service", post(stop_service))
-        .route("/plugin/tailcat-wasi/service-status", get(service_status))
-        .route("/plugin/tailcat-wasi/send-text", post(send_text))
-        .route("/plugin/tailcat-wasi/drain", get(drain_tailcat))
         .route("/plugin/{name}/tls-probe", post(tls_probe))
         .route("/plugin/{name}/dial-echo", post(dial_echo))
         .route("/plugin/{name}/echo-udp", post(echo_udp))
         .route("/app/{name}/{*path}", axum::routing::any(proxy_app))
         .route("/app/{name}/", axum::routing::any(proxy_app))
         .route("/app/{name}", axum::routing::any(proxy_app));
+
+    if tailcat_routes {
+        app = app
+            .route("/plugin/tailcat-wasi/start-service", post(start_service))
+            .route("/plugin/tailcat-wasi/stop-service", post(stop_service))
+            .route("/plugin/tailcat-wasi/service-status", get(service_status))
+            .route("/plugin/tailcat-wasi/send-text", post(send_text))
+            .route("/plugin/tailcat-wasi/drain", get(drain_tailcat));
+    }
 
     // Experimental long-call jobs (ADR-0005). Registered only with the feature.
     #[cfg(feature = "streaming")]
@@ -3636,6 +3775,246 @@ mod tests {
         let no_timeout =
             serde_json::json!({ "permissions": { "resources": { "timeout_ms": null } } });
         assert_eq!(ui_bridge_timeout_ms(&ui, &no_timeout), None);
+    }
+
+    /// Minimal empty component binary (component-model magic + version).
+    const EMPTY_COMPONENT: &[u8] = b"\0asm\x0d\0\x01\0";
+
+    /// Guest export that blocks in a WASI timer instead of returning: the
+    /// in-process stand-in for a socket call that never resolves.
+    const SLEEPY_DIAL_TCP_WAT: &str = r#"
+(component
+  (import "wasi:io/poll@0.2.0" (instance $poll
+    (export "pollable" (type $pollable0 (sub resource)))
+    (export "[method]pollable.block" (func $block (param "self" (borrow $pollable0))))
+  ))
+  (alias export $poll "pollable" (type $pollable))
+  (import "wasi:clocks/monotonic-clock@0.2.0" (instance $clock
+    (export "subscribe-duration" (func $subscribe (param "when" u64) (result (own $pollable))))
+  ))
+  (alias export $poll "[method]pollable.block" (func $block_fn))
+  (alias export $clock "subscribe-duration" (func $subscribe_fn))
+  (core func $block_lowered (canon lower (func $block_fn)))
+  (core func $subscribe_lowered (canon lower (func $subscribe_fn)))
+  (core module $m
+    (import "" "subscribe" (func $subscribe_core (param i64) (result i32)))
+    (import "" "block" (func $block_core (param i32)))
+    (memory (export "memory") 1)
+    (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32) i32.const 0)
+    (func (export "dial-tcp") (param i32 i32 i32) (result i32)
+      i64.const 2000000000
+      call $subscribe_core
+      call $block_core
+      i32.const 0))
+  (core instance $i (instantiate $m
+    (with "" (instance
+      (export "subscribe" (func $subscribe_lowered))
+      (export "block" (func $block_lowered))))))
+  (func (export "dial-tcp") (param "host" string) (param "port" u16)
+    (result (result string (error string)))
+    (canon lift (core func $i "dial-tcp")
+      (memory (core memory $i "memory"))
+      (realloc (core func $i "cabi_realloc"))))
+)
+"#;
+
+    fn poc_test_plugin(
+        engine: &Engine,
+        timeout_ms: Option<u64>,
+        wat: Option<&str>,
+    ) -> PluginRuntime {
+        let manifest: Manifest = serde_json::from_value(serde_json::json!({
+            "name": "poc-spin",
+            "version": "0.1.0",
+            "language": "rust",
+            "abi": "wasi-0.2",
+            "runtime": "wasi-component",
+            "type": "library",
+            "component": "poc-spin.wasm",
+            "exports": [],
+            "imports": { "wasi": [], "host": [], "plugins": [] },
+            "permissions": { "resources": { "timeout_ms": timeout_ms } },
+            "state": {},
+            "composition": {},
+            "metadata": {}
+        }))
+        .unwrap();
+        let component = match wat {
+            Some(wat) => Component::new(engine, wat).expect("compile WAT component"),
+            None => Component::from_binary(engine, EMPTY_COMPONENT).unwrap(),
+        };
+        PluginRuntime {
+            manifest,
+            manifest_path: PathBuf::from("poc-spin.json"),
+            component,
+            kv: Arc::new(std::sync::Mutex::new(
+                rusqlite::Connection::open_in_memory().unwrap(),
+            )),
+            logs: Arc::new(Mutex::new(LogBuffer::new("poc-spin"))),
+            instance_slots: Arc::new(tokio::sync::Semaphore::new(1)),
+            http_pre: None,
+        }
+    }
+
+    #[test]
+    fn poc_route_timeout_defaults_to_ten_seconds() {
+        let engine = Engine::default();
+        assert_eq!(
+            poc_timeout_ms(&poc_test_plugin(&engine, None, None)),
+            DEFAULT_POC_TIMEOUT_MS
+        );
+        assert_eq!(DEFAULT_POC_TIMEOUT_MS, 10_000);
+        assert_eq!(
+            poc_timeout_ms(&poc_test_plugin(&engine, Some(250), None)),
+            250
+        );
+    }
+
+    /// End-to-end: a POC route whose export never returns must answer 504 after
+    /// the manifest timeout and give the `max_instances` slot back.
+    #[tokio::test]
+    async fn poc_route_timeout_answers_504_and_releases_the_instance_slot() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let mut config = wasmtime::Config::new();
+        config.wasm_component_model(true);
+        config.consume_fuel(true);
+        let engine = Engine::new(&config).expect("engine");
+        let plugin = Arc::new(poc_test_plugin(
+            &engine,
+            Some(50),
+            Some(SLEEPY_DIAL_TCP_WAT),
+        ));
+        let name = plugin.manifest.name.clone();
+        let mut state = test_app_state(std::sync::RwLock::new(HashMap::new()));
+        state.engine = engine;
+        state.plugins = Arc::new(std::sync::RwLock::new(HashMap::from([(
+            name.clone(),
+            plugin.clone(),
+        )])));
+        let router = build_router(state).expect("router");
+
+        let started = std::time::Instant::now();
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/plugin/{name}/dial-tcp"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"host":"example.com","port":443}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&body).contains("dial-tcp timed out after 50 ms"),
+            "unexpected body: {}",
+            String::from_utf8_lossy(&body)
+        );
+        // The guest asked for 2 s; the 50 ms manifest timeout must cut it short.
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "POC route timeout did not interrupt the guest: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            plugin.instance_slots.available_permits(),
+            1,
+            "timed-out call must release its instance slot"
+        );
+    }
+
+    #[test]
+    fn proxied_response_headers_are_sanitized() {
+        let response = axum::http::Response::builder()
+            .status(200)
+            .header("content-type", "text/html; charset=utf-8")
+            .header("set-cookie", "session=guest")
+            .header("access-control-allow-origin", "*")
+            .header("access-control-allow-credentials", "true")
+            .header("x-guest", "1")
+            .header("cache-control", "no-store")
+            .body(())
+            .unwrap();
+        let (mut parts, _) = response.into_parts();
+        sanitize_proxied_response(&mut parts);
+
+        assert_eq!(
+            parts.headers.get("content-type").unwrap(),
+            "text/plain; charset=utf-8"
+        );
+        assert_eq!(parts.headers.get("cache-control").unwrap(), "no-store");
+        assert_eq!(
+            parts.headers.get("x-content-type-options").unwrap(),
+            "nosniff"
+        );
+        assert_eq!(
+            parts.headers.get("content-security-policy").unwrap(),
+            "sandbox"
+        );
+        for dropped in [
+            "set-cookie",
+            "access-control-allow-origin",
+            "access-control-allow-credentials",
+            "x-guest",
+        ] {
+            assert!(
+                parts.headers.get(dropped).is_none(),
+                "{dropped} must not be forwarded"
+            );
+        }
+    }
+
+    #[test]
+    fn proxied_response_keeps_inert_content_types_only() {
+        let plain = safe_content_type(Some(&HeaderValue::from_static("application/json")));
+        assert_eq!(plain, "application/json");
+        let js = safe_content_type(Some(&HeaderValue::from_static("application/javascript")));
+        assert_eq!(js, "text/plain; charset=utf-8");
+        let svg = safe_content_type(Some(&HeaderValue::from_static("image/svg+xml")));
+        assert_eq!(svg, "text/plain; charset=utf-8");
+        let missing = safe_content_type(None);
+        assert_eq!(missing, "text/plain; charset=utf-8");
+    }
+
+    #[tokio::test]
+    async fn tailcat_routes_are_absent_unless_enabled() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let state = test_app_state(std::sync::RwLock::new(HashMap::new()));
+        let status_request = || {
+            Request::builder()
+                .uri("/plugin/tailcat-wasi/service-status")
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        let disabled = build_router_inner(state.clone(), false).unwrap();
+        let response = disabled.oneshot(status_request()).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "optional tailcat routes must 404 when the plugin is absent"
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(
+            !String::from_utf8_lossy(&body).contains("tailcat"),
+            "disabled routes must not disclose the integration"
+        );
+
+        let enabled = build_router_inner(state, true).unwrap();
+        let response = enabled.oneshot(status_request()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]

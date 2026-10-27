@@ -323,14 +323,38 @@ but not implemented in this prototype.
   `wasi:http/incoming-handler` in the shared host; preserves method, headers,
   query, request body, and streaming response body. No `wasmtime serve` child is
   launched.
+- Guest response headers are filtered. Only `content-type`, `content-length`,
+  `cache-control`, `etag`, `last-modified` and `expires` are forwarded; every
+  other header (`set-cookie`, `access-control-*`, framing, `content-encoding`,
+  …) is dropped because `/app/{name}` is served on the host origin.
+- The host always adds `X-Content-Type-Options: nosniff` and
+  `Content-Security-Policy: sandbox`, and rewrites `text/html`,
+  `application/xhtml+xml`, JavaScript, CSS, SVG and unknown types to
+  `text/plain; charset=utf-8`. Inert types (`text/plain`, `application/json`,
+  `text/csv`, `application/octet-stream`, `image/png|jpeg|gif|webp`) pass
+  through.
+
+## Typed POC routes (optional)
+
+`POST /plugin/{name}/dial-tcp` `{host, port}`, `/start-server` `{region_json}`,
+`/bind-udp` `{port}`, `/parse-address` `{addr}`, `/tls-probe`
+`{host, port, server_name}`, `/dial-echo` `{host, port}`, `/echo-udp` `{port}`.
+Each call runs under the plugin's `permissions.resources.timeout_ms` (default
+10 s) and answers `504` when the export does not return; the `max_instances`
+slot is released on timeout. These routes exist for the sockets/network POC and
+are not part of the stable plugin ABI.
 
 ## Service plugins (tailcat-wasi, optional)
 
-- `POST /plugin/{name}/start-service` body `{ "region_json": "" }` → `{ "output": "<address>" }`.
-- `POST /plugin/{name}/stop-service` → `{ "running": false, "address": null }`.
-- `GET /plugin/{name}/service-status` → `{ "running": bool, "address": string|null }`.
-- `POST /plugin/{name}/send-text` body `{ "addr": "...", "text": "..." }` → `{ "output": "queued" }`.
-- `GET /plugin/{name}/drain` → `{ "messages": [...], "events": [...] }`.
+The hardcoded tailcat routes are **not** exposed by default. They are registered
+only when the `tailcat-wasi` plugin is loaded or `OWASIDEA_ENABLE_TAILCAT=1` is
+set; otherwise they return `404` like any unknown route.
+
+- `POST /plugin/tailcat-wasi/start-service` body `{ "region_json": "" }` → `{ "output": "<address>" }`.
+- `POST /plugin/tailcat-wasi/stop-service` → `{ "running": false, "address": null }`.
+- `GET /plugin/tailcat-wasi/service-status` → `{ "running": bool, "address": string|null }`.
+- `POST /plugin/tailcat-wasi/send-text` body `{ "addr": "...", "text": "..." }` → `{ "output": "queued" }`.
+- `GET /plugin/tailcat-wasi/drain` → `{ "messages": [...], "events": [...] }`.
 
 ## Errors
 

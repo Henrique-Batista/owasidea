@@ -143,6 +143,60 @@ fn ui_plugin_scaffold_builds_a_manifest_and_static_bundle() {
 }
 
 #[test]
+fn build_fails_when_the_runtime_descriptor_cannot_be_rendered() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let root = std::env::temp_dir().join(format!(
+        "owasidea-build-render-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+
+    let mut scaffold = Command::cargo_bin("owasidea").unwrap();
+    scaffold
+        .args(["plugin", "new", "demo-ui", "--lang", "yew", "--type", "ui"])
+        .current_dir(&root)
+        .assert()
+        .success();
+    std::fs::write(
+        root.join("wasm-app.toml"),
+        "[app]\nversion = \"1.2.3\"\n\n[plugins.demo-ui]\npath = \"plugins/demo-ui\"\nlanguage = \"yew\"\ntype = \"ui\"\nruntime = \"js-wasm\"\nui_entry = \"index.html\"\n",
+    )
+    .unwrap();
+
+    // A regular file where the generated descriptor directory belongs makes
+    // `render_targets` fail after the plugins have been built.
+    std::fs::create_dir_all(root.join("ui")).unwrap();
+    std::fs::write(root.join("ui/.owasidea"), "not a directory").unwrap();
+
+    let output = Command::cargo_bin("owasidea")
+        .unwrap()
+        .args([
+            "--config",
+            "wasm-app.toml",
+            "--manifest-dir",
+            "manifests",
+            "build",
+        ])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !output.status.success(),
+        "build must fail when the runtime descriptor cannot be written; stdout: {stdout}"
+    );
+    assert!(
+        !stdout.contains("Build complete"),
+        "a stale runtime descriptor must not be reported as a successful build: {stdout}"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn init_scaffolds_working_ui_and_plugin_new_registers_plugin() {
     use std::time::{SystemTime, UNIX_EPOCH};
     let root = std::env::temp_dir().join(format!(

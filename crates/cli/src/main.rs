@@ -2532,11 +2532,14 @@ fn cmd_build(
     if sign {
         sign_all(&root, &manifest_dir, cfg.signing.as_ref())?;
     }
-    let _ = config_render::render_targets(
+    // Regenerate the UI runtime descriptor. Propagate failures: a stale
+    // runtime.json would point the webview at the wrong host/build id, so a
+    // "Build complete" message must not hide it.
+    config_render::render_targets(
         config,
         config_render::RenderScope::Single(config_render::RenderTarget::Runtime),
         false,
-    );
+    )?;
     println!("Build complete.");
     Ok(())
 }
