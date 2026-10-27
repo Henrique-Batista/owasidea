@@ -3034,6 +3034,27 @@ mod tests {
     }
 
     #[test]
+    fn log_entry_serializes_structured_fields() {
+        let mut logs = LogBuffer::new("notes");
+        logs.push(
+            "warn",
+            "hello".to_string(),
+            42,
+            Some(serde_json::json!({"k": "v"})),
+        );
+        let entry = logs.entries.back().unwrap().1.clone();
+        assert_eq!(entry.level, "warn");
+        assert_eq!(entry.plugin, "notes");
+        assert_eq!(entry.request_id, 42);
+        assert_eq!(entry.message, "hello");
+        let v = serde_json::to_value(&entry).unwrap();
+        assert!(v.get("ts").is_some());
+        assert_eq!(v["level"], "warn");
+        assert_eq!(v["request_id"], 42);
+        assert_eq!(v["fields"]["k"], "v");
+    }
+
+    #[test]
     fn plugin_signature_payload_covers_manifest_permissions_and_component() {
         let raw = r#"{"name":"x","version":"0.1.0","language":"rust","abi":"wasi-0.2","runtime":"wasi-component","type":"library","component":"x.wasm","exports":[],"imports":{"wasi":[],"host":[],"plugins":[]},"permissions":{"network":{"outbound":[],"inbound":[]}},"state":{},"composition":{},"metadata":{"sha256":"abc"}}"#;
         let mut manifest: serde_json::Value = serde_json::from_str(raw).unwrap();
