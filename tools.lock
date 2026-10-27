@@ -1,0 +1,15 @@
+[[tools]]
+name = "rustc"
+min_version = "1.80"
+[tools.install]
+linux = "rustup toolchain install 1.80"
+macos = "rustup toolchain install 1.80"
+windows = "rustup toolchain install 1.80"
+
+[[tools]]
+name = "cargo"
+min_version = "1.80"
+[tools.install]
+linux = "rustup update"
+macos = "rustup update"
+windows = "rustup update"

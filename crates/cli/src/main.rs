@@ -7,6 +7,7 @@ mod config;
 mod config_render;
 mod dev_desktop;
 mod dev_next_steps;
+mod doctor;
 mod errors;
 mod logs;
 mod status;
@@ -61,6 +62,12 @@ enum Commands {
         /// Download and install wasi-sdk + the reactor adapter when missing.
         #[arg(long)]
         install_wasi_sdk: bool,
+        /// Show (and optionally run) install commands for missing tools.
+        #[arg(long)]
+        fix: bool,
+        /// Execute safe install commands (no sudo) when --fix is set.
+        #[arg(long)]
+        yes: bool,
     },
     /// Manage plugins (create new plugins).
     #[command(about = "Manage plugins (create new plugins).")]
@@ -609,7 +616,11 @@ async fn main() -> anyhow::Result<()> {
     let manifest_dir = app_path(&app_root(&cli.config), &cli.manifest_dir);
     match cli.cmd {
         Commands::Init { dir, preset, yes } => cmd_init(dir, &preset, yes, cli.json),
-        Commands::Doctor { install_wasi_sdk } => cmd_doctor(cli.json, install_wasi_sdk).await,
+        Commands::Doctor {
+            install_wasi_sdk,
+            fix,
+            yes,
+        } => cmd_doctor(cli.json, install_wasi_sdk, fix, yes).await,
         Commands::Plugin { cmd } => match cmd {
             PluginCmd::New {
                 name,
@@ -873,7 +884,12 @@ fn cmd_init(dir: Option<PathBuf>, preset: &str, yes: bool, json: bool) -> anyhow
     Ok(())
 }
 
-async fn cmd_doctor(json: bool, install_wasi_sdk_requested: bool) -> anyhow::Result<()> {
+async fn cmd_doctor(
+    json: bool,
+    install_wasi_sdk_requested: bool,
+    fix: bool,
+    yes: bool,
+) -> anyhow::Result<()> {
     if install_wasi_sdk_requested {
         let sdk = install_wasi_sdk().await?;
         if find_wasi_adapter(Some(&sdk)).is_none() {
@@ -950,6 +966,36 @@ async fn cmd_doctor(json: bool, install_wasi_sdk_requested: bool) -> anyhow::Res
                 .map(|path| path.display().to_string())
                 .unwrap_or_else(|| "MISSING (needed for C/C++)".to_string());
             println!("{:20} {}", name, label);
+        }
+    }
+    if fix {
+        // dry-run by default: only print install commands; never run sudo.
+        let os = doctor::detect_os();
+        for (name, ok, opt) in &results {
+            if *ok || *opt {
+                continue;
+            }
+            // find command from tools.lock if present
+            let mut cmd = None;
+            if let Ok(content) = std::fs::read_to_string("tools.lock") {
+                if let Ok(lock) = doctor::parse_lock(&content) {
+                    for spec in &lock.tools {
+                        if spec.name == *name {
+                            cmd = doctor::install_command(spec, os);
+                        }
+                    }
+                }
+            }
+            if let Some(c) = cmd {
+                if yes && !c.contains("sudo") {
+                    println!("running: {}", c);
+                    let _ = std::process::Command::new("sh").arg("-c").arg(&c).status();
+                } else {
+                    println!("install (dry-run): {}", c);
+                }
+            } else {
+                println!("no install command known for {}", name);
+            }
         }
     }
     if results.iter().any(|(_, ok, opt)| !ok && !*opt) {
