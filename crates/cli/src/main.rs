@@ -115,9 +115,21 @@ enum Commands {
     /// Call a plugin export over the host HTTP API.
     #[command(about = "Call a plugin export over the host HTTP API.")]
     Call {
-        /// Target in the form `<plugin>.<function>`.
+        /// Target in the form `<plugin>.<function>` (omit when using --app).
         #[arg(help = "Target in the form <plugin>.<function>.")]
-        target: String,
+        target: Option<String>,
+        /// Executable app plugin name (wasi:http).
+        #[arg(long)]
+        app: Option<String>,
+        /// HTTP method (default GET).
+        #[arg(long, default_value = "GET")]
+        method: String,
+        /// Request path (default /).
+        #[arg(long, default_value = "/")]
+        path: String,
+        /// JSON body, @file, or - for stdin.
+        #[arg(long)]
+        body: Option<String>,
         /// JSON array of arguments, @file, or - for stdin.
         #[arg(long, default_value = "[]")]
         args: String,
@@ -616,13 +628,21 @@ async fn main() -> anyhow::Result<()> {
         Commands::Inspect { plugin } => cmd_inspect(&manifest_dir, &plugin, cli.json),
         Commands::Call {
             target,
+            app,
+            method,
+            path,
+            body,
             args,
             timeout,
         } => {
             call::cmd_call(
                 &cli.config,
                 cli.http_addr.as_deref(),
-                &target,
+                target.as_deref(),
+                app.as_deref(),
+                &method,
+                &path,
+                body.as_deref(),
                 &args,
                 timeout,
                 cli.json,

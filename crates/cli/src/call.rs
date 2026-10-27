@@ -70,57 +70,168 @@ pub fn normalize_base(addr: &str) -> String {
     }
 }
 
+pub fn validate_method(m: &str) -> Result<String> {
+    let up = m.trim().to_uppercase();
+    let ok = matches!(
+        up.as_str(),
+        "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS"
+    );
+    if !ok {
+        anyhow::bail!("invalid HTTP method `{m}`");
+    }
+    Ok(up)
+}
+
+pub fn validate_app_path(p: &str) -> Result<String> {
+    if !p.starts_with('/') {
+        anyhow::bail!("path must start with `/` (got `{p}`)");
+    }
+    Ok(p.to_string())
+}
+
+pub fn load_body(spec: Option<&str>) -> Result<Option<Value>> {
+    let Some(s) = spec else {
+        return Ok(None);
+    };
+    let raw = if s == "-" {
+        let mut buf = String::new();
+        io::stdin()
+            .read_to_string(&mut buf)
+            .context("failed to read --body from stdin")?;
+        buf
+    } else if let Some(path) = s.strip_prefix('@') {
+        std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read --body file `{path}`"))?
+    } else {
+        s.to_string()
+    };
+    let t = raw.trim();
+    if t.is_empty() {
+        return Ok(None);
+    }
+    let v: Value = serde_json::from_str(t).with_context(|| format!("invalid JSON body: {t}"))?;
+    Ok(Some(v))
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn cmd_call(
     config: &Path,
     http_addr: Option<&str>,
-    target: &str,
+    target: Option<&str>,
+    app: Option<&str>,
+    method: &str,
+    path: &str,
+    body_spec: Option<&str>,
     args_spec: &str,
     timeout_secs: u64,
     json: bool,
 ) -> Result<()> {
     use crate::config::read_host_addr;
+    if app.is_some() && target.is_some() {
+        anyhow::bail!("cannot use --app together with positional target");
+    }
+    if app.is_none() && target.is_none() {
+        anyhow::bail!("either target or --app is required");
+    }
+
     let addr = http_addr
         .map(|s| s.to_string())
         .or_else(|| read_host_addr(config))
         .unwrap_or_else(|| "127.0.0.1:8787".to_string());
     let base = normalize_base(&addr);
-    let (plugin, func) = parse_target(target)?;
-    let args = load_args(args_spec)?;
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(timeout_secs))
         .build()
         .context("failed to build HTTP client")?;
-    let url = format!("{base}/plugin/{plugin}/call");
-    let body = serde_json::json!({ "function": func, "args": args });
 
-    let resp = client
-        .post(&url)
-        .json(&body)
-        .send()
-        .await
-        .with_context(|| format!("request to {url} failed"))?;
+    if let Some(plugin) = app {
+        let m = validate_method(method)?;
+        let p = validate_app_path(path)?;
+        let url = format!("{base}/app/{plugin}{p}");
+        let body = load_body(body_spec)?;
 
-    let status = resp.status();
-    let text = resp.text().await.context("failed to read response body")?;
-
-    if !status.is_success() {
-        eprintln!("HTTP {status}");
-        if !text.trim().is_empty() {
-            eprintln!("{text}");
+        let mut req = match m.as_str() {
+            "GET" => client.get(&url),
+            "POST" => client.post(&url),
+            "PUT" => client.put(&url),
+            "PATCH" => client.patch(&url),
+            "DELETE" => client.delete(&url),
+            "HEAD" => client.head(&url),
+            "OPTIONS" => client.request(reqwest::Method::OPTIONS, &url),
+            _ => unreachable!(),
+        };
+        if let Some(v) = &body {
+            req = req.header("content-type", "application/json").json(v);
         }
-        anyhow::bail!("call failed with HTTP {status}");
-    }
 
-    let value: Value =
-        serde_json::from_str(&text).with_context(|| format!("invalid JSON response: {text}"))?;
+        let resp = req
+            .send()
+            .await
+            .with_context(|| format!("request to {url} failed"))?;
+        let status = resp.status();
+        let text = resp.text().await.context("failed to read response body")?;
 
-    if json {
-        println!("{}", text.trim());
+        if !status.is_success() {
+            eprintln!("HTTP {status}");
+            if !text.trim().is_empty() {
+                eprintln!("{text}");
+            }
+            anyhow::bail!("call failed with HTTP {status}");
+        }
+
+        if json {
+            println!("{}", text.trim());
+        } else if text.trim().is_empty() {
+            println!("HTTP {status}");
+        } else {
+            // try pretty
+            if let Ok(v) = serde_json::from_str::<Value>(&text) {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&v).unwrap_or(text.clone())
+                );
+            } else {
+                println!("{}", text.trim());
+            }
+        }
+        Ok(())
     } else {
-        println!("{}", serde_json::to_string_pretty(&value).unwrap_or(text));
+        let target = target.unwrap();
+        let (plugin, func) = parse_target(target)?;
+        let args = load_args(args_spec)?;
+
+        let url = format!("{base}/plugin/{plugin}/call");
+        let body = serde_json::json!({ "function": func, "args": args });
+
+        let resp = client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .with_context(|| format!("request to {url} failed"))?;
+
+        let status = resp.status();
+        let text = resp.text().await.context("failed to read response body")?;
+
+        if !status.is_success() {
+            eprintln!("HTTP {status}");
+            if !text.trim().is_empty() {
+                eprintln!("{text}");
+            }
+            anyhow::bail!("call failed with HTTP {status}");
+        }
+
+        let value: Value = serde_json::from_str(&text)
+            .with_context(|| format!("invalid JSON response: {text}"))?;
+
+        if json {
+            println!("{}", text.trim());
+        } else {
+            println!("{}", serde_json::to_string_pretty(&value).unwrap_or(text));
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 #[cfg(test)]
