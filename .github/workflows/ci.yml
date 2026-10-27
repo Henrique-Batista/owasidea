@@ -80,6 +80,11 @@ jobs:
       - name: Put owasidea on PATH
         run: echo "$PWD/target/debug" >> "$GITHUB_PATH"
 
+      - name: Compile scaffold templates (Rust/Go/TS, FIX-03)
+        env:
+          OWASIDEA_TEMPLATE_STRICT: "1"
+        run: scripts/test-templates.sh
+
       - name: Code-signing planner checks (RL-03)
         run: scripts/test-signing-plan.sh
 

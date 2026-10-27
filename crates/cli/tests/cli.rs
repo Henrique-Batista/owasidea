@@ -201,6 +201,59 @@ fn init_scaffolds_working_ui_and_plugin_new_registers_plugin() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+// FIX-03: the scaffolds must compile, not only register their files.
+// Heavy by design: opt in with OWASIDEA_TEMPLATE_BUILD=1 (CI runs the same
+// script in the fast job). Missing toolchains skip the test with a message.
+#[test]
+fn templates_build() {
+    if std::env::var("OWASIDEA_TEMPLATE_BUILD").as_deref() != Ok("1") {
+        eprintln!(
+            "skipping templates_build: set OWASIDEA_TEMPLATE_BUILD=1 to compile scaffold templates"
+        );
+        return;
+    }
+
+    fn tool(program: &str, args: &[&str]) -> bool {
+        std::process::Command::new(program)
+            .args(args)
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    }
+
+    let mut missing = Vec::new();
+    if !tool("cargo", &["component", "--version"]) {
+        missing.push("cargo-component");
+    }
+    if !tool("go", &["version"]) {
+        missing.push("go");
+    }
+    if !tool("node", &["--version"]) || !tool("npm", &["--version"]) {
+        // The TypeScript scaffold installs jco from its npm devDependencies.
+        missing.push("node/npm (jco)");
+    }
+    if !missing.is_empty() {
+        eprintln!(
+            "skipping templates_build: missing toolchains: {}",
+            missing.join(", ")
+        );
+        return;
+    }
+
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let script = repo.join("scripts/test-templates.sh");
+    let cargo = Command::cargo_bin("owasidea").unwrap();
+    let bin = cargo.get_program().to_owned();
+    let status = std::process::Command::new("bash")
+        .arg(&script)
+        .env("OWASIDEA_BIN", bin)
+        .env("OWASIDEA_TEMPLATE_STRICT", "1")
+        .env("OWASIDEA_TEMPLATE_LANGS", "rust,go,typescript")
+        .status()
+        .expect("run scripts/test-templates.sh");
+    assert!(status.success(), "scripts/test-templates.sh failed");
+}
+
 #[test]
 fn build_resolves_paths_from_the_config_directory() {
     use std::time::{SystemTime, UNIX_EPOCH};
