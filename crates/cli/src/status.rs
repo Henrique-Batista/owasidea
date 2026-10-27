@@ -22,9 +22,9 @@ pub struct OverviewRes {
 #[derive(Deserialize, Debug, Clone, Default)]
 pub struct ServiceStatus {
     #[serde(default)]
-    pub state: Option<String>,
+    pub running: bool,
     #[serde(default)]
-    pub error: Option<String>,
+    pub address: Option<String>,
 }
 
 fn base(addr: &str) -> String {
@@ -69,17 +69,23 @@ pub async fn fetch_status(addr: &str) -> Result<serde_json::Value> {
         if kind == "service" || kind == "hybrid" {
             let url = format!("{}/plugin/{}/service/status", base(addr), p.name);
             match client.get(url).send().await {
-                Ok(r) => {
+                Ok(r) if r.status().is_success() => {
                     let s: ServiceStatus = r.json().await.unwrap_or_default();
-                    status = s.state.clone().unwrap_or_else(|| "unknown".to_string());
+                    let st = if s.running { "running" } else { "stopped" };
+                    status = st.to_string();
                     services.push(json!({
                         "name": p.name,
-                        "state": s.state,
-                        "error": s.error,
+                        "state": st,
+                        "running": s.running,
+                        "address": s.address,
                     }));
                 }
+                Ok(_) => {
+                    status = "not-running".to_string();
+                    services.push(json!({"name": p.name, "state": "not-running", "running": false, "address": null}));
+                }
                 Err(_) => {
-                    status = "unknown".to_string();
+                    status = "not-running".to_string();
                 }
             }
         }
@@ -106,21 +112,27 @@ pub async fn cmd_status(addr: &str, watch: bool, json: bool) -> Result<()> {
                 if json {
                     println!("{}", v);
                 } else {
-                    println!("health: {}", v["health"]);
+                    println!("health: {}", v["health"].as_str().unwrap_or("-"));
                     println!("build_id: {}", v["build_id"].as_str().unwrap_or("-"));
                     println!("plugins:");
                     for p in v["plugins"].as_array().cloned().unwrap_or_default() {
                         println!(
                             "  {} ({}/{}) - {}",
-                            p["name"], p["type"], p["runtime"], p["status"]
+                            p["name"].as_str().unwrap_or("-"),
+                            p["type"].as_str().unwrap_or("-"),
+                            p["runtime"].as_str().unwrap_or("-"),
+                            p["status"].as_str().unwrap_or("-")
                         );
                     }
                     println!("services:");
                     for s in v["services"].as_array().cloned().unwrap_or_default() {
-                        println!("  {} - {}", s["name"], s["state"].as_str().unwrap_or("-"));
+                        println!(
+                            "  {} - {}",
+                            s["name"].as_str().unwrap_or("-"),
+                            s["state"].as_str().unwrap_or("-")
+                        );
                     }
                 }
-                Ok(())
             }
             Err(e) => {
                 if json {
@@ -136,23 +148,32 @@ pub async fn cmd_status(addr: &str, watch: bool, json: bool) -> Result<()> {
         }
     } else {
         loop {
-            let v = fetch_status(addr).await.unwrap_or_else(
-                |_| json!({"health":"unreachable","build_id":null,"plugins":[],"services":[]}),
-            );
-            if json {
-                println!("{}", v);
-            } else {
-                print!("\x1B[2J\x1B[H");
-                println!("health: {}", v["health"]);
-                println!("build_id: {}", v["build_id"].as_str().unwrap_or("-"));
-                for p in v["plugins"].as_array().cloned().unwrap_or_default() {
-                    println!(
-                        "  {} ({}/{}) - {}",
-                        p["name"], p["type"], p["runtime"], p["status"]
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => break,
+                _ = async {
+                    let v = fetch_status(addr).await.unwrap_or_else(
+                        |_| json!({"health":"unreachable","build_id":null,"plugins":[],"services":[]}),
                     );
-                }
+                    if json {
+                        println!("{}", v);
+                    } else {
+                        print!("\x1B[2J\x1B[H");
+                        println!("health: {}", v["health"].as_str().unwrap_or("-"));
+                        println!("build_id: {}", v["build_id"].as_str().unwrap_or("-"));
+                        for p in v["plugins"].as_array().cloned().unwrap_or_default() {
+                            println!(
+                                "  {} ({}/{}) - {}",
+                                p["name"].as_str().unwrap_or("-"),
+                                p["type"].as_str().unwrap_or("-"),
+                                p["runtime"].as_str().unwrap_or("-"),
+                                p["status"].as_str().unwrap_or("-")
+                            );
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                } => {}
             }
-            tokio::time::sleep(Duration::from_secs(2)).await;
         }
     }
+    Ok(())
 }
