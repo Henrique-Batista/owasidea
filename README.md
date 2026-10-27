@@ -29,6 +29,9 @@ rewrites. Everyone ships.
 - **Polyglot by design** — Rust, Go, C, C++, C#, TypeScript all build to WASI
   components described by WIT.
 - **Manifests auto-generated** from real WIT — never hand-written, never stale.
+- **No WIT by hand (Rust)** — mark exports with `#[owasidea::export]`; build
+  renders the contract into `.owasidea/wit` and derives the manifest from the
+  real component.
 - **Capability enforcement** — plugins only get what they declare.
 - **Compose at build time** — wire components together with `wasm-tools compose`.
 - **One CLI** — `owasidea init/build/dev/run/inspect/validate/bundle`.

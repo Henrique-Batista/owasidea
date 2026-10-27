@@ -6,7 +6,7 @@ starting points, or as fixtures when you change the framework.
 
 | Example | Shows | Plugins | Tests |
 | --- | --- | --- | --- |
-| [`hello`](hello/README.md) | the smallest app: one Rust library, a plain TypeScript UI | `greeter` (library) | 2 smoke calls, 3 UI tests |
+| [`hello`](hello/README.md) | the smallest app: one Rust library, a plain TypeScript UI, and a contract generated from attributes | `greeter` (library) | 2 smoke calls, 3 UI tests |
 | [`notes`](notes/README.md) | host key/value store and the `kv` capability | `notes` (library, `kv`) | 4 smoke calls, 4 UI tests |
 | [`ticker`](ticker/README.md) | stateful service lifecycle and the 409 reload rule | `ticker` (service) | service smoke, 4 UI tests |
 | [`shipyard`](shipyard/README.md) | the reference app: 11 plugins in 6 languages, Tauri packaging | see README | the full suite |

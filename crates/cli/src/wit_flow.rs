@@ -179,7 +179,7 @@ pub fn detect_language(plugin_dir: &Path) -> &'static str {
 /// Renders and writes the contract unconditionally. Used by
 /// `owasidea wit generate` and by `plugin new` to seed a buildable plugin.
 pub fn generate(plugin_dir: &Path, name: &str, language: &str, version: &str) -> Result<Prepared> {
-    let (dir, world) = if language == "rust" {
+    let (dir, world, version) = if language == "rust" {
         let target = rust_target(plugin_dir)?;
         if !is_artifact_dir(&target.dir) {
             bail!(
@@ -188,7 +188,11 @@ pub fn generate(plugin_dir: &Path, name: &str, language: &str, version: &str) ->
                 target.dir
             );
         }
-        (resolve(plugin_dir, &target.dir), target.world)
+        (
+            resolve(plugin_dir, &target.dir),
+            target.world,
+            target.version,
+        )
     } else {
         (
             plugin_dir.join("wit"),
@@ -197,9 +201,10 @@ pub fn generate(plugin_dir: &Path, name: &str, language: &str, version: &str) ->
                 .and_then(|value| value.to_str())
                 .unwrap_or(name)
                 .to_string(),
+            version.to_string(),
         )
     };
-    let rendered = crate::render_wit_source(plugin_dir, &world, version)?
+    let rendered = crate::render_wit_source(plugin_dir, &world, &version)?
         .with_context(|| format!("no attribute markers found in {}", plugin_dir.display()))?;
     let changed = crate::write_wit(&dir, &rendered)?;
     Ok(Prepared {

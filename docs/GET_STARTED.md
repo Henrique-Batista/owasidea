@@ -41,6 +41,12 @@ Four files matter for every headless plugin:
 | `wasm-app.toml` | Source/build config: path, language, type, permissions, composition. |
 | `manifests/<name>.manifest.json` | Generated from the real WIT. Never hand-edit. |
 
+Rust plugins do not need the `wit/` file: `owasidea build` renders the contract
+from `#[owasidea::world]` and `#[owasidea::export]` into `.owasidea/wit`
+(gitignored), compiles against it, and derives the manifest from the real
+component. `wit_source` in `wasm-app.toml` selects `attributes`, `wit` or
+`auto`. See [`PLUGIN_AUTHORING.md`](PLUGIN_AUTHORING.md#rust-cargo-component).
+
 The host verifies the component's actual imports against the generated manifest,
 then exposes only the declared host interfaces. KV, host log, filesystem
 preopens, networking, and HTTP are all deny-by-default.
@@ -280,7 +286,21 @@ from `examples/shipyard/plugins/*`.
 
 ### 4.3 Write a contract
 
-A library plugin's WIT is the API:
+A library plugin's contract is the API. In Rust you declare it in code:
+
+```rust
+#[owasidea::world("my-core")]
+struct Component;
+
+impl Guest for Component {
+    #[owasidea::export]
+    fn score(changes: Vec<String>, checks_passed: u32, checks_total: u32) -> i32 { /* ... */ }
+}
+```
+
+`owasidea build` turns those markers into `.owasidea/wit/my-core.wit`; the
+generated WIT for a hand-written plugin looks like this:
+
 
 ```wit
 package example:my-core@0.1.0;

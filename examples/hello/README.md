@@ -6,7 +6,7 @@ TypeScript UI that calls it through the host HTTP API.
 ```text
 hello/
 ├── wasm-app.toml          app config, smoke checks, UI test command
-├── plugins/greeter/       Rust component (WIT contract in wit/greeter.wit)
+├── plugins/greeter/       Rust component; contract generated from #[owasidea::export]
 ├── ui/                    Vite + TypeScript UI (no framework)
 └── tests/hello.spec.ts    Playwright UI tests
 ```
@@ -15,7 +15,7 @@ hello/
 
 ```bash
 cd examples/hello
-owasidea build      # compile the component, regenerate manifests from WIT, build the UI
+owasidea build      # generate .owasidea/wit, compile, derive the manifest, build the UI
 owasidea smoke      # temporary host + declarative API checks from wasm-app.toml
 owasidea test       # build + smoke + Playwright UI tests
 owasidea dev        # host + UI + watcher in the interactive dashboard (press ? for keys)
@@ -28,14 +28,16 @@ Requirements: `rustc`, `cargo-component`, `wasm-tools`, `node`/`npm`
 
 | Layer | What is checked | Where |
 | --- | --- | --- |
-| Manifest | exports `greet(string)` and `sum(s32, s32)` are derived from WIT | `manifests/greeter.manifest.json` |
+| Contract | `#[owasidea::export]` markers render `.owasidea/wit/greeter.wit` (no WIT file in the repo) | `plugins/greeter/src/lib.rs` |
+| Manifest | exports `greet(string)` and `sum(s32, s32)` are derived from the real component | `manifests/greeter.manifest.json` |
 | Host API | `greet` returns the exact string; `sum` returns `42` | `[[smoke.calls]]` |
 | UI | greeting round-trip, numeric round-trip, error state on HTTP 404 | `tests/hello.spec.ts` |
 | Dev loop | editing `plugins/greeter/src` and running `R` in `owasidea dev` rebuilds and reloads | manual, see `docs/CLI.md` |
 
 ## Change it
 
-1. Edit `plugins/greeter/wit/greeter.wit` to add or change an export.
-2. Implement it in `plugins/greeter/src/lib.rs`.
+1. Add `#[owasidea::export]` to a function in `plugins/greeter/src/lib.rs`.
+2. Run `owasidea build`; `.owasidea/wit/greeter.wit` is regenerated and the
+   manifest follows the real component. Do not edit the generated WIT.
 3. Add a `[[smoke.calls]]` entry in `wasm-app.toml`.
 4. Run `owasidea test`.

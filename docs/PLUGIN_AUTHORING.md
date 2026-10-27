@@ -2,12 +2,41 @@
 
 ## Rust (cargo-component)
 
-1. Create `plugins/<name>/Cargo.toml` with `[workspace]` and component metadata.
-2. Add WIT under `wit/` and deps under `wit/deps/host`.
-3. Implement `Guest` trait, `export!`.
-4. Build: `cargo component build --release`.
-5. Copy `.wasm` to `plugins/<name>/<name>.component.wasm`.
-6. Run `owasidea build`; it generates the manifest from the real component WIT.
+Rust plugins generate their contract from source markers, so a plugin does not
+need a `wit/` directory or a WIT file:
+
+1. Scaffold with `owasidea plugin new <name> --lang rust`.
+2. Mark the contract in `src/lib.rs`:
+   - `#[owasidea::world("<name>")]` on the component struct.
+   - `#[owasidea::export]` on every function that belongs to the contract.
+   - `#[owasidea::host_log]` / `#[owasidea::host_kv]` on the struct to import
+     those host interfaces (`kv` permission still comes from `wasm-app.toml`).
+3. Implement `Guest`, `export!`.
+4. Run `owasidea build`. It renders `<name>.wit` into `.owasidea/wit`
+   (an artifact; gitignored), compiles the component against it, and derives the
+   manifest from the real component. The generated WIT is regenerated on every
+   build, and the build fails if the markers and a hand-written WIT disagree.
+5. Rust names are converted to WIT names: `start_service` becomes
+   `start-service`, and `some_arg` becomes `some-arg`.
+
+`Cargo.toml` points cargo-component at the artifact:
+
+```toml
+[package.metadata.component.target]
+path = ".owasidea/wit"
+world = "<name>"
+```
+
+`wit_source` in `wasm-app.toml` selects the source:
+
+| Value | Behavior |
+| --- | --- |
+| `attributes` | Render the contract from markers; no WIT file is read or committed. |
+| `wit` | Use a hand-written `wit/`; if markers exist, the build fails when they diverge. |
+| `auto` (default) | Use `wit/` when it exists, otherwise render from markers. |
+
+A `wit/` directory next to an attribute plugin is an error: remove it or set
+`wit_source = "wit"`. Committing `.owasidea/wit` is never necessary.
 
 ## C/C++ (wasi-sdk + wasm-tools + wit-bindgen)
 

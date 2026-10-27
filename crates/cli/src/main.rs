@@ -2103,9 +2103,19 @@ fn generate_manifest(
     let wasi: Vec<String> = wasi_set.into_iter().collect();
     let host: Vec<String> = host_set.into_iter().collect();
     let imports_host_kv = host.iter().any(|name| name.starts_with("poc:host/host-kv"));
-    if imports_host_kv != kv.is_some() {
+    if imports_host_kv && kv.is_none() {
         anyhow::bail!(
-            "plugin {name}: host-kv WIT import and configured kv permission must both be present"
+            "plugin {name}: the component imports poc:host/host-kv but no kv permission is configured.\n\
+             Add this to wasm-app.toml and build again:\n\n\
+             [plugins.{name}]\n\
+             kv = \"{name}:read-write\"\n"
+        );
+    }
+    if !imports_host_kv && kv.is_some() {
+        anyhow::bail!(
+            "plugin {name}: kv permission is configured but the component does not import \
+             poc:host/host-kv; remove the kv line or annotate the component with \
+             #[owasidea::host_kv]"
         );
     }
     for host in http_outbound {
@@ -5523,22 +5533,51 @@ fn type_arg_to_wit(arg: &syn::GenericArgument) -> String {
 }
 
 fn to_kebab_case(input: &str) -> String {
+    let chars: Vec<char> = input.chars().collect();
     let mut out = String::new();
-    for (index, ch) in input.chars().enumerate() {
-        if ch == '_' {
-            if !out.ends_with('-') {
+    for (index, ch) in chars.iter().enumerate() {
+        if matches!(ch, '_' | ' ' | '-') {
+            if !out.is_empty() && !out.ends_with('-') {
                 out.push('-');
             }
-        } else if ch.is_uppercase() {
-            if index > 0 && !out.ends_with('-') {
+            continue;
+        }
+        if ch.is_uppercase() {
+            let previous = index.checked_sub(1).and_then(|i| chars.get(i));
+            let next = chars.get(index + 1);
+            let boundary = index > 0
+                && !out.ends_with('-')
+                && (previous
+                    .map(|c| c.is_lowercase() || c.is_ascii_digit())
+                    .unwrap_or(false)
+                    || next.map(|c| c.is_lowercase()).unwrap_or(false));
+            if boundary {
                 out.push('-');
             }
-            out.extend(ch.to_lowercase());
+            for lower in ch.to_lowercase() {
+                out.push(lower);
+            }
         } else {
-            out.push(ch);
+            out.push(*ch);
         }
     }
     out.trim_matches('-').to_string()
+}
+
+#[cfg(test)]
+mod kebab_tests {
+    use super::to_kebab_case;
+
+    #[test]
+    fn converts_rust_names_to_wit_names() {
+        assert_eq!(to_kebab_case("greet"), "greet");
+        assert_eq!(to_kebab_case("start_service"), "start-service");
+        assert_eq!(to_kebab_case("service_status"), "service-status");
+        assert_eq!(to_kebab_case("startService"), "start-service");
+        assert_eq!(to_kebab_case("HTTPServer"), "http-server");
+        assert_eq!(to_kebab_case("already-kebab"), "already-kebab");
+        assert_eq!(to_kebab_case("_leading__double_"), "leading-double");
+    }
 }
 
 fn parse_fn_sig(sig: &syn::Signature) -> ExportSig {
