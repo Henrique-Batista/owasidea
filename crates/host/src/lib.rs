@@ -497,6 +497,7 @@ async fn instantiate(
 fn verify_and_compile_component(
     engine: &Engine,
     manifest: &Manifest,
+    manifest_value: &serde_json::Value,
     component_path: &Path,
 ) -> Result<Component> {
     if !manifest.imports.plugins.is_empty() {
@@ -533,7 +534,7 @@ fn verify_and_compile_component(
             ));
         }
     }
-    verify_manifest_signature(manifest, &bytes)?;
+    verify_manifest_signature(manifest_value, &bytes)?;
     let component = Component::from_file(engine, component_path)
         .map_err(|e| anyhow!("failed to load component {component_path:?}: {e}"))?;
     validate_component_imports(engine, &component, manifest)?;
@@ -829,8 +830,8 @@ fn validate_component_imports(
     Ok(())
 }
 
-fn signed_manifest_payload(manifest: &Manifest, component: &[u8]) -> Result<Vec<u8>> {
-    let mut value = serde_json::to_value(manifest)?;
+fn signed_manifest_payload(manifest: &serde_json::Value, component: &[u8]) -> Result<Vec<u8>> {
+    let mut value = manifest.clone();
     if let Some(metadata) = value
         .get_mut("metadata")
         .and_then(serde_json::Value::as_object_mut)
@@ -845,19 +846,21 @@ fn signed_manifest_payload(manifest: &Manifest, component: &[u8]) -> Result<Vec<
     Ok(payload)
 }
 
-fn verify_manifest_signature(manifest: &Manifest, artifact: &[u8]) -> Result<()> {
+fn verify_manifest_signature(manifest: &serde_json::Value, artifact: &[u8]) -> Result<()> {
+    let name = manifest
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("plugin");
     let signature = manifest
-        .metadata
-        .get("signature")
+        .get("metadata")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|m| m.get("signature"))
         .and_then(serde_json::Value::as_str);
     let require_signatures = std::env::var("OWASIDEA_REQUIRE_SIGNATURES")
         .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
         .unwrap_or(!cfg!(debug_assertions));
     if require_signatures && signature.is_none() {
-        anyhow::bail!(
-            "plugin {} is unsigned but signatures are required",
-            manifest.name
-        );
+        anyhow::bail!("plugin {} is unsigned but signatures are required", name);
     }
     let Some(signature) = signature else {
         return Ok(());
@@ -868,20 +871,18 @@ fn verify_manifest_signature(manifest: &Manifest, artifact: &[u8]) -> Result<()>
             anyhow::bail!("OWASIDEA_PUBLIC_KEY is required to verify signed plugins")
         }
         Err(_) => {
-            tracing::warn!(plugin = %manifest.name, "plugin signature present but not verified; configure OWASIDEA_PUBLIC_KEY");
+            tracing::warn!(plugin = %name, "plugin signature present but not verified; configure OWASIDEA_PUBLIC_KEY");
             return Ok(());
         }
     };
     if manifest
-        .metadata
-        .get("signature_format")
+        .get("metadata")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|m| m.get("signature_format"))
         .and_then(serde_json::Value::as_str)
         != Some("owasidea-manifest-v1")
     {
-        anyhow::bail!(
-            "unsupported or legacy signature format for {}",
-            manifest.name
-        );
+        anyhow::bail!("unsupported or legacy signature format for {}", name);
     }
     use base64::Engine;
     let public_key = std::fs::read_to_string(public_key_path).context("read public key")?;
@@ -891,7 +892,7 @@ fn verify_manifest_signature(manifest: &Manifest, artifact: &[u8]) -> Result<()>
     let signature = base64::engine::general_purpose::STANDARD
         .decode(signature)
         .context("decode signature")?;
-    verify_signature_with_key(manifest, artifact, &public_key, &signature)
+    verify_signature_with_key(manifest, artifact, &public_key, &signature, name)
 }
 
 fn instance_slots(manifest: &Manifest) -> Result<Arc<tokio::sync::Semaphore>> {
@@ -903,16 +904,17 @@ fn instance_slots(manifest: &Manifest) -> Result<Arc<tokio::sync::Semaphore>> {
 }
 
 fn verify_signature_with_key(
-    manifest: &Manifest,
+    manifest: &serde_json::Value,
     artifact: &[u8],
     public_key: &[u8],
     signature: &[u8],
+    name: &str,
 ) -> Result<()> {
     use ring::signature::{UnparsedPublicKey, ED25519};
     let payload = signed_manifest_payload(manifest, artifact)?;
     UnparsedPublicKey::new(&ED25519, &public_key)
         .verify(&payload, signature)
-        .map_err(|_| anyhow!("signature verification failed for {}", manifest.name))
+        .map_err(|_| anyhow!("signature verification failed for {}", name))
 }
 
 // ---------------------------------------------------------------------------
@@ -1214,7 +1216,9 @@ async fn reload(
             format!("read manifest: {e}"),
         )
     })?;
-    let manifest: Manifest = serde_json::from_str(&raw)
+    let manifest_value: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid manifest: {e}")))?;
+    let manifest: Manifest = serde_json::from_value(manifest_value.clone())
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid manifest: {e}")))?;
     if let Err(e) = validate_manifest_abi(&manifest) {
         return Err((StatusCode::BAD_REQUEST, format!("invalid manifest: {e}")));
@@ -1250,8 +1254,9 @@ async fn reload(
             open_kv_db(namespace).map_err(internal)?,
         ))
     };
-    let component = verify_and_compile_component(&state.engine, &manifest, &component_path)
-        .map_err(internal)?;
+    let component =
+        verify_and_compile_component(&state.engine, &manifest, &manifest_value, &component_path)
+            .map_err(internal)?;
     let mut runtime = PluginRuntime {
         manifest,
         manifest_path: p.manifest_path.clone(),
@@ -2443,7 +2448,7 @@ fn compilation_cache() -> Option<wasmtime::Cache> {
     }
 }
 
-fn load_manifests(dir: &Path) -> Result<Vec<(Manifest, PathBuf)>> {
+fn load_manifests(dir: &Path) -> Result<Vec<(Manifest, serde_json::Value, PathBuf)>> {
     let mut out = Vec::new();
     for entry in std::fs::read_dir(dir).with_context(|| format!("reading {dir:?}"))? {
         let entry = entry?;
@@ -2452,10 +2457,12 @@ fn load_manifests(dir: &Path) -> Result<Vec<(Manifest, PathBuf)>> {
             continue;
         }
         let raw = std::fs::read_to_string(&path)?;
-        let manifest: Manifest =
+        let value: serde_json::Value =
             serde_json::from_str(&raw).with_context(|| format!("invalid manifest {path:?}"))?;
+        let manifest: Manifest = serde_json::from_value(value.clone())
+            .with_context(|| format!("invalid manifest {path:?}"))?;
         validate_manifest_abi(&manifest).with_context(|| format!("invalid manifest {path:?}"))?;
-        out.push((manifest, path));
+        out.push((manifest, value, path));
     }
     Ok(out)
 }
@@ -2588,7 +2595,7 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
     let mut compiled = HashMap::new();
     {
         let mut jobs = Vec::new();
-        for (manifest, manifest_path) in &loaded {
+        for (manifest, manifest_value, manifest_path) in &loaded {
             if manifest.runtime.as_deref() == Some("js-wasm") {
                 continue;
             }
@@ -2605,11 +2612,17 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
             }
             let engine = engine.clone();
             let manifest = manifest.clone();
+            let manifest_value = manifest_value.clone();
             let name = manifest.name.clone();
             jobs.push((
                 name,
                 tokio::task::spawn_blocking(move || {
-                    verify_and_compile_component(&engine, &manifest, &component_path)
+                    verify_and_compile_component(
+                        &engine,
+                        &manifest,
+                        &manifest_value,
+                        &component_path,
+                    )
                 }),
             ));
         }
@@ -2621,7 +2634,7 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
         }
     }
 
-    for (manifest, manifest_path) in loaded {
+    for (manifest, manifest_value, manifest_path) in loaded {
         validate_plugin_name(&manifest.name)?;
         if !seen_plugins.insert(manifest.name.clone()) {
             anyhow::bail!("duplicate plugin manifest for {}", manifest.name);
@@ -2668,7 +2681,7 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
                     )
                 })?
                 .to_string();
-            verify_manifest_signature(&manifest, &[])?;
+            verify_manifest_signature(&manifest_value, &[])?;
             ui_plugins.push(UiPluginInfo {
                 name: manifest.name.clone(),
                 version: manifest.version.clone(),
@@ -2922,14 +2935,13 @@ mod tests {
 
     #[test]
     fn plugin_signature_payload_covers_manifest_permissions_and_component() {
-        let raw = r#"{"name":"x","version":"0.1.0","language":"rust","abi":"wasi-0.2","runtime":"wasi-component","type":"library","component":"x.wasm","exports":[],"imports":{"wasi":[],"host":[],"plugins":[]},"permissions":{},"state":{},"composition":{},"metadata":{"sha256":"abc"}}"#;
-        let mut manifest: Manifest = serde_json::from_str(raw).unwrap();
+        let raw = r#"{"name":"x","version":"0.1.0","language":"rust","abi":"wasi-0.2","runtime":"wasi-component","type":"library","component":"x.wasm","exports":[],"imports":{"wasi":[],"host":[],"plugins":[]},"permissions":{"network":{"outbound":[],"inbound":[]}},"state":{},"composition":{},"metadata":{"sha256":"abc"}}"#;
+        let mut manifest: serde_json::Value = serde_json::from_str(raw).unwrap();
         let original = signed_manifest_payload(&manifest, b"component bytes").unwrap();
-        manifest
-            .permissions
-            .network
-            .outbound
-            .push("example.com".to_string());
+        manifest["permissions"]["network"]["outbound"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!("example.com"));
         let changed_policy = signed_manifest_payload(&manifest, b"component bytes").unwrap();
         let changed_component = signed_manifest_payload(&manifest, b"changed component").unwrap();
         assert_ne!(original, changed_policy);
@@ -2941,31 +2953,32 @@ mod tests {
         use base64::Engine;
         use ring::signature::{Ed25519KeyPair, KeyPair};
         let raw = r#"{"name":"signed","version":"1.0.0","language":"rust","abi":"wasi-0.2","runtime":"wasi-component","type":"library","component":"signed.wasm","exports":[],"imports":{"wasi":[],"host":[],"plugins":[]},"permissions":{"filesystem":[],"http":{"outbound":[],"inbound":false},"network":{"outbound":[],"inbound":[]},"kv":null,"resources":{"max_memory_mb":64,"max_fuel":1000000,"timeout_ms":5000,"max_instances":1}},"state":{"persistent":false,"storage":"none","root":null},"composition":{"strategy":"build-time","entry":false},"metadata":{"sha256":"hash","signature_format":"owasidea-manifest-v1"}}"#;
-        let mut manifest: Manifest = serde_json::from_str(raw).unwrap();
+        let mut manifest: serde_json::Value = serde_json::from_str(raw).unwrap();
         let pkcs8 = Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();
         let pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
         let payload = signed_manifest_payload(&manifest, b"artifact").unwrap();
         let signature = pair.sign(&payload);
-        manifest.metadata["signature"] =
+        manifest["metadata"]["signature"] =
             serde_json::json!(base64::engine::general_purpose::STANDARD.encode(signature.as_ref()));
         assert!(verify_signature_with_key(
             &manifest,
             b"artifact",
             pair.public_key().as_ref(),
             signature.as_ref(),
+            "signed",
         )
         .is_ok());
 
-        manifest
-            .permissions
-            .network
-            .outbound
-            .push("attacker.example".to_string());
+        manifest["permissions"]["network"]["outbound"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!("attacker.example"));
         assert!(verify_signature_with_key(
             &manifest,
             b"artifact",
             pair.public_key().as_ref(),
             signature.as_ref(),
+            "signed",
         )
         .is_err());
     }
