@@ -91,38 +91,150 @@ async function renderPluginDetail(name: string) {
   const encodedName = encodeURIComponent(name);
   const manifest = await fetch(`${HOST}/plugin/${encodedName}/manifest`).then(r => r.json());
   const logs = await fetch(`${HOST}/plugin/${encodedName}/logs`).then(r => r.json()).catch(() => ({ logs: [] }));
+  const exports = (manifest.exports || []).filter((exp: any) => exp.signature !== 'interface');
   let html = `<h1>Plugin: ${escapeHtml(name)}</h1>
     <div class="card"><h2>Manifest</h2><pre>${escapeHtml(JSON.stringify(manifest, null, 2))}</pre></div>
     <div class="card"><h2>Exports</h2>`;
-  for (const exp of manifest.exports || []) {
-    html += `<div style="margin:0.5rem 0"><strong>${escapeHtml(exp.name)}</strong> <code>${escapeHtml(exp.signature)}</code><br/>
-      <input type="text" placeholder="args comma separated" data-input="${escapeHtml(exp.name)}" style="width:60%" />
-      <button data-call="${escapeHtml(exp.name)}">call</button>
-      <button data-reload="1">reload</button>
-      <pre data-out="${escapeHtml(exp.name)}"></pre></div>`;
+  for (const exp of (manifest.exports || [])) {
+    if (exp.signature === 'interface') continue;
+    const params = exp.params || [];
+    html += `<div class="export" data-export="${escapeHtml(exp.name)}" style="margin:0.75rem 0;padding:0.5rem;border:1px solid #4443;border-radius:6px">
+      <strong>${escapeHtml(exp.name)}</strong> <code>${escapeHtml(exp.signature)}</code><br/>`;
+    if (params.length) {
+      for (const p of params) {
+        const t = String(p.type || '');
+        const lower = t.toLowerCase();
+        const isBool = lower === 'bool' || lower === 'boolean';
+        const isNumber = /^(i|u|f)\d*$/.test(lower) || lower.includes('int') || lower.includes('float') || lower.includes('double') || lower === 'number';
+        const isComplex = !isBool && !isNumber && lower !== 'string' && lower !== 'str' && lower !== 'char';
+        const common = `data-param="${escapeHtml(p.name)}" data-input="${escapeHtml(p.name)}" name="${escapeHtml(p.name)}"`;
+        html += `<label style="display:block;margin:0.35rem 0">${escapeHtml(p.name)} <small>(${escapeHtml(t)})</small><br/>`;
+        if (isBool) {
+          html += `<input type="checkbox" ${common} />`;
+        } else if (isNumber) {
+          html += `<input type="number" ${common} step="any" style="width:60%" />`;
+        } else if (lower === 'string' || lower === 'str' || lower === 'char') {
+          html += `<input type="text" ${common} style="width:60%" />`;
+        } else {
+          html += `<textarea ${common} rows="3" style="width:60%" placeholder='JSON value for ${escapeHtml(t)}'></textarea>
+            <div><small>hint: ${escapeHtml(t)} (JSON)</small></div>`;
+        }
+        html += `</label>`;
+      }
+    } else {
+      html += `<label style="display:block;margin:0.35rem 0">args <small>(comma separated)</small><br/>
+        <input type="text" data-legacy="1" data-input="${escapeHtml(exp.name)}" style="width:60%" /></label>`;
+    }
+    html += `<button data-call="${escapeHtml(exp.name)}" data-invoke="${escapeHtml(exp.name)}">Invoke</button>
+      <span data-latency="${escapeHtml(exp.name)}" style="margin-left:0.5rem"></span>
+      <pre data-out="${escapeHtml(exp.name)}" data-result="${escapeHtml(exp.name)}" style="margin-top:0.5rem"></pre>
+      <pre data-error="${escapeHtml(exp.name)}" style="color:#c33"></pre>
+      <details style="margin-top:0.5rem"><summary>snippets</summary>
+        <pre data-snippet-fetch="${escapeHtml(exp.name)}"></pre>
+        <pre data-snippet-curl="${escapeHtml(exp.name)}"></pre>
+      </details>
+    </div>`;
   }
+  if (!exports.length) html += `<p>No callable exports.</p>`;
   html += `</div>
     <div class="card"><h2>Logs</h2><pre>${escapeHtml((logs.logs || []).join('\n'))}</pre>
       <button id="showlogs">refresh logs</button></div>`;
   view.innerHTML = html;
 
+  const parseField = (el: Element | null, type: string): { ok: boolean; value?: any; error?: string } => {
+    const t = type.toLowerCase();
+    if (!el) return { ok: false, error: 'missing field' };
+    if (el instanceof HTMLInputElement && el.type === 'checkbox') {
+      return { ok: true, value: el.checked };
+    }
+    if (el instanceof HTMLInputElement && el.type === 'number') {
+      const raw = el.value.trim();
+      if (raw === '') return { ok: false, error: 'required' };
+      const n = Number(raw);
+      if (Number.isNaN(n)) return { ok: false, error: 'not a number' };
+      return { ok: true, value: n };
+    }
+    if (el instanceof HTMLTextAreaElement) {
+      const raw = el.value.trim();
+      if (raw === '') return { ok: false, error: 'required' };
+      try { return { ok: true, value: JSON.parse(raw) }; }
+      catch { return { ok: false, error: 'invalid JSON' }; }
+    }
+    // text
+    const val = (el as HTMLInputElement).value;
+    if (t === 'string' || t === 'str' || t === 'char') {
+      return { ok: true, value: val };
+    }
+    // complex as text? try JSON
+    try { return { ok: true, value: JSON.parse(val) }; }
+    catch { return { ok: true, value: val }; }
+  };
+
   view.querySelectorAll('button[data-call]').forEach(btn => {
     btn.addEventListener('click', async () => {
       const fn = (btn as HTMLElement).getAttribute('data-call')!;
-      const input = view.querySelector(`input[data-input="${fn}"]`) as HTMLInputElement;
-      const out = view.querySelector(`pre[data-out="${fn}"]`) as HTMLPreElement;
-      const args = input.value.trim() === '' ? [] : input.value.split(',').map(s => s.trim());
-      const coerced = args.map(a => {
-        if (a === 'true') return true;
-        if (a === 'false') return false;
-        if (/^-?\d+$/.test(a)) return Number(a);
-        return a;
-      });
-      const res = await fetch(`${HOST}/plugin/${encodedName}/call`, {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ function: fn, args: coerced }),
-      }).then(r => r.json());
-      out.textContent = JSON.stringify(res, null, 2);
+      const exp = (manifest.exports || []).find((e: any) => e.name === fn);
+      const params = exp?.params || [];
+      const args: any[] = [];
+      let validationError: string | null = null;
+      if (params.length) {
+        for (const p of params) {
+          const sel = `[data-export="${CSS.escape(fn)}"] [data-param="${CSS.escape(p.name)}"]`;
+          const el = view.querySelector(sel);
+          const parsed = parseField(el, String(p.type || ''));
+          if (!parsed.ok) { validationError = `${p.name}: ${parsed.error}`; break; }
+          args.push(parsed.value);
+        }
+      } else {
+        const input = view.querySelector(`input[data-input="${CSS.escape(fn)}"][data-legacy="1"]`) as HTMLInputElement | null;
+        const raw = input?.value.trim() ?? '';
+        const coerced = raw === '' ? [] : raw.split(',').map(s => s.trim()).map(a => {
+          if (a === 'true') return true;
+          if (a === 'false') return false;
+          if (/^-?\d+$/.test(a)) return Number(a);
+          return a;
+        });
+        args.push(...coerced);
+      }
+      const out = view.querySelector(`pre[data-out="${CSS.escape(fn)}"]`) as HTMLPreElement;
+      const errEl = view.querySelector(`pre[data-error="${CSS.escape(fn)}"]`) as HTMLPreElement;
+      const latEl = view.querySelector(`[data-latency="${CSS.escape(fn)}"]`) as HTMLElement;
+      if (errEl) errEl.textContent = '';
+      if (validationError) {
+        if (out) out.textContent = '';
+        if (errEl) errEl.textContent = validationError;
+        return;
+      }
+      const url = `${HOST}/plugin/${encodedName}/call`;
+      const body = { function: fn, args };
+      const fetchSnippet = `fetch('${url}', {\n  method: 'POST',\n  headers: { 'content-type': 'application/json' },\n  body: JSON.stringify(${JSON.stringify(body)})\n}).then(r => r.json())`;
+      const curlSnippet = `curl -X POST '${url}' -H 'content-type: application/json' -d '${JSON.stringify(body)}'`;
+      const fsn = view.querySelector(`pre[data-snippet-fetch="${CSS.escape(fn)}"]`);
+      const csn = view.querySelector(`pre[data-snippet-curl="${CSS.escape(fn)}"]`);
+      if (fsn) fsn.textContent = fetchSnippet;
+      if (csn) csn.textContent = curlSnippet;
+      const start = performance.now();
+      try {
+        const response = await fetch(url, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const text = await response.text();
+        let parsed: any = text;
+        try { parsed = JSON.parse(text); } catch {}
+        const ms = Math.round(performance.now() - start);
+        if (latEl) latEl.textContent = `${ms} ms`;
+        if (!response.ok) {
+          if (out) out.textContent = '';
+          if (errEl) errEl.textContent = `HTTP ${response.status}: ${typeof parsed === 'string' ? parsed : JSON.stringify(parsed)}`;
+          return;
+        }
+        if (out) out.textContent = JSON.stringify(parsed, null, 2);
+      } catch (e) {
+        const ms = Math.round(performance.now() - start);
+        if (latEl) latEl.textContent = `${ms} ms`;
+        if (errEl) errEl.textContent = String(e);
+      }
     });
   });
   const reloadBtn = view.querySelector('button[data-reload]');
