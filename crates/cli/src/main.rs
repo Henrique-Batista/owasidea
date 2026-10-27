@@ -6,6 +6,7 @@ mod client_gen;
 mod config;
 mod config_render;
 mod dev_desktop;
+mod status;
 mod type_parser;
 mod wit_types;
 use config::*;
@@ -105,6 +106,12 @@ enum Commands {
     /// Run the current build without file watching.
     #[command(about = "Run the current build without file watching.")]
     Run,
+    /// Show host health, build id, plugins and services.
+    #[command(about = "Show host health, build id, plugins and services.")]
+    Status {
+        #[arg(long)]
+        watch: bool,
+    },
     /// Inspect a plugin manifest (WIT imports/exports, permissions).
     #[command(about = "Inspect a plugin manifest (WIT imports/exports, permissions).")]
     Inspect {
@@ -612,6 +619,14 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|| "127.0.0.1:0".to_string());
             apply_signing_env(&cli.config);
             cmd_run(&manifest_dir, &addr).await
+        }
+        Commands::Status { watch } => {
+            let addr = cli
+                .http_addr
+                .clone()
+                .or_else(|| read_host_addr(&cli.config))
+                .unwrap_or_else(|| "127.0.0.1:8787".to_string());
+            status::cmd_status(&addr, watch, cli.json).await
         }
         Commands::Inspect { plugin } => cmd_inspect(&manifest_dir, &plugin, cli.json),
         Commands::Call {
