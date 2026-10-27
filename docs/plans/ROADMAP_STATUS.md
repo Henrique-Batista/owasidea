@@ -39,8 +39,8 @@ Status permitidos: `todo`, `doing`, `review`, `done`, `blocked`.
 | RF-05 | todo | — | — | — | — |
 | RF-06 | done | wt-config | c7b0221 (merge 7edf0a7) | fmt/clippy/test + Shipyard build | porta UI com fallback; `tauri.dev.conf.json`; Playwright lê env |
 | RF-07 | done | wt-host | 3b8f10e + 118743a (merge 10e83b5) | fmt/clippy/test + build determinístico + runtime check | build_id em manifests/runtime//overview/UI; fallback manifest |
-| RF-08 | todo | — | — | — | — |
-| RF-09 | todo | — | — | — | — |
+| RF-08 | done | wt-ui | ebc0b4e (merge 83e246b) | fmt/clippy/test; Playwright adicionado (não executado) | banner de skew UI/host + warning no dev |
+| RF-09 | done | wt-config | 9911b66 (merge 6219525) | build direto sem env falha; com env passa | Vite exige OWASIDEA_HOST; docs atualizadas |
 | DL-01 | todo | — | — | — | — |
 | DL-02 | todo | — | — | — | — |
 | DL-03 | todo | — | — | — | — |
