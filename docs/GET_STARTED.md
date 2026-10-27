@@ -79,6 +79,11 @@ Per-language extras:
 | Tauri bundle | Tauri 2 system dependencies (`webkit2gtk-4.1`, `gtk3`, `libsoup3`, etc.) and `cargo-tauri` |
 | Yew / Blazor / Uno UI plugins | the framework's own build tool (`trunk`, `dotnet publish`, ...) |
 
+Versions, per-OS install commands, `doctor --fix` / `tools.lock` behavior and
+the limitations of each optional toolchain are documented in
+[`OPTIONAL_TOOLCHAINS.md`](OPTIONAL_TOOLCHAINS.md). A missing optional
+toolchain only blocks the plugins written in that language.
+
 The host itself is Rust + Wasmtime 50. It does not embed Node, QuickJS, or a
 JavaScript runtime.
 
@@ -613,7 +618,14 @@ cargo test
 owasidea --config examples/shipyard/wasm-app.toml validate
 owasidea --config examples/shipyard/wasm-app.toml smoke
 owasidea --config examples/shipyard/wasm-app.toml test
+owasidea verify dist/
 ```
+
+`owasidea bundle` stages the runtime payload (`manifests/`, `plugins/*.component.wasm`,
+`ui/public/`, `trust/owasidea.pub`) next to the installers, so
+`owasidea verify dist/` checks the exact manifests, component hashes,
+signatures and UI asset digests that ship. It fails with `NO_MANIFESTS` when
+pointed at a directory that has no manifests, instead of silently passing.
 
 The Shipyard smoke test asserts:
 

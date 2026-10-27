@@ -122,11 +122,18 @@ jobs:
       - run: owasidea doctor --install-wasi-sdk
       - run: cd examples/shipyard && owasidea build
       - run: cd examples/shipyard && owasidea bundle --no-build --bundles appimage
+      - run: cd examples/shipyard && owasidea verify dist/
       - uses: actions/upload-artifact@v4
         with:
           name: shipyard-appimage
           path: examples/shipyard/dist/*.AppImage
 ```
+
+`bundle` stages the manifests, components, trust key and UI assets into
+`dist/`, so the verification step checks the payload that ships with the
+AppImage. The repository CI uses `--isolate-host-libs` on the runner, installs
+`bubblewrap`, and skips the AppImage job with a message when `bwrap` cannot
+create a user namespace (see `.github/workflows/ci.yml`).
 
 Other Linux distributions and versions of WebKit/GTK may produce different
 AppImages; the Ubuntu runner makes the result reproducible.

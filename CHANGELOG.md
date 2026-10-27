@@ -11,11 +11,26 @@ below; see [`docs/UPDATER.md`](docs/UPDATER.md).
 
 ## [Unreleased]
 
+### Added
+
+- `docs/OPTIONAL_TOOLCHAINS.md` documents jco, componentize-dotnet/.NET 10,
+  trunk, wasi-sdk, C/C++ and Tauri packaging: versions, per-OS install commands,
+  `doctor --fix` / `tools.lock` semantics and limitations (FIX-06).
+- `tools.lock` now lists install commands for `cargo-component`, `wasm-tools`,
+  `go`, `node` and `npm`, so `owasidea doctor --fix` covers the required
+  toolchain (FIX-06).
+
 ### Fixed
 
 - `owasidea validate --json` now emits a stable `{ok, plugins, errors,
   warnings}` document (per-plugin status, ABI warnings included) and still exits
   non-zero on drift; text output is unchanged without `--json` (FIX-02).
+- `owasidea bundle` stages `manifests/`, components, `ui/public/` and the trust
+  key into the output directory, and `owasidea verify dist/` fails with
+  `NO_MANIFESTS` instead of silently passing on an artifact-only directory (FIX-05).
+- CI builds and verifies `deb` + `rpm`, uploads `linux-packages`, and runs the
+  AppImage job with `--isolate-host-libs`, verification, upload and a safe skip
+  when `bwrap` is unavailable (FIX-05).
 
 ## [1.0.0] - 2026-10-27
 

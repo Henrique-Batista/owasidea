@@ -96,6 +96,6 @@ Status permitidos: `todo`, `doing`, `review`, `done`, `blocked`.
 | FIX-02 | done | wt-config | 864057f (merge 292667b) | fmt/clippy/test (136 unit + 34 CLI) | `validate --json` estável; warnings ABI; texto preservado |
 | FIX-03 | done | wt-authoring | e7e522b (merge b43513f) | fmt/clippy/test + script templates | `scripts/test-templates.sh`; Rust/Go/TS build; CI fast |
 | FIX-04 | done | wt-host | 26a625f + 7bfde17 (merge ffd9d7a) | fmt/clippy/test (26 unit + 3 e2e `reload_sse`) | reload 200, serviço 409, SSE JSON sem duplicar histórico |
-| FIX-05 | todo | — | — | — | P2: verificar bundle Tauri deb/rpm/AppImage no CI (mapear em RL/CI) |
-| FIX-06 | todo | — | — | — | P2: documentar toolchains opcionais ausentes (mapear em AX-06) |
+| FIX-05 | done | wt-release | 328f5fb | fmt/clippy/test (139 unit + 36 CLI); YAML/TOML parse | CI full: deb+rpm + `verify dist/` + upload; AppImage condicional (`bwrap`/`--isolate-host-libs`) com verify/upload/skip; `bundle` estagia manifests/componentes/trust/UI |
+| FIX-06 | done | wt-release | 328f5fb | fmt/clippy/test; links e `tools.lock` validados | `docs/OPTIONAL_TOOLCHAINS.md`; `tools.lock` com cargo-component/wasm-tools/go/node/npm; GET_STARTED/WINDOWS/README linkam |
 | FIX-07 | done | wt-host | 40b1c02 (merge 975855d) | fmt/clippy/test + Shipyard host assinado + Playwright 7/7 | verificação de assinatura sobre JSON cru; interop CLI/host |

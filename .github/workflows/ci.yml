@@ -133,6 +133,11 @@ jobs:
             examples/shipyard/plugins/board-svelte/package-lock.json
             examples/shipyard/plugins/map-react/package-lock.json
 
+      - name: Setup .NET (C# plugin)
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
       - name: Install system deps (Tauri)
         run: |
           sudo apt-get update
@@ -178,6 +183,12 @@ jobs:
       - name: Put owasidea on PATH
         run: echo "$PWD/target/debug" >> "$GITHUB_PATH"
 
+      - name: Install optional plugin toolchains (C#/C/C++)
+        run: |
+          dotnet workload install wasi-experimental \
+            || echo "wasi-experimental workload unavailable; the example pins the ILCompiler packages"
+          owasidea doctor --install-wasi-sdk
+
       - name: npm ci (root Playwright)
         run: npm ci
 
@@ -197,9 +208,22 @@ jobs:
         working-directory: examples/shipyard
         run: npx playwright test --config playwright.config.ts
 
-      - name: Bundle deb
+      - name: Bundle deb and rpm
         working-directory: examples/shipyard
-        run: owasidea bundle --no-build --bundles deb
+        run: owasidea bundle --no-build --bundles deb,rpm
+
+      - name: Verify dist (manifests, components, signatures, UI index)
+        working-directory: examples/shipyard
+        run: owasidea verify dist/ --json
+
+      - name: Upload Linux packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: |
+            examples/shipyard/dist/*.deb
+            examples/shipyard/dist/*.rpm
+          if-no-files-found: error
 
       - name: SBOM and provenance (RL-04)
         working-directory: examples/shipyard
@@ -257,13 +281,34 @@ jobs:
           node-version: "20"
           cache: "npm"
 
+      - name: Setup .NET (C# plugin)
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
       - name: Install system deps (Tauri)
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev libgtk-3-dev libappindicator3-dev \
             librsvg2-dev patchelf libsoup-3.0-dev build-essential \
-            pkg-config libssl-dev
+            pkg-config libssl-dev bubblewrap
+
+      - name: Check AppImage prerequisites
+        id: appimage
+        run: |
+          set -euo pipefail
+          if ! command -v bwrap >/dev/null 2>&1; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "bwrap is missing; skipping AppImage (deb/rpm cover Linux)."
+            exit 0
+          fi
+          if ! bwrap --dev-bind / / true >/dev/null 2>&1; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "bwrap cannot create a user namespace here; skipping AppImage."
+            exit 0
+          fi
+          echo "available=true" >> "$GITHUB_OUTPUT"
 
       - name: Cache cargo registry/git
         uses: actions/cache@v4
@@ -295,13 +340,42 @@ jobs:
       - name: Put owasidea on PATH
         run: echo "$PWD/target/debug" >> "$GITHUB_PATH"
 
+      - name: Install optional plugin toolchains (C#/C/C++)
+        if: steps.appimage.outputs.available == 'true'
+        run: |
+          dotnet workload install wasi-experimental \
+            || echo "wasi-experimental workload unavailable; the example pins the ILCompiler packages"
+          owasidea doctor --install-wasi-sdk
+
       - name: Shipyard build
+        if: steps.appimage.outputs.available == 'true'
         working-directory: examples/shipyard
         run: owasidea build
 
-      - name: Bundle AppImage
+      - name: Bundle AppImage (isolated host libs)
+        if: steps.appimage.outputs.available == 'true'
         working-directory: examples/shipyard
         run: owasidea bundle --no-build --bundles appimage --isolate-host-libs
+
+      - name: Verify dist (manifests, components, signatures, UI index)
+        if: steps.appimage.outputs.available == 'true'
+        working-directory: examples/shipyard
+        run: owasidea verify dist/ --json
+
+      - name: Upload AppImage
+        if: steps.appimage.outputs.available == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: appimage
+          path: examples/shipyard/dist/*.AppImage
+          if-no-files-found: error
+
+      - name: AppImage skipped (bwrap unavailable)
+        if: steps.appimage.outputs.available != 'true'
+        run: |
+          echo "AppImage was skipped: bubblewrap is unavailable or cannot"
+          echo "create a user namespace. Use deb/rpm, or the clean chroot recipe"
+          echo "in docs/CLEAN_BUILD.md."
 
   windows:
     name: Windows (host/cli, plugins, NSIS)

@@ -135,6 +135,7 @@ owasidea bundle          # build + sign + Tauri package
 - [`docs/GET_STARTED.pt-BR.md`](docs/GET_STARTED.pt-BR.md) — guia em português
 - [`docs/AI_AGENTS.md`](docs/AI_AGENTS.md) — deterministic agent playbook
 - [`docs/WINDOWS.md`](docs/WINDOWS.md) — native Windows support and cross-compilation boundaries
+- [`docs/OPTIONAL_TOOLCHAINS.md`](docs/OPTIONAL_TOOLCHAINS.md) — jco, .NET/C#, wasi-sdk/C/C++, trunk, `doctor --fix`/`tools.lock`, CI behavior
 - [`docs/APPIMAGE.md`](docs/APPIMAGE.md) — AppImage packaging and clean-build requirements
 - [`docs/UPDATER.md`](docs/UPDATER.md) — Tauri updater, latest.json, channels, local testing
 - [`docs/CODE_SIGNING.md`](docs/CODE_SIGNING.md) — Windows Authenticode and macOS Developer ID/notarization, CI secrets and safe skip

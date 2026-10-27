@@ -62,6 +62,14 @@ pub fn cmd_verify(dist: &Path, json: bool) -> anyhow::Result<()> {
         }
     }
     manifest_files.sort();
+    if manifest_files.is_empty() {
+        push_err(
+            manifest_dir.display().to_string(),
+            "NO_MANIFESTS",
+            "no *.manifest.json found; run `owasidea bundle` (it stages manifests into dist) or point verify at a manifest directory"
+                .to_string(),
+        );
+    }
 
     // public key
     let pk_path = if let Ok(p) = std::env::var("OWASIDEA_PUBLIC_KEY") {

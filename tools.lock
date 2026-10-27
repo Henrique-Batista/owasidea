@@ -13,3 +13,40 @@ min_version = "1.80"
 linux = "rustup update"
 macos = "rustup update"
 windows = "rustup update"
+
+[[tools]]
+name = "cargo-component"
+[tools.install]
+linux = "cargo install cargo-component --locked"
+macos = "cargo install cargo-component --locked"
+windows = "cargo install cargo-component --locked"
+
+[[tools]]
+name = "wasm-tools"
+[tools.install]
+linux = "cargo install wasm-tools --locked"
+macos = "cargo install wasm-tools --locked"
+windows = "cargo install wasm-tools --locked"
+
+[[tools]]
+name = "go"
+min_version = "1.27.1"
+[tools.install]
+linux = "sudo apt-get install -y golang-go"
+macos = "brew install go"
+windows = "winget install --id GoLang.Go -e"
+
+[[tools]]
+name = "node"
+min_version = "20"
+[tools.install]
+linux = "sudo apt-get install -y nodejs"
+macos = "brew install node@20"
+windows = "winget install --id OpenJS.NodeJS.LTS -e"
+
+[[tools]]
+name = "npm"
+[tools.install]
+linux = "sudo apt-get install -y npm"
+macos = "brew install node@20"
+windows = "winget install --id OpenJS.NodeJS.LTS -e"

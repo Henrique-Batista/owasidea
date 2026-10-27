@@ -8,6 +8,7 @@ mod config;
 mod config_render;
 mod dev_desktop;
 mod dev_next_steps;
+mod dist_stage;
 mod doctor;
 mod errors;
 mod go_build;
@@ -771,7 +772,7 @@ async fn install_wasi_sdk() -> anyhow::Result<PathBuf> {
     Ok(dest)
 }
 
-fn copy_dir_all(source: &Path, destination: &Path) -> anyhow::Result<()> {
+pub(crate) fn copy_dir_all(source: &Path, destination: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(destination)?;
     for entry in std::fs::read_dir(source)? {
         let entry = entry?;
@@ -4482,6 +4483,16 @@ fn cmd_bundle(
                 )?;
             }
             println!("Artifacts copied to {}", output_dir.display());
+            let public_key = dist_stage::resolve_public_key(
+                &root,
+                cfg.signing.as_ref().and_then(|s| s.public_key.as_deref()),
+            );
+            let staged = dist_stage::stage_dist(&root, &output_dir, public_key.as_deref())?;
+            println!(
+                "Verifiable payload staged in {} ({})",
+                output_dir.display(),
+                staged.summary()
+            );
             write_latest_if_configured(&root, &cfg, profile, &output_dir)?;
             output_dir
         } else {

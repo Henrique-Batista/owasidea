@@ -178,6 +178,34 @@ CI generates both SBOM formats plus provenance with
 `SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)` and uploads them as the
 `sbom-provenance` artifact. No secret is needed.
 
+### 4.2 CI bundle verification (FIX-05)
+
+The `full` job builds `deb` and `rpm`, and the `appimage` job builds the
+AppImage with `--isolate-host-libs`. Both run `owasidea verify dist/` and
+upload their artifacts:
+
+| Job | Command | Artifact |
+| --- | --- | --- |
+| `full` | `owasidea bundle --no-build --bundles deb,rpm` | `linux-packages` (`*.deb`, `*.rpm`) |
+| `appimage` | `owasidea bundle --no-build --bundles appimage --isolate-host-libs` | `appimage` (`*.AppImage`) |
+
+`bundle` stages `manifests/`, `plugins/*.component.wasm`, `ui/public/` and
+`trust/owasidea.pub` into `dist/` next to the installers, so `verify dist/`
+checks the manifests, component checksums, Ed25519 signatures and UI asset
+digests that actually ship. A dist without manifests fails with `NO_MANIFESTS`
+instead of reporting a vacuous success.
+
+The AppImage job is **conditional**: it installs `bubblewrap`, probes
+`bwrap --dev-bind / / true`, and skips with a message when user namespaces are
+unavailable or `bwrap` is missing. `deb`/`rpm` still cover Linux in that case.
+The job stays `continue-on-error` because `linuxdeploy` and the GTK plugin are
+not fully hermetic; see [`APPIMAGE.md`](APPIMAGE.md) and
+[`CLEAN_BUILD.md`](CLEAN_BUILD.md).
+
+The Linux jobs install .NET 10, the `wasi-experimental` workload and wasi-sdk
+so the reference app builds every language. Optional toolchain details are in
+[`OPTIONAL_TOOLCHAINS.md`](OPTIONAL_TOOLCHAINS.md).
+
 ---
 
 ## 5. CI secrets and variables
