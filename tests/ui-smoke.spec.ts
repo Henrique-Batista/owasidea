@@ -70,6 +70,69 @@ test('plugin detail calls a WIT export through the host API', async ({ page }) =
   await expect(page.locator('pre[data-out="greet"]')).toContainText('Hello, Ada');
 });
 
+test('plugin call error keeps plain text and lifts hint/docs lines', async ({ page }) => {
+  await page.route('http://127.0.0.1:8787/plugin/notes/manifest', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      name: 'notes',
+      exports: [{ name: 'greet', signature: 'func(name: string) -> string' }],
+    }),
+  }));
+  await page.route('http://127.0.0.1:8787/plugin/notes/logs', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ logs: [] }),
+  }));
+  await page.route('http://127.0.0.1:8787/plugin/notes/call', route => route.fulfill({
+    status: 400,
+    contentType: 'text/plain',
+    body: 'invalid args: expected u32\nhint: pass a number\ndocs: docs/API.md#errors',
+  }));
+
+  await page.goto('/#/plugins/notes');
+  await page.locator('input[data-input="greet"]').fill('Ada');
+  await page.locator('button[data-call="greet"]').click();
+  const err = page.locator('pre[data-error="greet"]');
+  await expect(err).toContainText('HTTP 400: invalid args: expected u32');
+  await expect(err).toContainText('hint: pass a number');
+  await expect(err).toContainText('docs: docs/API.md#errors');
+});
+
+test('plugin call error renders structured JSON code/message/hint/docs', async ({ page }) => {
+  await page.route('http://127.0.0.1:8787/plugin/notes/manifest', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      name: 'notes',
+      exports: [{ name: 'greet', signature: 'func(name: string) -> string' }],
+    }),
+  }));
+  await page.route('http://127.0.0.1:8787/plugin/notes/logs', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ logs: [] }),
+  }));
+  await page.route('http://127.0.0.1:8787/plugin/notes/call', route => route.fulfill({
+    status: 400,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      code: 'OWASIDEA_E_HTTP_CALL',
+      message: 'call rejected',
+      hint: 'check the args',
+      docs: 'docs/ERRORS.md#owasidea_e_http_call',
+    }),
+  }));
+
+  await page.goto('/#/plugins/notes');
+  await page.locator('input[data-input="greet"]').fill('Ada');
+  await page.locator('button[data-call="greet"]').click();
+  const err = page.locator('pre[data-error="greet"]');
+  await expect(err).toContainText('[OWASIDEA_E_HTTP_CALL] call rejected');
+  await expect(err).toContainText('hint: check the args');
+  await expect(err).toContainText('docs: docs/ERRORS.md#owasidea_e_http_call');
+});
+
 test('services panel restarts a service and shows the failure reason', async ({ page }) => {
   await page.route('http://127.0.0.1:8787/plugins', route => route.fulfill({
     status: 200,

@@ -95,9 +95,9 @@ ui_entry = "wwwroot/index.html"
 - The iframe uses `sandbox="allow-scripts allow-forms"`; it does not receive
   same-origin, top-navigation, or popup privileges.
 - UI plugins do not receive WASI, host KV/log, filesystem, socket, or native host
-  capabilities. v1 keeps the iframe isolated by default; an opt-in, least-privilege
-  parent-to-plugin bridge is planned (ADR-0004, CT-05/CT-06/CT-07) and remains
-  denied unless explicitly allowlisted.
+  capabilities. The iframe stays fully isolated unless the plugin opts into the
+  least-privilege parent-to-plugin bridge (ADR-0004, CT-05/CT-06/CT-07): only the
+  exports listed in `bridge` are callable, and everything else is denied.
 - UI assets are included in local desktop bundles; remote registry entries list
   each file separately and verify it against the same manifest digest map.
 

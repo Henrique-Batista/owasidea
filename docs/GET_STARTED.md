@@ -427,11 +427,14 @@ desktop binary built before the latest `owasidea build` still verifies the
 bundle it actually contains. `GET /ui-plugins` exposes the same metadata from
 the signed manifests for other clients.
 
-The dashboard and the UI plugin share no JavaScript state, and an isolated
-plugin has **no host bridge**. It cannot call `POST /plugin/{name}/call`
-directly: the iframe has an opaque origin and the host CORS allowlist does not
-include `null`. To give a plugin backend data, proxy the calls through the
-dashboard with an explicit allowlist, or keep the isolated plugin
+The dashboard and the UI plugin share no JavaScript state. By default an
+isolated plugin has **no host bridge** and cannot call
+`POST /plugin/{name}/call` directly: the iframe has an opaque origin and the
+host CORS allowlist does not include `null`. A plugin that declares
+`bridge = ["plugin.export"]` gets an opt-in, parent-mediated bridge limited to
+that allowlist (see [`UI_PLUGINS.md`](UI_PLUGINS.md)); everything else stays
+isolated. To give a plugin backend data without the bridge, proxy the calls
+through the dashboard with an explicit allowlist, or keep the isolated plugin
 presentational. The route mapping for non-isolated frontends is documented in
 [`API.md`](API.md).
 

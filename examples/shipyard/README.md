@@ -242,8 +242,9 @@ See [`docs/WINDOWS.md`](../../docs/WINDOWS.md).
 
 - Ports are intentionally different from the repository root app: host `8790`,
   Vite `5180`. This lets both run at the same time.
-- UI plugins are presentational only. They receive no host bridge and share no
-  JavaScript state with the dashboard.
+- UI plugins are presentational by default. They share no JavaScript state with
+  the dashboard and receive no host bridge unless the plugin declares a `bridge`
+  allowlist (`board-svelte` opts into `changelog-ts.render`).
 - A running host keeps the component bytes loaded at startup. After a rebuild,
   restart the host (or use dev hot reload) before re-running tests; otherwise
   `/call` returns `checksum mismatch`.
