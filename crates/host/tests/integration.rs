@@ -454,3 +454,52 @@ async fn integration_smoke() {
         assert!(r.status().is_success());
     }
 }
+
+#[tokio::test]
+async fn structured_logs_endpoint_and_request_id() {
+    let Some(manifests) = manifests_dir() else {
+        eprintln!("skipping: manifests not found");
+        return;
+    };
+    let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+        .expect("reserve ephemeral port")
+        .local_addr()
+        .expect("read ephemeral port")
+        .port();
+    let base = format!("http://127.0.0.1:{}", port);
+    let child = Command::new(env!("CARGO_BIN_EXE_owasidea-host"))
+        .arg(&manifests)
+        .arg("--addr")
+        .arg(format!("127.0.0.1:{}", port))
+        .spawn()
+        .expect("spawn host");
+    let _guard = HostGuard { child };
+    wait_ready(&base).await;
+    let client = reqwest::Client::new();
+
+    // trigger a log via example plugin call (if available)
+    let _ = client
+        .post(format!("{}/plugin/example/call", base))
+        .json(&json!({"function": "greet", "args": ["Ex"]}))
+        .send()
+        .await;
+
+    let r = client
+        .get(format!("{}/plugin/example/logs", base))
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success());
+    let body: serde_json::Value = r.json().await.unwrap();
+    assert!(body.get("logs").is_some());
+    assert!(body.get("entries").is_some());
+    let entries = body["entries"].as_array().cloned().unwrap_or_default();
+    if !entries.is_empty() {
+        let e = &entries[0];
+        assert!(e.get("ts").is_some());
+        assert!(e.get("level").is_some());
+        assert!(e.get("plugin").is_some());
+        assert!(e.get("request_id").is_some());
+        assert!(e.get("message").is_some());
+    }
+}

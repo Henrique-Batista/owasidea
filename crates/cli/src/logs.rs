@@ -1,10 +1,24 @@
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
+
+#[derive(Deserialize, Debug, Clone, Serialize)]
+struct LogEntry {
+    ts: u64,
+    level: String,
+    plugin: String,
+    request_id: u64,
+    message: String,
+    #[serde(default)]
+    fields: Option<serde_json::Value>,
+}
 
 #[derive(Deserialize, Debug)]
 struct LogsRes {
+    #[serde(default)]
     logs: Vec<String>,
+    #[serde(default)]
+    entries: Vec<LogEntry>,
 }
 
 fn base(addr: &str) -> String {
@@ -16,6 +30,30 @@ fn addr(cli_addr: Option<&str>, config_addr: Option<&str>) -> String {
         .map(|s| s.to_string())
         .or_else(|| config_addr.map(|s| s.to_string()))
         .unwrap_or_else(|| "127.0.0.1:8787".to_string())
+}
+
+fn level_rank(level: &str) -> i32 {
+    match level.to_lowercase().as_str() {
+        "debug" => 0,
+        "info" => 1,
+        "warn" | "warning" => 2,
+        "error" => 3,
+        _ => 1,
+    }
+}
+
+fn level_ok_entry(entry: &LogEntry, level: Option<&str>) -> bool {
+    let Some(lv) = level else {
+        return true;
+    };
+    let thr = match lv.to_lowercase().as_str() {
+        "debug" => 0,
+        "info" => 1,
+        "warn" | "warning" => 2,
+        "error" => 3,
+        _ => 0,
+    };
+    level_rank(&entry.level) >= thr
 }
 
 pub async fn run_logs(
@@ -32,28 +70,51 @@ pub async fn run_logs(
         .build()?;
     // history
     if !follow {
-        let url = format!("{}/plugin/{}/logs", base(&addr), plugin);
+        let mut url = format!("{}/plugin/{}/logs", base(&addr), plugin);
+        if let Some(lv) = level {
+            url = format!("{}?level={}", url, lv);
+        }
         let res = client.get(&url).send().await.context("request failed")?;
         if !res.status().is_success() {
             anyhow::bail!("host returned {}", res.status());
         }
         let body: LogsRes = res.json().await.context("invalid json")?;
-        let filtered: Vec<String> = body
-            .logs
+        let entries: Vec<LogEntry> = body
+            .entries
             .into_iter()
-            .filter(|l| level_ok(l, level))
+            .filter(|e| level_ok_entry(e, level))
             .collect();
+        if entries.is_empty() && body.logs.is_empty() {
+            // compat fallback
+        }
         if json {
-            println!("{}", serde_json::to_string(&filtered)?);
+            for e in &entries {
+                println!("{}", serde_json::to_string(e)?);
+            }
+            if entries.is_empty() {
+                // fallback to old logs strings
+                for l in &body.logs {
+                    println!("{}", serde_json::to_string(l)?);
+                }
+            }
         } else {
-            for l in filtered {
-                println!("{}", l);
+            if !entries.is_empty() {
+                for e in &entries {
+                    println!("[{}] {} {} {}", e.level, e.ts, e.request_id, e.message);
+                }
+            } else {
+                for l in &body.logs {
+                    println!("{}", l);
+                }
             }
         }
         return Ok(());
     }
     // follow SSE
-    let url = format!("{}/plugin/{}/logs/stream", base(&addr), plugin);
+    let mut url = format!("{}/plugin/{}/logs/stream", base(&addr), plugin);
+    if let Some(lv) = level {
+        url = format!("{}?level={}", url, lv);
+    }
     let res = client.get(&url).send().await.context("request failed")?;
     if !res.status().is_success() {
         anyhow::bail!("host returned {}", res.status());
@@ -72,46 +133,28 @@ pub async fn run_logs(
                 if msg.is_empty() {
                     continue;
                 }
-                if !level_ok(&msg, level) {
-                    continue;
-                }
-                if json {
-                    println!("{}", serde_json::to_string(&msg)?);
+                // try parse as LogEntry
+                if let Ok(entry) = serde_json::from_str::<LogEntry>(&msg) {
+                    if !level_ok_entry(&entry, level) {
+                        continue;
+                    }
+                    if json {
+                        println!("{}", serde_json::to_string(&entry)?);
+                    } else {
+                        println!(
+                            "[{}] {} {} {}",
+                            entry.level, entry.ts, entry.request_id, entry.message
+                        );
+                    }
                 } else {
-                    println!("{}", msg);
+                    if json {
+                        println!("{}", serde_json::to_string(&msg)?);
+                    } else {
+                        println!("{}", msg);
+                    }
                 }
             }
         }
     }
     Ok(())
-}
-
-fn level_ok(msg: &str, level: Option<&str>) -> bool {
-    let Some(lv) = level else {
-        return true;
-    };
-    let lv = lv.to_lowercase();
-    // filter: keep messages whose inferred level >= requested
-    let rank = |m: &str| -> i32 {
-        let low = m.to_lowercase();
-        if low.contains("error") {
-            3
-        } else if low.contains("warn") {
-            2
-        } else if low.contains("info") {
-            1
-        } else if low.contains("debug") {
-            0
-        } else {
-            1
-        }
-    };
-    let thr = match lv.as_str() {
-        "debug" => 0,
-        "info" => 1,
-        "warn" | "warning" => 2,
-        "error" => 3,
-        _ => 0,
-    };
-    rank(msg) >= thr
 }

@@ -93,7 +93,7 @@ async function renderPlugins() {
 async function renderPluginDetail(name: string) {
   const encodedName = encodeURIComponent(name);
   const manifest = await fetch(`${HOST}/plugin/${encodedName}/manifest`).then(r => r.json());
-  const logs = await fetch(`${HOST}/plugin/${encodedName}/logs`).then(r => r.json()).catch(() => ({ logs: [] }));
+  const logs = await fetch(`${HOST}/plugin/${encodedName}/logs`).then(r => r.json()).catch(() => ({ logs: [], entries: [] }));
   const diff = await fetch(`${HOST}/permissions/diff`).then(r => r.json()).catch(() => ({ plugins: {} }));
   const exports = (manifest.exports || []).filter((exp: any) => exp.signature !== 'interface');
   const pluginDiff = (diff.plugins || {})[name] || { added: [], removed: [] };
@@ -150,7 +150,7 @@ async function renderPluginDetail(name: string) {
   }
   if (!exports.length) html += `<p>No callable exports.</p>`;
   html += `</div>
-    <div class="card"><h2>Logs</h2><pre>${escapeHtml((logs.logs || []).join('\n'))}</pre>
+    <div class="card"><h2>Logs</h2><pre>${escapeHtml(((logs.entries || logs.logs || []).map((e: any) => typeof e === 'string' ? e : `${e.ts} ${e.level} [${e.request_id}] ${e.message}`).join('\n'))}</pre>
       <button id="showlogs">refresh logs</button></div>`;
   view.innerHTML = html;
 
@@ -273,7 +273,7 @@ async function renderPluginDetail(name: string) {
     showLogs.addEventListener('click', async () => {
       const r = await fetch(`${HOST}/plugin/${encodedName}/logs`).then(x => x.json());
       const pre = view.querySelector('.card:last-child pre') as HTMLPreElement;
-      if (pre) pre.textContent = (r.logs || []).join('\n');
+      if (pre) pre.textContent = ((r.entries || r.logs || []).map((e: any) => typeof e === 'string' ? e : `${e.ts} ${e.level} [${e.request_id}] ${e.message}`).join('\n');
     });
   }
 }

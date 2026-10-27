@@ -90,8 +90,8 @@ explicit per-plugin allowlist; do not add `Origin: null` to CORS.
 
 - `GET /plugin/{name}/manifest` → full generated manifest JSON.
 
-- `GET /plugin/{name}/logs` → `{ "logs": ["..."] }`.
-- `GET /plugin/{name}/logs/stream` → SSE stream of log lines.
+- `GET /plugin/{name}/logs` → `{ "logs": ["..."], "entries": [ { "ts": 0, "level": "info", "plugin": "name", "request_id": 0, "message": "...", "fields": null } ] }` (supports `?level=`).
+- `GET /plugin/{name}/logs/stream` → SSE stream of structured JSON logs (`event: log`, `data: {...}`), supports `?level=`.
 - `POST /plugin/{name}/service/start` → generic service start.
 - `POST /plugin/{name}/service/stop` → generic service stop.
 - `GET /plugin/{name}/service/status` → generic service status.
