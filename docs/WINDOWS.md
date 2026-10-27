@@ -104,6 +104,12 @@ platform configs merge with it. The built installer is a normal Tauri/NSIS
 executable and installs the host plus the generated manifests/components under
 the resource directory.
 
+The Tauri updater uses the NSIS `.exe` (`windows-x86_64` in `latest.json`);
+`.msi` is only used when no `.exe` was produced. Updater artifacts must be
+signed on Windows too (`TAURI_SIGNING_PRIVATE_KEY` in the Windows runner), and
+the same `latest.json` is published for every platform. See
+[`UPDATER.md`](UPDATER.md).
+
 ## Cross-compilation from Linux
 
 What works today:

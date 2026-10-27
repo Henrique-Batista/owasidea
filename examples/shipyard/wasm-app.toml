@@ -17,6 +17,14 @@ public_key = "keys/owasidea.pub"
 generate = true
 require = true
 
+# Tauri updater (RL-02). See docs/UPDATER.md. The private signing key stays in
+# the environment (TAURI_SIGNING_PRIVATE_KEY); never commit it.
+# [updater]
+# channel = "stable"            # or "beta"; OWASIDEA_UPDATE_CHANNEL overrides
+# endpoint = "https://releases.example.com/{{channel}}/latest.json"
+# pubkey = "keys/owasidea-updater.pub"
+# notes_file = "docs/RELEASE_NOTES.md"
+
 [test]
 ui = ["npx", "playwright", "test", "--config", "playwright.config.ts"]
 

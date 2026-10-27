@@ -325,6 +325,20 @@ ui = "ui"
 output = "dist"
 ```
 
+#### Bundle updater artifacts
+
+With `[updater]` configured (endpoint + public key), `bundle` also:
+
+- renders `plugins.updater` (endpoints + public key) into
+  `tauri.generated.conf.json`;
+- sets `bundle.createUpdaterArtifacts = true` when
+  `TAURI_SIGNING_PRIVATE_KEY` is present (the Tauri CLI then writes `.sig`
+  files next to the updater artifacts);
+- scans the copied artifacts and writes `latest.json` next to them.
+
+Without a signing key, artifacts are unsigned and `latest.json` is skipped with
+a message; the bundle itself still succeeds. See [`UPDATER.md`](UPDATER.md).
+
 #### Bundle profiles
 
 `bundle --profile dev|staging|prod` merges a per-profile overlay over
@@ -391,6 +405,37 @@ owasidea bundle --profile prod --bundles deb,rpm,appimage
 owasidea bundle --profile dev --no-build
 ```
 
+### `latest [--artifacts <dir>] [--check] [--channel stable|beta] [--profile <name>]`
+
+Generate the Tauri updater manifest (`latest.json`) from signed bundle
+artifacts, or validate an existing one with `--check`.
+
+- Artifacts: `--artifacts`, else `<desktop.output>` / `dist` / `dist/<profile>`.
+- Scans `*.AppImage.sig`, `*.exe.sig`, `*.msi.sig`, `*.app.tar.gz.sig`;
+  `deb`/`rpm`/`dmg` are not updater targets.
+- Platform keys: `linux-x86_64`, `windows-x86_64`, `darwin-x86_64`,
+  `darwin-aarch64` (arch inferred from the file name).
+- URL base: `--url-base`, else `OWASIDEA_UPDATER_BASE_URL`, else the parent of
+  the first endpoint.
+- Channel: `--channel`, else `OWASIDEA_UPDATE_CHANNEL`, else
+  `[updater].channel`, else `stable`.
+- Version: `--version`, else `[app].version`.
+- Notes: `--notes`, `--notes-file`, else `[updater].notes` / `notes_file`.
+- `pub_date`: `--pub-date` (RFC 3339), else now (UTC).
+- `--check` validates the existing file (semver, RFC 3339 date, non-empty
+  platforms, HTTPS URL + signature per platform, channel match) and never
+  writes. Exits non-zero on drift.
+
+```bash
+owasidea latest --artifacts dist --url-base https://releases.example.com/stable
+owasidea latest --artifacts dist --channel beta --version 1.1.0 --notes-file NOTES.md
+owasidea latest --artifacts dist --check
+```
+
+Requires `[updater].endpoint` and `[updater].pubkey` (or
+`OWASIDEA_UPDATER_ENDPOINT`/`OWASIDEA_UPDATER_PUBKEY`). See
+[`UPDATER.md`](UPDATER.md) and `scripts/gen-latest-json.sh`.
+
 ### `wit generate [path]`
 
 Regenerate WIT from source annotations (`owasidea::*` in Rust, `// owasidea:`
@@ -410,6 +455,26 @@ require = true
 `build` and `bundle` sign every manifest. `run`, `dev` and `test` apply
 `OWASIDEA_PUBLIC_KEY` and `OWASIDEA_REQUIRE_SIGNATURES` before starting the host.
 Keep private keys out of the repository in production.
+
+### `[updater]` configuration
+
+```toml
+[updater]
+channel = "stable"                                    # stable | beta
+endpoint = "https://releases.example.com/{{channel}}/latest.json"
+pubkey = "keys/owasidea-updater.pub"                  # public key file
+notes_file = "docs/RELEASE_NOTES.md"                  # optional
+```
+
+`endpoint` may use `{{channel}}`, `{{target}}`, `{{arch}}` and
+`{{current_version}}`; a trailing `/` means `<endpoint>/latest.json`. HTTPS is
+required except for loopback hosts. `pubkey` is the minisign **public** key
+whose content is embedded in `tauri.generated.conf.json`.
+
+Environment overrides: `OWASIDEA_UPDATE_CHANNEL`, `OWASIDEA_UPDATER_ENDPOINT`,
+`OWASIDEA_UPDATER_PUBKEY`, `OWASIDEA_UPDATER_BASE_URL`. The private signing key
+(`TAURI_SIGNING_PRIVATE_KEY`) is only read by the Tauri CLI and is never
+rendered into a file. See [`UPDATER.md`](UPDATER.md).
 
 ### `keygen --out <dir>` / `sign <plugin> --key <key>`
 

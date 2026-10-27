@@ -11,6 +11,7 @@ pub struct AppConfig {
     pub smoke: Option<SmokeSection>,
     pub plugins: Option<std::collections::BTreeMap<String, PluginSection>>,
     pub dev: Option<DevSection>,
+    pub updater: Option<UpdaterSection>,
 }
 
 impl AppConfig {
@@ -61,6 +62,18 @@ impl AppConfig {
         if let Some(dev) = &self.dev {
             if let Some(addr) = &dev.ui_addr {
                 validate_socket_addr("dev.ui_addr", addr)?;
+            }
+        }
+        if let Some(updater) = &self.updater {
+            validate_nonempty_opt("updater.channel", updater.channel.as_deref())?;
+            validate_nonempty_opt("updater.endpoint", updater.endpoint.as_deref())?;
+            validate_nonempty_opt("updater.pubkey", updater.pubkey.as_deref())?;
+            validate_nonempty_opt("updater.notes_file", updater.notes_file.as_deref())?;
+            if let Some(channel) = &updater.channel {
+                crate::updater::validate_channel(channel)?;
+            }
+            if let Some(endpoint) = &updater.endpoint {
+                crate::updater::validate_endpoint(endpoint)?;
             }
         }
         Ok(())
@@ -131,6 +144,31 @@ pub struct DevSection {
     pub hot_reload: bool,
     #[serde(default)]
     pub ui_addr: Option<String>,
+}
+
+#[derive(serde::Deserialize, Debug, Default, Clone, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UpdaterSection {
+    /// Enable updater config/latest.json generation (default true when a
+    /// pubkey and endpoint resolve).
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// Release channel: `stable` or `beta`.
+    #[serde(default)]
+    pub channel: Option<String>,
+    /// Update manifest endpoint. `{{channel}}` is substituted at render time;
+    /// a trailing `/` means `<endpoint>/latest.json`.
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    /// Public key file (minisign) for update signatures, relative to the app root.
+    #[serde(default)]
+    pub pubkey: Option<String>,
+    /// Inline release notes written to latest.json.
+    #[serde(default)]
+    pub notes: Option<String>,
+    /// Release notes file, relative to the app root.
+    #[serde(default)]
+    pub notes_file: Option<String>,
 }
 
 #[derive(serde::Deserialize, Debug, Default, Clone, schemars::JsonSchema)]

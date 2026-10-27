@@ -1,4 +1,5 @@
 mod runtime;
+mod updater;
 
 use runtime::resolve;
 use std::path::{Path, PathBuf};
@@ -77,6 +78,11 @@ fn trust_key(handle: &tauri::AppHandle) -> Option<PathBuf> {
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .invoke_handler(tauri::generate_handler![
+            updater::updater_check,
+            updater::updater_install
+        ])
         .setup(|app| {
             let handle = app.handle().clone();
             let resource_dir = handle.path().resource_dir().ok();

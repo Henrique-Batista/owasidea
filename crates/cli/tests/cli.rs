@@ -781,3 +781,140 @@ fn verify_dist_ui_asset_hash_mismatch_fails() {
     verify2.args(["verify"]).arg(&dist).assert().failure();
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn latest_generates_and_validates_tauri_updater_manifest() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let root = std::env::temp_dir().join(format!(
+        "owasidea-latest-test-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let dist = root.join("dist");
+    std::fs::create_dir_all(root.join("keys")).unwrap();
+    std::fs::create_dir_all(&dist).unwrap();
+    std::fs::write(
+        root.join("keys/owasidea-updater.pub"),
+        "untrusted comment: owasidea updater public key\nRWQfakekeyforunittests\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("wasm-app.toml"),
+        r#"
+[app]
+name = "shipyard"
+version = "1.2.3"
+identifier = "dev.owasidea.shipyard"
+
+[updater]
+channel = "beta"
+endpoint = "https://updates.example.com/{{channel}}/latest.json"
+pubkey = "keys/owasidea-updater.pub"
+notes = "beta build"
+"#,
+    )
+    .unwrap();
+    for (artifact, signature) in [
+        ("Shipyard_1.2.3_amd64.AppImage", "sig-appimage"),
+        ("Shipyard_1.2.3_x64-setup.exe", "sig-nsis"),
+        ("Shipyard_1.2.3_amd64.deb", "sig-deb"),
+    ] {
+        std::fs::write(dist.join(artifact), b"artifact").unwrap();
+        std::fs::write(dist.join(format!("{artifact}.sig")), signature).unwrap();
+    }
+
+    let mut latest = Command::cargo_bin("owasidea").unwrap();
+    latest
+        .args(["--config"])
+        .arg(root.join("wasm-app.toml"))
+        .args(["latest", "--artifacts"])
+        .arg(&dist)
+        .args(["--pub-date", "2026-10-27T00:00:00Z", "--json"])
+        .assert()
+        .success();
+
+    let raw = std::fs::read_to_string(dist.join("latest.json")).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(value["version"], "1.2.3");
+    assert_eq!(value["channel"], "beta");
+    assert_eq!(value["notes"], "beta build");
+    assert_eq!(value["pub_date"], "2026-10-27T00:00:00Z");
+    assert_eq!(
+        value["platforms"]["linux-x86_64"]["url"],
+        "https://updates.example.com/beta/Shipyard_1.2.3_amd64.AppImage"
+    );
+    assert_eq!(
+        value["platforms"]["linux-x86_64"]["signature"],
+        "sig-appimage"
+    );
+    assert_eq!(
+        value["platforms"]["windows-x86_64"]["url"],
+        "https://updates.example.com/beta/Shipyard_1.2.3_x64-setup.exe"
+    );
+    // .deb is not an updater target.
+    assert!(value["platforms"].get("linux-x86_64-deb").is_none());
+
+    let mut check = Command::cargo_bin("owasidea").unwrap();
+    check
+        .args(["--config"])
+        .arg(root.join("wasm-app.toml"))
+        .args(["latest", "--artifacts"])
+        .arg(&dist)
+        .arg("--check")
+        .assert()
+        .success();
+
+    // A malformed manifest fails --check instead of silently passing.
+    let mut broken = value.clone();
+    broken["platforms"]["linux-x86_64"]
+        .as_object_mut()
+        .unwrap()
+        .remove("signature");
+    std::fs::write(
+        dist.join("latest.json"),
+        serde_json::to_string_pretty(&broken).unwrap(),
+    )
+    .unwrap();
+    let mut check_broken = Command::cargo_bin("owasidea").unwrap();
+    check_broken
+        .args(["--config"])
+        .arg(root.join("wasm-app.toml"))
+        .args(["latest", "--artifacts"])
+        .arg(&dist)
+        .arg("--check")
+        .assert()
+        .failure();
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn latest_rejects_unconfigured_updater() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let root = std::env::temp_dir().join(format!(
+        "owasidea-latest-unconfigured-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("wasm-app.toml"),
+        "[app]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    let mut latest = Command::cargo_bin("owasidea").unwrap();
+    latest
+        .args(["--config"])
+        .arg(root.join("wasm-app.toml"))
+        .arg("latest")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("updater is not configured"));
+    std::fs::remove_dir_all(root).unwrap();
+}

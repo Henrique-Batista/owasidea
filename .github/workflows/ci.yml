@@ -88,6 +88,16 @@ jobs:
     needs: fast
     if: github.event_name == 'push' && (github.ref == 'refs/heads/release/1.0' || startsWith(github.ref, 'refs/tags/'))
     runs-on: ubuntu-latest
+    # Updater (RL-02): all values are optional. When the endpoint/public key
+    # are set, the bundle signs updater artifacts and writes latest.json;
+    # otherwise the updater steps are skipped safely. See docs/UPDATER.md.
+    env:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      OWASIDEA_UPDATER_ENDPOINT: ${{ vars.OWASIDEA_UPDATER_ENDPOINT }}
+      OWASIDEA_UPDATER_PUBKEY: ${{ vars.OWASIDEA_UPDATER_PUBKEY }}
+      OWASIDEA_UPDATER_BASE_URL: ${{ vars.OWASIDEA_UPDATER_BASE_URL }}
+      OWASIDEA_UPDATE_CHANNEL: ${{ vars.OWASIDEA_UPDATE_CHANNEL }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -179,6 +189,18 @@ jobs:
       - name: Bundle deb
         working-directory: examples/shipyard
         run: owasidea bundle --no-build --bundles deb
+
+      - name: Verify latest.json (updater, optional)
+        if: ${{ env.OWASIDEA_UPDATER_ENDPOINT != '' && env.OWASIDEA_UPDATER_PUBKEY != '' && env.TAURI_SIGNING_PRIVATE_KEY != '' }}
+        working-directory: examples/shipyard
+        run: owasidea latest --artifacts dist --check
+
+      - name: Updater skipped (no key/endpoint/public key)
+        if: ${{ env.OWASIDEA_UPDATER_ENDPOINT == '' || env.OWASIDEA_UPDATER_PUBKEY == '' || env.TAURI_SIGNING_PRIVATE_KEY == '' }}
+        run: |
+          echo "Updater artifacts and latest.json skipped: set the repository variables"
+          echo "OWASIDEA_UPDATER_ENDPOINT and OWASIDEA_UPDATER_PUBKEY, and the"
+          echo "TAURI_SIGNING_PRIVATE_KEY secret (see docs/UPDATER.md)."
 
   appimage:
     name: AppImage (optional, isolate host libs)

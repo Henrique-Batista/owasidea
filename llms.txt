@@ -12,6 +12,8 @@
 - [AI agent playbook](docs/AI_AGENTS.md): deterministic commands, invariants, API, acceptance checks.
 - [Windows support](docs/WINDOWS.md): native Windows flow, NSIS packaging, cross-compilation limits.
 - [AppImage packaging](docs/APPIMAGE.md): linuxdeploy root cause, clean CI build, optional local workaround.
+- [Updater](docs/UPDATER.md): Tauri updater, latest.json, stable/beta channels, local static-server test.
+- [Release](docs/RELEASE.md): gates, profiles, signing keys, CI secrets, publish/rollback.
 - [Clean build environments](docs/CLEAN_BUILD.md): bubblewrap isolation for AppImage, plus Arch devtools/Debian debootstrap chroots without Docker.
 - [Reference app](examples/shipyard/README.md): real six-language app with isolated Svelte/React UI and Tauri packaging.
 - [Architecture](docs/ARCHITECTURE.md): host, runtime, manifests, capability broker.

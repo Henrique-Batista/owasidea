@@ -578,6 +578,30 @@ Important packaging details:
 - Production release builds require signed manifests unless explicitly disabled.
   See `docs/SECURITY.md`.
 
+### 8.1 Updates (Tauri updater)
+
+The desktop shells ship the Tauri 2 updater. Configure it in `wasm-app.toml`
+and let `bundle` produce the manifest:
+
+```toml
+[updater]
+channel = "stable"
+endpoint = "https://releases.example.com/{{channel}}/latest.json"
+pubkey = "keys/owasidea-updater.pub"
+```
+
+```bash
+export TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/owasidea-updater.key)"
+owasidea bundle --bundles appimage,nsis   # writes *.sig + dist/latest.json
+owasidea latest --artifacts dist --check  # validate before publishing
+```
+
+`[updater]` is projected into `plugins.updater` in the generated Tauri config;
+`OWASIDEA_UPDATE_CHANNEL`, `OWASIDEA_UPDATER_ENDPOINT`, and
+`OWASIDEA_UPDATER_PUBKEY` override it without editing files. The private key is
+never committed or embedded. Full flow, channels, local-server testing, and
+rollback: [`UPDATER.md`](UPDATER.md); release checklist: [`RELEASE.md`](RELEASE.md).
+
 ---
 
 ## 9. Verify
@@ -643,6 +667,7 @@ owasidea run                        host only (current build)
 owasidea dev [--no-build]           build + host + UI + watcher + hot reload
 owasidea inspect <plugin> [--json]  manifest + WIT
 owasidea bundle [--no-build]        build + sign + Tauri package
+owasidea latest [--check]           generate/validate dist/latest.json (updater)
 owasidea wit generate [path]        regenerate WIT from source annotations
 owasidea keygen --out <dir>         Ed25519 signing key
 owasidea sign <plugin> --key <key>  sign a release manifest
