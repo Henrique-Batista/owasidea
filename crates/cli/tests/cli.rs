@@ -1652,3 +1652,140 @@ fn changelog_and_policy_document_1_0_abi_rules() {
         );
     }
 }
+
+// G2: Go executables such as `webhook-go` ship no `wit/` source, only a
+// prebuilt `main.wasm`. `build` must reuse it instead of failing inside
+// `componentize-go` with `failed to read path for WIT [wit]`.
+fn temp_app_root(label: &str) -> std::path::PathBuf {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let root = std::env::temp_dir().join(format!(
+        "owasidea-{label}-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    root
+}
+
+fn write_minimal_component(path: &std::path::Path) -> bool {
+    let dir = path.parent().unwrap();
+    let wat = dir.join("fixture.wat");
+    std::fs::write(
+        &wat,
+        "(module (func (export \"ping\") (result i32) i32.const 1))",
+    )
+    .unwrap();
+    let core = dir.join("fixture.core.wasm");
+    let parsed = std::process::Command::new("wasm-tools")
+        .arg("parse")
+        .arg(&wat)
+        .arg("-o")
+        .arg(&core)
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if !parsed {
+        return false;
+    }
+    std::process::Command::new("wasm-tools")
+        .args(["component", "new"])
+        .arg(&core)
+        .arg("-o")
+        .arg(path)
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+#[test]
+fn build_reuses_prebuilt_go_component_without_wit() {
+    if !std::process::Command::new("wasm-tools")
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+    {
+        eprintln!("skipping build_reuses_prebuilt_go_component_without_wit: wasm-tools missing");
+        return;
+    }
+
+    let root = temp_app_root("go-prebuilt");
+    let plugin = root.join("plugins/webhook-go");
+    std::fs::create_dir_all(&plugin).unwrap();
+    std::fs::write(plugin.join("go.mod"), "module wit_component\n").unwrap();
+    assert!(write_minimal_component(&plugin.join("main.wasm")));
+    std::fs::write(
+        root.join("wasm-app.toml"),
+        "[app]\nversion = \"0.1.0\"\n\n[plugins.webhook-go]\npath = \"plugins/webhook-go\"\nlanguage = \"go\"\ntype = \"executable\"\n",
+    )
+    .unwrap();
+
+    let output = Command::cargo_bin("owasidea")
+        .unwrap()
+        .args(["--config", "wasm-app.toml", "build"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "build failed; stdout: {stdout}");
+    assert!(
+        stdout.contains("using prebuilt main.wasm (no WIT source)"),
+        "build must warn about the prebuilt component: {stdout}"
+    );
+
+    let built = plugin.join("webhook-go.component.wasm");
+    assert!(
+        built.is_file(),
+        "component not produced: {}",
+        built.display()
+    );
+    assert_eq!(
+        std::fs::read(&built).unwrap(),
+        std::fs::read(plugin.join("main.wasm")).unwrap(),
+        "the prebuilt component must be copied verbatim"
+    );
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(root.join("manifests/webhook-go.manifest.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(manifest["language"], "go");
+    assert_eq!(manifest["runtime"], "wasi-component");
+    assert_eq!(manifest["type"], "executable");
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn build_fails_when_go_plugin_has_neither_wit_nor_component() {
+    let root = temp_app_root("go-no-source");
+    let plugin = root.join("plugins/broken-go");
+    std::fs::create_dir_all(&plugin).unwrap();
+    std::fs::write(plugin.join("go.mod"), "module wit_component\n").unwrap();
+    std::fs::write(
+        root.join("wasm-app.toml"),
+        "[app]\nversion = \"0.1.0\"\n\n[plugins.broken-go]\npath = \"plugins/broken-go\"\nlanguage = \"go\"\ntype = \"executable\"\n",
+    )
+    .unwrap();
+
+    let output = Command::cargo_bin("owasidea")
+        .unwrap()
+        .args(["--config", "wasm-app.toml", "build"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "build must fail without any source"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("no wit/ directory"), "stderr: {stderr}");
+    assert!(stderr.contains("main.wasm"), "stderr: {stderr}");
+    assert!(stderr.contains("broken-go"), "stderr: {stderr}");
+    assert!(
+        !root.join("manifests/broken-go.manifest.json").exists(),
+        "a failed build must not emit a manifest"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
