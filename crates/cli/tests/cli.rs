@@ -2049,9 +2049,10 @@ fn doctor_platform_unknown_fails() {
 
 #[test]
 fn doctor_platform_execution_is_refused_cross_platform() {
+    let other = if cfg!(windows) { "linux" } else { "windows" };
     let mut cmd = Command::cargo_bin("owasidea").unwrap();
     let output = cmd
-        .args(["doctor", "--install-all", "--platform", "windows", "--yes"])
+        .args(["doctor", "--install-all", "--platform", other, "--yes"])
         .output()
         .unwrap();
     assert!(!output.status.success());
