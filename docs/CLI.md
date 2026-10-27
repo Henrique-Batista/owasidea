@@ -83,7 +83,8 @@ Behavior:
    the running desktop binary. The index is a build-consistency artifact;
    manifests remain the signed source of truth for headless plugins.
 8. If `[signing]` exists, every manifest is signed with the configured Ed25519
-   key. `generate = true` creates a demo key when missing.
+   key. `generate = true` is opt-in and creates a demo key when missing; the
+   example app does not enable it, so run `owasidea keygen --out keys` first.
 
 A C/C++ plugin can override the native build command, which is required on
 Windows when `make.exe` is not on `PATH`:
@@ -207,7 +208,7 @@ contract for CI/agents:
   fields by name.
 
 
-### `verify <dist-dir> [--json]`
+### `verify <dist-dir> [--public-key <file>] [--allow-dist-trust] [--json]`
 
 Verify a dist directory produced by `bundle` (or any directory containing
 manifests). `bundle` stages the runtime payload into the output directory
@@ -218,10 +219,16 @@ Checks:
 - each manifest is valid JSON with compatible ABI fields (`schema_version`,
   `host_abi`, `min_host`)
 - referenced component exists and its sha256 matches `metadata.sha256`
-- Ed25519 signature verifies against the public key (`OWASIDEA_PUBLIC_KEY`
-  or `<dist>/trust/owasidea.pub` / `<dist>/keys/owasidea.pub`)
+- Ed25519 signature verifies against a **pinned** public key
 - `metadata.ui` asset digests and bundle digest for UI plugins
 - `ui-plugins.json` index entries match the manifests
+
+The trust root must be supplied out of band: `--public-key <file>` or
+`OWASIDEA_PUBLIC_KEY`. A key copied into `dist/trust` (or `dist/keys`) by the
+same bundle is **not** accepted by default, because whoever can rewrite the
+artifacts can rewrite that key too; `verify` fails with `TRUST_ROOT_UNPINNED`.
+`--allow-dist-trust` opts in for local smoke checks only. With no key at all it
+fails with `TRUST_ROOT_MISSING`.
 
 A directory with no `*.manifest.json` fails with `NO_MANIFESTS`; verification
 never reports success for zero manifests.
@@ -237,7 +244,9 @@ truth for host/port/CSP/dev URL):
 - `runtime` -> `<ui>/.owasidea/runtime.json`
 - `playwright` -> `<ui>/.owasidea/playwright.json`
 - `tauri` -> `<desktop>/tauri.generated.conf.json` (copies base `tauri.conf.json`,
-  overriding `build.devUrl` and ensuring the host origin is in `connect-src`).
+  overriding `build.devUrl`, ensuring the host origin is in `connect-src`, and
+  generating `bundle.resources` for `manifests/`, every headless component,
+  `trust/owasidea.pub` and `owasidea.runtime.json`).
   The generated CSP contains exactly the configured host origin (no wildcard);
   `*` and `null` are rejected. `bundle` always renders this file and passes it
   to `cargo tauri build --config`.
@@ -322,10 +331,14 @@ ui = "ui"
 
 It runs `npm run build` in the UI directory, then `cargo tauri build` in the
 desktop crate. With `[signing]`, manifests are signed during build; the desktop
-shell must include the public key as a Tauri resource and set
-`OWASIDEA_REQUIRE_SIGNATURES=true` and `OWASIDEA_PUBLIC_KEY`.
-`bundle.resources` in `tauri.conf.json` must include the generated manifests and
-component `.wasm` files; see `examples/shipyard/desktop`.
+shell must set `OWASIDEA_REQUIRE_SIGNATURES=true` and resolve
+`OWASIDEA_PUBLIC_KEY` from its bundled `trust/owasidea.pub`. `bundle` renders
+`bundle.resources` from `wasm-app.toml` (manifests, every headless component,
+the trust key and `runtime.json`), so a new plugin does not need a manual entry;
+explicit entries in the base `tauri.conf.json` are preserved. The webview UI is
+embedded through `build.frontendDist`; the UI build output is only staged as a
+resource when the shell has no frontend directory. See
+`examples/shipyard/desktop`.
 
 Direct UI builds outside the CLI (`npm run build` / `vite`) now fail with an
 actionable error if `OWASIDEA_HOST` is not set. Use `owasidea build`/`owasidea dev`
@@ -559,13 +572,17 @@ plugin. See `docs/SOURCE_GENERATORS.md`.
 [signing]
 key = "keys/owasidea.key"
 public_key = "keys/owasidea.pub"
-generate = true
 require = true
 ```
 
 `build` and `bundle` sign every manifest. `run`, `dev` and `test` apply
 `OWASIDEA_PUBLIC_KEY` and `OWASIDEA_REQUIRE_SIGNATURES` before starting the host.
-Keep private keys out of the repository in production.
+Create the keypair explicitly with `owasidea keygen --out keys`; the optional
+`generate = true` flag is a demo-only convenience that creates a key when
+missing. Release builds should point `key` at a protected CI secret and keep
+`generate` off, so a missing key fails instead of producing a new trust root.
+Keep private keys out of the repository in production; publish the public key
+out of band (bundled `trust/owasidea.pub` or `--public-key` for `verify`).
 
 ### `[updater]` configuration
 

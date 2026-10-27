@@ -67,19 +67,26 @@ variable to the platform app-data directory before starting the host.
 ## Desktop packaging
 
 The Tauri shell embeds the host and serves the built frontend from
-`frontendDist`. Manifests and component `.wasm` files are declared explicitly in
-`bundle.resources`, preserving the layout:
+`frontendDist`. `owasidea bundle` renders `bundle.resources` from
+`wasm-app.toml` — the manifests directory, every headless component, the trust
+key and the runtime descriptor — so the layout is generated, not hand-listed:
 
 ```
 $RESOURCE/manifests/<name>.manifest.json
 $RESOURCE/plugins/<name>/<name>.component.wasm
+$RESOURCE/trust/owasidea.pub
+$RESOURCE/owasidea.runtime.json
 ```
 
-Tauri platform configs (`tauri.windows.conf.json`) select NSIS and `.ico` while
-the base config owns resources. At startup the shell resolves
-`$RESOURCE/manifests`, sets `OWASIDEA_DATA_DIR`, and runs
-`owasidea_host::run`. The webview talks to the host over loopback HTTP;
-it never links Wasmtime or receives native plugin capabilities.
+Explicit entries in the base config are preserved; a generated entry wins when
+both name the same destination. The UI is embedded through `frontendDist`
+(staged as a resource only when the shell has no frontend directory). Tauri
+platform configs (`tauri.windows.conf.json`) select NSIS and `.ico` while the
+base config owns targets and icons. At startup the shell resolves
+`$RESOURCE/manifests`, creates and sets `OWASIDEA_DATA_DIR`, resolves the
+bundled trust key, and runs `owasidea_host::run`. The webview talks to the host
+over loopback HTTP; it never links Wasmtime or receives native plugin
+capabilities.
 
 ## Data flow
 

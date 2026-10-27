@@ -51,13 +51,22 @@
 
 ## Desktop packaging
 
-Tauri bundles should include only generated manifests and component `.wasm`
-files as resources. The desktop shell must set `OWASIDEA_DATA_DIR` to the
-platform app-data directory before starting the host; otherwise KV databases and
+Tauri bundles should include only generated manifests, component `.wasm` files,
+the trust key and the runtime descriptor as resources. `owasidea bundle`
+generates `bundle.resources` from `wasm-app.toml` (manifests, every headless
+component, `trust/owasidea.pub`, `owasidea.runtime.json`); the webview UI is
+embedded through `build.frontendDist` rather than duplicated as a resource.
+The desktop shell must set `OWASIDEA_DATA_DIR` to the platform app-data
+directory (creating it) before starting the host; otherwise KV databases and
 relative filesystem preopens resolve against the process working directory.
 Do not package source trees, `node_modules`, signing keys, or UI-plugin build
 caches. The host still binds loopback only; the webview is not a remote trust
 boundary.
+
+`owasidea verify` requires a pinned trust root (`--public-key` or
+`OWASIDEA_PUBLIC_KEY`). A public key staged inside the artifact directory is not
+accepted by default, because it is writable by whoever can rewrite the
+artifacts; `--allow-dist-trust` exists only for local smoke checks.
 
 ## Production configuration
 

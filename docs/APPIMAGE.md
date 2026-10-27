@@ -120,9 +120,10 @@ jobs:
       - run: cargo install cargo-component wasm-tools tauri-cli --locked
       - run: cargo install --path crates/cli --force
       - run: owasidea doctor --install-wasi-sdk
+      - run: cd examples/shipyard && owasidea keygen --out keys
       - run: cd examples/shipyard && owasidea build
       - run: cd examples/shipyard && owasidea bundle --no-build --bundles appimage
-      - run: cd examples/shipyard && owasidea verify dist/
+      - run: cd examples/shipyard && owasidea verify dist/ --public-key keys/owasidea.pub
       - uses: actions/upload-artifact@v4
         with:
           name: shipyard-appimage

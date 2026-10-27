@@ -181,8 +181,9 @@ CI generates both SBOM formats plus provenance with
 ### 4.2 CI bundle verification (FIX-05)
 
 The `full` job builds `deb` and `rpm`, and the `appimage` job builds the
-AppImage with `--isolate-host-libs`. Both run `owasidea verify dist/` and
-upload their artifacts:
+AppImage with `--isolate-host-libs`. Both run
+`owasidea verify dist/ --public-key keys/owasidea.pub` and upload their
+artifacts:
 
 | Job | Command | Artifact |
 | --- | --- | --- |
@@ -192,8 +193,20 @@ upload their artifacts:
 `bundle` stages `manifests/`, `plugins/*.component.wasm`, `ui/public/` and
 `trust/owasidea.pub` into `dist/` next to the installers, so `verify dist/`
 checks the manifests, component checksums, Ed25519 signatures and UI asset
-digests that actually ship. A dist without manifests fails with `NO_MANIFESTS`
-instead of reporting a vacuous success.
+digests that actually ship. The release key is pinned out of band
+(`--public-key`/`OWASIDEA_PUBLIC_KEY`); the key staged inside `dist/` is not
+accepted as its own trust root. A dist without manifests fails with
+`NO_MANIFESTS` instead of reporting a vacuous success.
+
+CI creates the example's ephemeral demo key (`owasidea keygen --out keys`)
+before `build` because `examples/shipyard/wasm-app.toml` no longer sets
+`[signing].generate = true`. Signing secrets are only available to push/tag
+builds: Windows certificate import, the NSIS bundle and macOS signing steps are
+guarded by `github.event_name != 'pull_request'`.
+
+Third-party actions are currently referenced by major tag (`@v4`). The CI
+workflow header records SHA pinning as the intended hardening; when updating a
+tag, review the release notes and keep `permissions: contents: read`.
 
 The AppImage job is **conditional**: it installs `bubblewrap`, probes
 `bwrap --dev-bind / / true`, and skips with a message when user namespaces are

@@ -62,8 +62,9 @@ owasidea bundle
 ```
 
 O `owasidea bundle` faz build + assinatura + UI + Tauri e copia o artefato para
-`dist/`. A chave de demonstração fica em `keys/` (ignorada pelo git). O shell
-Tauri usa `OWASIDEA_REQUIRE_SIGNATURES=true` e a chave pública em
+`dist/`. A chave de demonstração fica em `keys/` (ignorada pelo git); crie-a uma
+vez com `owasidea keygen --out keys` (o exemplo não gera chave implicitamente).
+O shell Tauri usa `OWASIDEA_REQUIRE_SIGNATURES=true` e a chave pública em
 `trust/owasidea.pub`. Em produção, use uma chave de CI protegida.
 
 ## 3. Criar um app novo
@@ -175,7 +176,8 @@ O shell Tauri deve:
 1. Resolver `$RESOURCE/manifests` no app instalado.
 2. Definir `OWASIDEA_DATA_DIR` para o diretório de dados da plataforma.
 3. Rodar `owasidea_host::run(manifests, addr)` em background.
-4. Declarar em `bundle.resources` apenas manifestos e componentes `.wasm`.
+4. Deixar o `owasidea bundle` gerar `bundle.resources` (manifestos, componentes,
+   chave de confiança e `runtime.json`) a partir de `wasm-app.toml`.
 
 Depois:
 

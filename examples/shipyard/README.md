@@ -119,24 +119,26 @@ The bundle step:
    protected CI key for real releases).
 2. `npm run build` in `ui/` produces `ui/dist`, including
    `plugins/board-svelte/` and `plugins/map-react/`.
-3. `cargo tauri build` in `desktop/` embeds the frontend and packages only the
-   manifests, WASI component files, and the signing public key as Tauri
-   resources.
+3. `cargo tauri build` in `desktop/` embeds the frontend and packages the
+   manifests, WASI component files, signing public key and runtime descriptor as
+   Tauri resources. `owasidea bundle` generates that list from
+   `wasm-app.toml`; it is not hand-maintained.
 4. At runtime the shell resolves `$RESOURCE/manifests`, sets
    `OWASIDEA_REQUIRE_SIGNATURES=true`, trusts `$RESOURCE/trust/owasidea.pub`,
    and sets `OWASIDEA_DATA_DIR` to the platform app-data directory.
 
 The example uses `"targets": "all"` on Linux (`deb`, `rpm`, `AppImage`) and
 Windows via `desktop/tauri.windows.conf.json` (NSIS/MSI). Use
-`owasidea bundle --bundles deb` to restrict the output. It intentionally lists
-each component in `desktop/tauri.conf.json`
-instead of bundling `plugins/` recursively. That prevents `node_modules`, build
-caches, and source files from entering the installer. Add new components to that
-map when you add plugins.
+`owasidea bundle --bundles deb` to restrict the output. Only configured plugins
+are staged, so `node_modules`, build caches, and source files never enter the
+installer; adding a `[plugins.*]` entry is enough.
 
 ## Test
 
 ```bash
+# Once per checkout: demo signing key (keys/ is gitignored)
+owasidea keygen --out keys
+
 # API smoke only: 9 WASI plugins, 2 UI plugins, composition, KV/fs, service, HTTP
 owasidea smoke
 
@@ -187,7 +189,6 @@ tests/                     Playwright end-to-end spec
 [signing]
 key = "keys/owasidea.key"
 public_key = "keys/owasidea.pub"
-generate = true
 require = true
 
 [test]
@@ -201,7 +202,8 @@ min = 0
 max = 100
 ```
 
-`owasidea build` signs, `owasidea dev` rebuilds and watches, `owasidea smoke`
+`owasidea build` signs (create the key once with `owasidea keygen --out keys`),
+`owasidea dev` rebuilds and watches, `owasidea smoke`
 executes the declarative API checks, `owasidea test` adds the UI command, and
 `owasidea bundle` packages Tauri and copies artifacts to `dist/`. No project
 shell script is involved.

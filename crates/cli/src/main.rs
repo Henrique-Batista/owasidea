@@ -307,6 +307,12 @@ enum Commands {
         /// Dist directory to verify.
         #[arg(help = "Dist directory.")]
         dist: PathBuf,
+        /// Pinned Ed25519 public key (base64) used as the trust root.
+        #[arg(long, value_name = "PATH")]
+        public_key: Option<PathBuf>,
+        /// Trust the public key staged inside <dist>/trust. Local checks only.
+        #[arg(long)]
+        allow_dist_trust: bool,
     },
     /// Generate a CycloneDX/SPDX SBOM from Cargo/npm/Go lockfiles.
     #[command(about = "Generate a CycloneDX/SPDX SBOM from Cargo/npm/Go lockfiles.")]
@@ -1055,7 +1061,11 @@ async fn main() -> anyhow::Result<()> {
             WitCmd::Generate { path } => cmd_wit_generate(&path, cli.json),
         },
         Commands::Validate => validate::cmd_validate(&cli.config, &cli.manifest_dir, cli.json),
-        Commands::Verify { dist } => verify::cmd_verify(&dist, cli.json),
+        Commands::Verify {
+            dist,
+            public_key,
+            allow_dist_trust,
+        } => verify::cmd_verify(&dist, public_key.as_deref(), allow_dist_trust, cli.json),
         Commands::Sbom {
             output,
             format,

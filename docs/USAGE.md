@@ -98,8 +98,9 @@ owasidea bundle
 ```
 
 `bundle` builds the UI and runs `cargo tauri build` in the desktop crate selected
-by `[desktop].path`. The Tauri config must include manifests and component files
-in `bundle.resources`; see `examples/shipyard/desktop/tauri.conf.json`.
+by `[desktop].path`. `bundle.resources` is generated from the config (manifests,
+components, trust key, `runtime.json`), so a new plugin needs no manual entry;
+see `examples/shipyard/desktop`.
 
 At runtime the shell should resolve `$RESOURCE/manifests` and set
 `OWASIDEA_DATA_DIR` to the platform app-data directory. The reference shell does

@@ -742,6 +742,8 @@ fn verify_dist_valid_signed_component() {
     let out = verify
         .args(["verify"])
         .arg(&dist)
+        .args(["--public-key"])
+        .arg(dist.join("keys/owasidea.pub"))
         .args(["--json"])
         .output()
         .unwrap();
@@ -758,7 +760,13 @@ fn verify_dist_valid_signed_component() {
     // tampered component
     std::fs::write(dist.join("plugins/demo/demo.component.wasm"), b"tampered").unwrap();
     let mut verify2 = Command::cargo_bin("owasidea").unwrap();
-    verify2.args(["verify"]).arg(&dist).assert().failure();
+    verify2
+        .args(["verify"])
+        .arg(&dist)
+        .args(["--public-key"])
+        .arg(dist.join("keys/owasidea.pub"))
+        .assert()
+        .failure();
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -798,7 +806,78 @@ fn verify_dist_unsigned_or_missing_key_fails() {
     )
     .unwrap();
     let mut verify = Command::cargo_bin("owasidea").unwrap();
-    verify.args(["verify"]).arg(&dist).assert().failure();
+    let out = verify
+        .args(["verify"])
+        .arg(&dist)
+        .args(["--json"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["ok"], false);
+    assert_eq!(report["errors"][0]["code"], "TRUST_ROOT_MISSING");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn verify_dist_rejects_key_staged_inside_dist() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let root = std::env::temp_dir().join(format!(
+        "owasidea-verify-unpinned-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let dist = root.join("dist");
+    std::fs::create_dir_all(dist.join("manifests")).unwrap();
+    std::fs::create_dir_all(dist.join("trust")).unwrap();
+    // base64 of b"k"
+    std::fs::write(dist.join("trust/owasidea.pub"), b"aw==\n").unwrap();
+    std::fs::write(
+        dist.join("manifests/demo.manifest.json"),
+        br#"{"name":"demo","version":"1.0.0","runtime":"wasi-component","type":"library","component":"demo.wasm","metadata":{"sha256":""}}"#,
+    )
+    .unwrap();
+
+    let mut verify = Command::cargo_bin("owasidea").unwrap();
+    verify.env_remove("OWASIDEA_PUBLIC_KEY");
+    let out = verify
+        .args(["verify"])
+        .arg(&dist)
+        .args(["--json"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["ok"], false);
+    let codes: Vec<&str> = report["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|error| error["code"].as_str())
+        .collect();
+    assert!(codes.contains(&"TRUST_ROOT_UNPINNED"), "codes: {codes:?}");
+
+    // Explicit opt-in accepts the staged key for local checks.
+    let mut allowed = Command::cargo_bin("owasidea").unwrap();
+    allowed.env_remove("OWASIDEA_PUBLIC_KEY");
+    let out = allowed
+        .args(["verify"])
+        .arg(&dist)
+        .args(["--allow-dist-trust", "--json"])
+        .output()
+        .unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let codes: Vec<&str> = report["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|error| error["code"].as_str())
+        .collect();
+    assert!(!codes.contains(&"TRUST_ROOT_UNPINNED"), "codes: {codes:?}");
+
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -871,7 +950,13 @@ fn verify_dist_ui_asset_hash_mismatch_fails() {
 
     // valid first
     let mut verify = Command::cargo_bin("owasidea").unwrap();
-    verify.args(["verify"]).arg(&dist).assert().success();
+    verify
+        .args(["verify"])
+        .arg(&dist)
+        .args(["--public-key"])
+        .arg(dist.join("keys/owasidea.pub"))
+        .assert()
+        .success();
 
     // tamper asset
     std::fs::write(
@@ -880,7 +965,13 @@ fn verify_dist_ui_asset_hash_mismatch_fails() {
     )
     .unwrap();
     let mut verify2 = Command::cargo_bin("owasidea").unwrap();
-    verify2.args(["verify"]).arg(&dist).assert().failure();
+    verify2
+        .args(["verify"])
+        .arg(&dist)
+        .args(["--public-key"])
+        .arg(dist.join("keys/owasidea.pub"))
+        .assert()
+        .failure();
     std::fs::remove_dir_all(root).unwrap();
 }
 

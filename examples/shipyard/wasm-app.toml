@@ -14,8 +14,11 @@ output = "dist"
 [signing]
 key = "keys/owasidea.key"
 public_key = "keys/owasidea.pub"
-generate = true
 require = true
+
+# Demo/release key: create it once with `owasidea keygen --out keys` (or point
+# `key`/`public_key` at a protected release key). Keys are never generated
+# implicitly, so a release build fails instead of trusting a fresh key.
 
 # Tauri updater (RL-02). See docs/UPDATER.md. The private signing key stays in
 # the environment (TAURI_SIGNING_PRIVATE_KEY); never commit it.

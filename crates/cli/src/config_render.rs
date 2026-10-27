@@ -321,6 +321,143 @@ fn tauri_content(root: &Path, cfg: &AppConfig) -> anyhow::Result<serde_json::Val
     tauri_content_for(root, cfg, None)
 }
 
+/// Lexical path from `base` to `target` (both under the same app root).
+fn relative_to(base: &Path, target: &Path) -> PathBuf {
+    let base: Vec<_> = base.components().collect();
+    let target: Vec<_> = target.components().collect();
+    let common = base
+        .iter()
+        .zip(target.iter())
+        .take_while(|(left, right)| left == right)
+        .count();
+    let mut out = PathBuf::new();
+    for _ in common..base.len() {
+        out.push("..");
+    }
+    for component in &target[common..] {
+        out.push(component.as_os_str());
+    }
+    out
+}
+
+/// Build the Tauri `bundle.resources` map from the effective config.
+///
+/// The packaged shell resolves the runtime payload from `$RESOURCE`:
+/// `manifests/`, `plugins/<name>/<name>.component.wasm`, `trust/owasidea.pub`
+/// and `owasidea.runtime.json`. Generating the map from `wasm-app.toml` keeps
+/// a newly added plugin from silently missing its component in the installer.
+///
+/// Only entries whose source exists are emitted, so `config render` stays
+/// usable before the first build; `bundle` always re-renders this file after
+/// `build` has produced the artifacts. The webview frontend is embedded through
+/// `build.frontendDist`; the UI build output is only staged as a resource when
+/// the shell has no frontend directory (for example a host-served UI), which
+/// avoids shipping the same assets twice.
+fn generated_bundle_resources(
+    root: &Path,
+    cfg: &AppConfig,
+    desktop: &Path,
+    frontend_dist: Option<&str>,
+) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let desktop = desktop
+        .canonicalize()
+        .unwrap_or_else(|_| desktop.to_path_buf());
+    let mut resources = serde_json::Map::new();
+    let mut add = |source: PathBuf, target: String| {
+        let is_dir = source.is_dir();
+        let source = source.canonicalize().unwrap_or(source);
+        let mut key = relative_to(&desktop, &source)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if is_dir && !key.ends_with('/') {
+            key.push('/');
+        }
+        if !key.is_empty() {
+            resources.insert(key, serde_json::Value::String(target));
+        }
+    };
+
+    let manifests = root.join("manifests");
+    if manifests.is_dir() {
+        add(manifests, "manifests/".to_string());
+    }
+
+    if let Some(plugins) = &cfg.plugins {
+        for (name, plugin) in plugins {
+            // `js-wasm` UI bundles are webview assets, never host components.
+            if plugin.kind == "ui" || plugin.runtime.as_deref() == Some("js-wasm") {
+                continue;
+            }
+            let dir = safe_resolve(&root, &plugin.path)?;
+            let component = dir.join(format!("{name}.component.wasm"));
+            if component.is_file() {
+                add(component, format!("plugins/{name}/{name}.component.wasm"));
+            }
+        }
+    }
+
+    if let Some(key) = crate::dist_stage::resolve_public_key(
+        &root,
+        cfg.signing
+            .as_ref()
+            .and_then(|signing| signing.public_key.as_deref()),
+    ) {
+        add(key, "trust/owasidea.pub".to_string());
+    }
+
+    let runtime = ui_dir(&root, cfg)?.join(".owasidea").join("runtime.json");
+    if runtime.is_file() {
+        add(runtime, "owasidea.runtime.json".to_string());
+    }
+
+    let has_frontend = frontend_dist.is_some_and(|value| !value.trim().is_empty());
+    let ui_dist = ui_dir(&root, cfg)?.join("dist");
+    if !has_frontend && ui_dist.is_dir() {
+        add(ui_dist, "ui/dist/".to_string());
+    }
+
+    Ok(resources)
+}
+
+/// Merge generated resource entries into `bundle.resources` without dropping
+/// explicit entries from the base `tauri.conf.json`. Generated entries win when
+/// both name the same destination because they come from the effective config.
+fn apply_bundle_resources(
+    value: &mut serde_json::Value,
+    generated: serde_json::Map<String, serde_json::Value>,
+) -> anyhow::Result<()> {
+    if generated.is_empty() {
+        return Ok(());
+    }
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("tauri.conf.json root must be object"))?;
+    let bundle = object
+        .entry("bundle".to_string())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    if !bundle.is_object() {
+        anyhow::bail!("tauri.conf.json bundle must be object");
+    }
+    let bundle = bundle.as_object_mut().unwrap();
+    match bundle.get_mut("resources") {
+        None => {
+            bundle.insert(
+                "resources".to_string(),
+                serde_json::Value::Object(generated),
+            );
+        }
+        Some(serde_json::Value::Object(existing)) => {
+            for (key, entry) in generated {
+                existing.insert(key, entry);
+            }
+        }
+        // An array form is valid Tauri config; leave the explicit list alone.
+        Some(_) => {}
+    }
+    Ok(())
+}
+
 /// Render `tauri.generated.conf.json` content from the effective config.
 ///
 /// `profile` additionally projects `[app]` into the Tauri identity
@@ -396,6 +533,17 @@ pub(crate) fn tauri_content_for(
     } else {
         anyhow::bail!("tauri.conf.json missing app.security.csp slot");
     }
+    // G0: derive `bundle.resources` from the effective config so a packaged
+    // shell finds manifests, components, the trust key and the runtime
+    // descriptor without hand-maintained entries that drift when plugins are
+    // added.
+    let frontend_dist = value
+        .get("build")
+        .and_then(|build| build.get("frontendDist"))
+        .and_then(|dist| dist.as_str())
+        .map(str::to_string);
+    let resources = generated_bundle_resources(root, cfg, &dd, frontend_dist.as_deref())?;
+    apply_bundle_resources(&mut value, resources)?;
     // RL-02: project the effective updater settings into `plugins.updater`.
     // A missing/broken updater config must not break `config render`, so the
     // error is reported as a warning and the base config is kept.
@@ -860,6 +1008,99 @@ mod tests {
         assert_ne!(dev_raw, prod_raw);
         assert!(dev_raw.contains("9100"));
         assert!(prod_raw.contains("9200"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn tauri_content_generates_bundle_resources_from_config() {
+        let root = profile_root("resources");
+        std::fs::create_dir_all(root.join("manifests")).unwrap();
+        std::fs::create_dir_all(root.join("plugins/core-rust")).unwrap();
+        std::fs::create_dir_all(root.join("plugins/panel/dist")).unwrap();
+        std::fs::create_dir_all(root.join("keys")).unwrap();
+        std::fs::create_dir_all(root.join("ui/.owasidea")).unwrap();
+        std::fs::create_dir_all(root.join("ui/dist")).unwrap();
+        std::fs::write(root.join("manifests/core.manifest.json"), b"{}").unwrap();
+        std::fs::write(
+            root.join("plugins/core-rust/core-rust.component.wasm"),
+            b"component",
+        )
+        .unwrap();
+        std::fs::write(root.join("plugins/panel/dist/index.html"), b"<html/>").unwrap();
+        std::fs::write(root.join("keys/owasidea.pub"), b"key").unwrap();
+        std::fs::write(root.join("ui/.owasidea/runtime.json"), b"{}").unwrap();
+        std::fs::write(root.join("ui/dist/index.html"), b"<html/>").unwrap();
+
+        let mut plugins = std::collections::BTreeMap::new();
+        plugins.insert(
+            "core-rust".to_string(),
+            crate::config::PluginSection {
+                path: "plugins/core-rust".to_string(),
+                language: "rust".to_string(),
+                kind: "library".to_string(),
+                ..Default::default()
+            },
+        );
+        plugins.insert(
+            "panel".to_string(),
+            crate::config::PluginSection {
+                path: "plugins/panel".to_string(),
+                language: "svelte".to_string(),
+                kind: "ui".to_string(),
+                runtime: Some("js-wasm".to_string()),
+                ..Default::default()
+            },
+        );
+        let cfg = AppConfig {
+            desktop: Some(DesktopSection {
+                path: Some("desktop".to_string()),
+                ui: Some("ui".to_string()),
+                output: Some("dist".to_string()),
+            }),
+            signing: Some(crate::config::SigningSection {
+                public_key: Some("keys/owasidea.pub".to_string()),
+                ..Default::default()
+            }),
+            plugins: Some(plugins),
+            ..Default::default()
+        };
+
+        let value = tauri_content_for(&root, &cfg, None).unwrap();
+        let resources = &value["bundle"]["resources"];
+        assert_eq!(resources["../manifests/"], "manifests/");
+        assert_eq!(
+            resources["../plugins/core-rust/core-rust.component.wasm"],
+            "plugins/core-rust/core-rust.component.wasm"
+        );
+        // js-wasm UI bundles are frontend assets, not host components.
+        assert!(resources
+            .get("../plugins/panel/panel.component.wasm")
+            .is_none());
+        assert_eq!(resources["../keys/owasidea.pub"], "trust/owasidea.pub");
+        assert_eq!(
+            resources["../ui/.owasidea/runtime.json"],
+            "owasidea.runtime.json"
+        );
+        // `build.frontendDist` already embeds the UI, so it is not duplicated.
+        assert!(resources.get("../ui/dist/").is_none());
+
+        // Without a frontend directory the shell needs the UI build output as
+        // a resource.
+        let mut no_frontend: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(root.join("desktop/tauri.conf.json")).unwrap(),
+        )
+        .unwrap();
+        no_frontend["build"]
+            .as_object_mut()
+            .unwrap()
+            .remove("frontendDist");
+        std::fs::write(
+            root.join("desktop/tauri.conf.json"),
+            serde_json::to_vec(&no_frontend).unwrap(),
+        )
+        .unwrap();
+        let value = tauri_content_for(&root, &cfg, None).unwrap();
+        assert_eq!(value["bundle"]["resources"]["../ui/dist/"], "ui/dist/");
         let _ = std::fs::remove_dir_all(&root);
     }
 

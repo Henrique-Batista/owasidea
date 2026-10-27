@@ -36,6 +36,13 @@ The plan is produced before the bundle, and its JSON drives the workflow `if`
 conditions. `invalid` is deliberate: a missing password or identity is a
 configuration error, not "no certificate".
 
+**PR guard (G1):** steps that consume signing secrets are restricted to
+push/tag builds. In `.github/workflows/ci.yml` the Windows plan, PFX import,
+NSIS bundle (Azure credentials) and Authenticode verification run only when
+`github.event_name != 'pull_request'`; macOS signing/notarization runs in a
+push/tag-only job. Pull requests still compile and test the host/CLI and build
+plugins, but never import a certificate or read `secrets.*`.
+
 The CLI also projects the **non-secret** values into
 `tauri.generated.conf.json`:
 
@@ -262,7 +269,7 @@ and no secret material.
 ## 6. Secret hygiene
 
 - Secrets are passed only to the steps that need them; the planner receives
-  presence only.
+  presence only, and secret-consuming steps are skipped on `pull_request`.
 - No step enables shell tracing (`set -x`) around credentials; the PFX, `.p8`
   and passwords are written to `$RUNNER_TEMP` with restrictive permissions and
   removed afterwards.
