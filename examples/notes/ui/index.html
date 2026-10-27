@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>notes · Owasidea</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 520px; margin: 3rem auto; padding: 0 1rem; }
+    form { display: flex; gap: 0.5rem; }
+    input { flex: 1; padding: 0.5rem; }
+    button { padding: 0.5rem 1rem; }
+    ul { padding-left: 1.25rem; }
+    .muted { color: #666; }
+  </style>
+</head>
+<body>
+  <h1>notes</h1>
+  <p class="muted">Stored by the <code>notes</code> component in the host key/value store.</p>
+
+  <form id="add-form">
+    <input id="text" aria-label="New note" placeholder="Write a note" />
+    <button type="submit">Add</button>
+  </form>
+
+  <p data-testid="count">0 notes</p>
+  <ul id="notes" data-testid="notes"></ul>
+  <button id="clear" type="button">Clear all</button>
+  <p id="error" role="alert"></p>
+
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

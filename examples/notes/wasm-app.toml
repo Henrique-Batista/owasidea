@@ -1,0 +1,45 @@
+[app]
+name = "notes"
+version = "0.1.0"
+identifier = "dev.owasidea.examples.notes"
+
+[host]
+addr = "127.0.0.1:8802"
+
+[plugins.notes]
+path = "plugins/notes"
+language = "rust"
+type = "library"
+# Host key/value store. Without this permission the component cannot import
+# `poc:host/host-kv`, and `owasidea build` rejects it.
+kv = "notes:read-write"
+
+[dev]
+watch = true
+hot_reload = true
+ui_addr = "127.0.0.1:5202"
+
+[test]
+ui = ["npx", "playwright", "test", "--config", "playwright.config.ts"]
+
+[[smoke.calls]]
+plugin = "notes"
+function = "clear-notes"
+expect_equals = 0
+
+[[smoke.calls]]
+plugin = "notes"
+function = "add-note"
+args = ["buy milk"]
+expect_equals = 1
+
+[[smoke.calls]]
+plugin = "notes"
+function = "add-note"
+args = ["ship it"]
+expect_equals = 2
+
+[[smoke.calls]]
+plugin = "notes"
+function = "list-notes"
+expect_equals = "buy milk\nship it"

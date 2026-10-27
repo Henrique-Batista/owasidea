@@ -1,0 +1,9 @@
+package poc:notes@0.1.0;
+
+world notes {
+    import poc:host/host-kv@0.1.0;
+
+    export add-note: func(text: string) -> u32;
+    export list-notes: func() -> string;
+    export clear-notes: func() -> u32;
+}

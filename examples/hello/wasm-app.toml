@@ -1,0 +1,32 @@
+[app]
+name = "hello"
+version = "0.1.0"
+identifier = "dev.owasidea.examples.hello"
+
+[host]
+addr = "127.0.0.1:8801"
+
+[plugins.greeter]
+path = "plugins/greeter"
+language = "rust"
+type = "library"
+
+[dev]
+watch = true
+hot_reload = true
+ui_addr = "127.0.0.1:5201"
+
+[test]
+ui = ["npx", "playwright", "test", "--config", "playwright.config.ts"]
+
+[[smoke.calls]]
+plugin = "greeter"
+function = "greet"
+args = ["world"]
+expect_equals = "Hello, world! (from Rust)"
+
+[[smoke.calls]]
+plugin = "greeter"
+function = "sum"
+args = [2, 40]
+expect_equals = 42

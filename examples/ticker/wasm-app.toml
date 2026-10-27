@@ -1,0 +1,25 @@
+[app]
+name = "ticker"
+version = "0.1.0"
+identifier = "dev.owasidea.examples.ticker"
+
+[host]
+addr = "127.0.0.1:8803"
+
+# `service` plugins keep one instance alive between start and stop. Stopping
+# drops the instance; the next start begins from a fresh component state.
+[plugins.ticker]
+path = "plugins/ticker"
+language = "rust"
+type = "service"
+
+[dev]
+watch = true
+hot_reload = true
+ui_addr = "127.0.0.1:5203"
+
+[test]
+ui = ["npx", "playwright", "test", "--config", "playwright.config.ts"]
+
+[[smoke.services]]
+plugin = "ticker"

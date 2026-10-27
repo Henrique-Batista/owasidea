@@ -1,0 +1,6 @@
+package poc:ticker@0.1.0;
+
+world ticker {
+    export start-service: func() -> result<string, string>;
+    export service-status: func() -> bool;
+}
