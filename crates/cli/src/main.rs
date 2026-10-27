@@ -1,7 +1,9 @@
+use anyhow::Context;
 use clap::{Parser, Subcommand};
 mod build_id;
 mod config;
 mod config_render;
+mod dev_desktop;
 mod type_parser;
 mod wit_types;
 use config::*;
@@ -86,6 +88,9 @@ enum Commands {
         /// Reuse the current build instead of running `owasidea build`.
         #[arg(long)]
         no_build: bool,
+        /// Also launch `cargo tauri dev` with a generated dev config.
+        #[arg(long)]
+        desktop: bool,
     },
     /// Run the current build without file watching.
     #[command(about = "Run the current build without file watching.")]
@@ -537,13 +542,13 @@ async fn main() -> anyhow::Result<()> {
             )
             .await
         }
-        Commands::Dev { no_build } => {
+        Commands::Dev { no_build, desktop } => {
             let addr = cli
                 .http_addr
                 .clone()
                 .or_else(|| read_host_addr(&cli.config))
                 .unwrap_or_else(|| "127.0.0.1:0".to_string());
-            cmd_dev(&cli.config, &cli.manifest_dir, &addr, !no_build).await
+            cmd_dev(&cli.config, &cli.manifest_dir, &addr, !no_build, desktop).await
         }
         Commands::Run => {
             let addr = cli
@@ -2014,11 +2019,13 @@ fn walkdir(dir: std::path::PathBuf) -> Vec<std::path::PathBuf> {
     out
 }
 
+#[allow(clippy::zombie_processes)]
 async fn cmd_dev(
     config_path: &Path,
     manifest_dir: &Path,
     http_addr: &str,
     build: bool,
+    desktop: bool,
 ) -> anyhow::Result<()> {
     let _ = read_app_config(config_path)?;
     let root = app_root(config_path);
@@ -2069,10 +2076,14 @@ async fn cmd_dev(
     } else {
         None
     };
+    let mut tauri_dev_config_path: Option<PathBuf> = None;
     if let Some(port) = ui_port {
         let ui_url = format!("http://127.0.0.1:{port}");
         match crate::config_render::write_tauri_dev_config(config_path, &ui_url) {
-            Ok(path) => println!("Tauri dev config: {} (devUrl {})", path.display(), ui_url),
+            Ok(path) => {
+                println!("Tauri dev config: {} (devUrl {})", path.display(), ui_url);
+                tauri_dev_config_path = Some(path);
+            }
             Err(error) => eprintln!("warning: could not write tauri.dev.conf.json: {error}"),
         }
     }
@@ -2134,7 +2145,7 @@ async fn cmd_dev(
     );
 
     let mut children: Vec<std::process::Child> = Vec::new();
-    if ui_present {
+    if ui_present && !desktop {
         let vite = ui_dir.join("node_modules/vite/bin/vite.js");
         if !vite.is_file() {
             anyhow::bail!(
@@ -2152,7 +2163,7 @@ async fn cmd_dev(
                 ui_port.as_str(),
                 "--strictPort",
             ])
-            .env("OWASIDEA_HOST", &host_url)
+            .env("OWASIDEA_HOST", host_url.clone())
             .current_dir(&ui_dir)
             .spawn()?;
         children.push(child);
@@ -2165,24 +2176,169 @@ async fn cmd_dev(
             watch_paths,
             plugins_dir,
             manifest_dir.to_path_buf(),
-            host_url,
+            host_url.clone(),
             dev.hot_reload,
         );
     }
 
-    let mut host_task =
-        tokio::spawn(async move { owasidea_host::run(manifest_dir, http_addr).await });
-    let result = tokio::select! {
-        joined = &mut host_task => match joined {
-            Ok(result) => result,
-            Err(error) => Err(anyhow::anyhow!("host task failed: {error}")),
-        },
-        _ = wait_for_shutdown() => {
-            println!("[dev] shutting down; stopping UI and host");
-            host_task.abort();
-            let _ = host_task.await;
-            Ok(())
+    if desktop {
+        if !ui_present {
+            anyhow::bail!("--desktop requires a UI (ui/package.json)");
         }
+        let tauri_config = tauri_dev_config_path
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("tauri.dev.conf.json was not generated"))?;
+        if !crate::dev_desktop::cargo_tauri_available() {
+            anyhow::bail!("`cargo tauri` not found; install it with `cargo install tauri-cli`");
+        }
+        let cfg = read_app_config(config_path)?;
+        let desktop_path = cfg.desktop.as_ref().and_then(|d| d.path.clone());
+        let desktop_dir = match desktop_path {
+            Some(path) => app_path(&root, path),
+            None if root.join("desktop/Cargo.toml").is_file() => root.join("desktop"),
+            None => root.join("crates/desktop"),
+        };
+        if !desktop_dir.join("tauri.conf.json").is_file() {
+            anyhow::bail!(
+                "Tauri config not found in {}; add [desktop] path",
+                desktop_dir.display()
+            );
+        }
+
+        // Host as a subprocess so its logs can be prefixed and managed.
+        let exe = std::env::current_exe()?;
+        let host_child = std::process::Command::new(&exe)
+            .arg("--config")
+            .arg(config_path)
+            .arg("--manifest-dir")
+            .arg(&manifest_dir)
+            .arg("--http-addr")
+            .arg(http_addr.clone())
+            .arg("run")
+            .current_dir(&root)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .context("failed to spawn host")?;
+        let mut host_child = crate::dev_desktop::spawn_prefixed(host_child, "host");
+
+        let ui_port_str = ui_port.unwrap().to_string();
+        let vite_child = std::process::Command::new("node")
+            .args([
+                "node_modules/vite/bin/vite.js",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                ui_port_str.as_str(),
+                "--strictPort",
+            ])
+            .env("OWASIDEA_HOST", host_url.clone())
+            .current_dir(&ui_dir)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .context("failed to spawn vite")?;
+        let mut vite_child = crate::dev_desktop::spawn_prefixed(vite_child, "ui");
+
+        let host_url_for_tauri = host_url.clone();
+        let http_addr_for_tauri = http_addr.to_string();
+        let runtime_path = Some(root.join("ui").join(".owasidea").join("runtime.json"));
+        let inv = crate::dev_desktop::tauri_dev_invocation(
+            &desktop_dir,
+            &tauri_config,
+            &host_url_for_tauri,
+            &http_addr_for_tauri,
+            &manifest_dir,
+            runtime_path.as_deref(),
+        );
+        let mut tauri_cmd = std::process::Command::new(&inv.program);
+        tauri_cmd.args(&inv.args).current_dir(&inv.cwd);
+        for (k, v) in &inv.env {
+            tauri_cmd.env(k, v);
+        }
+        let tauri_child = tauri_cmd
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .context("failed to spawn tauri")?;
+        let tauri_child = crate::dev_desktop::spawn_prefixed(tauri_child, "tauri");
+
+        // Wait for any process to exit or Ctrl+C.
+        let tauri_slot = std::sync::Arc::new(std::sync::Mutex::new(Some(tauri_child)));
+        let tauri_slot_wait = tauri_slot.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || loop {
+            let mut guard = match tauri_slot_wait.lock() {
+                Ok(g) => g,
+                Err(_) => return,
+            };
+            if let Some(child) = guard.as_mut() {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        guard.take();
+                        let _ = tx.send(Ok(status));
+                        return;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        guard.take();
+                        let _ = tx.send(Err(error));
+                        return;
+                    }
+                }
+            } else {
+                return;
+            }
+            drop(guard);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        });
+
+        tokio::select! {
+            _ = wait_for_shutdown() => {
+                println!("[dev] shutting down; stopping tauri, UI and host");
+            }
+            res = tokio::task::spawn_blocking(move || rx.recv()) => {
+                match res {
+                    Ok(Ok(Ok(status))) => println!("[tauri] exited with {status}"),
+                    _ => println!("[tauri] exited"),
+                }
+            }
+        }
+        if let Ok(mut guard) = tauri_slot.lock() {
+            if let Some(mut child) = guard.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+        let _ = host_child.kill();
+        let _ = host_child.wait();
+        let _ = vite_child.kill();
+        let _ = vite_child.wait();
+        return Ok(());
+    }
+
+    let host_task = if !desktop {
+        Some(tokio::spawn(async move {
+            owasidea_host::run(manifest_dir.clone(), http_addr.clone()).await
+        }))
+    } else {
+        None
+    };
+    let result = if let Some(mut host_task) = host_task {
+        tokio::select! {
+            joined = &mut host_task => match joined {
+                Ok(result) => result,
+                Err(error) => Err(anyhow::anyhow!("host task failed: {error}")),
+            },
+            _ = wait_for_shutdown() => {
+                println!("[dev] shutting down; stopping UI and host");
+                host_task.abort();
+                let _ = host_task.await;
+                Ok(())
+            }
+        }
+    } else {
+        Ok(())
     };
     for mut child in children {
         let _ = child.kill();

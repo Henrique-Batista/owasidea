@@ -462,3 +462,12 @@ fn registry_install_downloads_only_after_checksum_and_signature_validation() {
     assert_eq!(public_key.len(), 32);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn dev_help_documents_desktop_flag() {
+    let mut cmd = Command::cargo_bin("owasidea").unwrap();
+    let output = cmd.args(["dev", "--help"]).output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--desktop"));
+}
