@@ -1633,7 +1633,10 @@ fn cmd_build(config: &Path, manifest_dir: &Path, sign: bool) -> anyhow::Result<(
     // Build ordinary plugins first so composed clients can resolve their
     // dependency components in the same invocation.
     let mut ordered: Vec<(&String, &PluginSection)> = plugins.iter().collect();
-    ordered.sort_by_key(|(name, plugin)| (!plugin.compose_with.is_empty(), (*name).clone()));
+    ordered.sort_by_key(|(name, plugin)| {
+        let is_ui = plugin.runtime.as_deref() == Some("js-wasm");
+        (is_ui, !plugin.compose_with.is_empty(), (*name).clone())
+    });
 
     let mut ui_index = Vec::new();
     for (name, p) in ordered {
@@ -1955,6 +1958,46 @@ fn build_ui_plugin(
     let destination = root.join("ui/public/plugins").join(name);
     let marker = root.join("ui/.owasidea/ui-plugins").join(name);
     let destination = sync_static_tree(root, &source, &destination, &marker)?;
+    // Validate and normalize opt-in bridge entries: each must be "plugin.export"
+    // where plugin manifest exists and export is declared.
+    let mut bridge: Vec<String> = Vec::new();
+    for item in &plugin.bridge {
+        let item = item.trim();
+        if item.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = item.split('.').collect();
+        if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
+            anyhow::bail!("invalid bridge entry {item:?} for {name}: expected \"plugin.export\"");
+        }
+        let (plugin_name, export_name) = (parts[0], parts[1]);
+        let manifest_path = manifest_dir.join(format!("{plugin_name}.manifest.json"));
+        let raw = std::fs::read_to_string(&manifest_path).map_err(|_| {
+            anyhow::anyhow!(
+                "bridge entry {item:?} for {name}: plugin manifest not found: {}",
+                manifest_path.display()
+            )
+        })?;
+        let manifest: serde_json::Value = serde_json::from_str(&raw)?;
+        let exports = manifest
+            .get("exports")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let found = exports.iter().any(|e| {
+            e.get("name").and_then(|v| v.as_str()) == Some(export_name)
+                || e.as_str() == Some(export_name)
+        });
+        if !found {
+            anyhow::bail!(
+                "bridge entry {item:?} for {name}: export {export_name:?} not found in {plugin_name} manifest"
+            );
+        }
+        bridge.push(format!("{plugin_name}.{export_name}"));
+    }
+    bridge.sort();
+    bridge.dedup();
+
     let (digest, files) = hash_static_tree(&destination)?;
     let manifest = serde_json::json!({
         "name": name,
@@ -1977,7 +2020,7 @@ fn build_ui_plugin(
         "composition": {"strategy": "webview", "entry": false},
         "metadata": {
             "build_id": build_id,
-            "ui": {"entry": entry, "sha256": digest, "files": files},
+            "ui": {"entry": entry, "sha256": digest, "files": files, "bridge": bridge},
             "description": "Webview-only UI plugin"
         }
     });
@@ -2002,6 +2045,7 @@ fn ui_index_entry(name: &str, manifest: &serde_json::Value) -> serde_json::Value
         ),
         "sha256": ui["sha256"],
         "files": ui["files"],
+        "bridge": ui.get("bridge").cloned().unwrap_or_else(|| serde_json::json!([])),
     })
 }
 

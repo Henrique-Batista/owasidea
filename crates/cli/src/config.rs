@@ -232,6 +232,8 @@ pub struct PluginSection {
     pub build: Vec<String>,
     #[serde(default)]
     pub compose_with: Vec<String>,
+    #[serde(default)]
+    pub bridge: Vec<String>,
 }
 
 fn default_true() -> bool {
