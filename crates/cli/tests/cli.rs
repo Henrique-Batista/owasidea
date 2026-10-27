@@ -27,6 +27,53 @@ fn bundle_help_documents_host_lib_isolation() {
 }
 
 #[test]
+fn signing_plan_skips_without_secrets() {
+    let mut cmd = Command::cargo_bin("owasidea").unwrap();
+    cmd.args(["signing", "plan", "--platform", "windows", "--json"]);
+    for key in [
+        "WINDOWS_CERTIFICATE",
+        "WINDOWS_CERTIFICATE_PASSWORD",
+        "OWASIDEA_WINDOWS_SIGN_COMMAND",
+        "OWASIDEA_WINDOWS_CERT_THUMBPRINT",
+    ] {
+        cmd.env_remove(key);
+    }
+    let output = cmd.output().unwrap();
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["mode"], "skip");
+    assert_eq!(value["sign"], false);
+    assert_eq!(value["notarize"], false);
+}
+
+#[test]
+fn signing_plan_rejects_partial_windows_certificate() {
+    let mut cmd = Command::cargo_bin("owasidea").unwrap();
+    cmd.args(["signing", "plan", "--platform", "windows", "--json"])
+        .env("WINDOWS_CERTIFICATE", "not-a-real-certificate")
+        .env_remove("WINDOWS_CERTIFICATE_PASSWORD")
+        .env_remove("OWASIDEA_WINDOWS_SIGN_COMMAND")
+        .env_remove("OWASIDEA_WINDOWS_CERT_THUMBPRINT");
+    let output = cmd.output().unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("WINDOWS_CERTIFICATE_PASSWORD"));
+    // The helper must never echo the secret value.
+    assert!(!stderr.contains("not-a-real-certificate"));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("not-a-real-certificate"));
+}
+
+#[test]
+fn signing_help_documents_require() {
+    let mut cmd = Command::cargo_bin("owasidea").unwrap();
+    let output = cmd.args(["signing", "plan", "--help"]).output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--platform"));
+    assert!(stdout.contains("--require"));
+}
+
+#[test]
 fn bundle_rejects_unknown_profile() {
     let mut cmd = Command::cargo_bin("owasidea").unwrap();
     cmd.args(["bundle", "--no-build", "--profile", "qa"]);

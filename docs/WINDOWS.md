@@ -26,6 +26,7 @@
 | Rust / Go / TypeScript / C# WASI plugins | expected, native toolchains | WASI components cross-build |
 | C / C++ WASI plugins | wasi-sdk for Windows + MSYS2 `make` or `build` override | wasi-sdk Linux works |
 | Tauri shell | supported; NSIS `.exe` | **not supported** by `owasidea bundle` |
+| Signed NSIS/MSI (Authenticode) | supported with a code-signing certificate (PFX or Azure Artifact Signing) | **not supported**: signing must run on Windows |
 | UI plugins / Vite | supported | n/a |
 | `owasidea dev/test` | supported (Playwright on Windows) | n/a |
 
@@ -109,6 +110,36 @@ The Tauri updater uses the NSIS `.exe` (`windows-x86_64` in `latest.json`);
 signed on Windows too (`TAURI_SIGNING_PRIVATE_KEY` in the Windows runner), and
 the same `latest.json` is published for every platform. See
 [`UPDATER.md`](UPDATER.md).
+
+## Code signing (Authenticode)
+
+The Windows CI job signs the NSIS/MSI installers when a certificate is
+configured; without one it still builds them and prints a skip message. The
+decision comes from `owasidea signing plan --platform windows --json`, so a
+local build can be checked without a certificate.
+
+Two supported setups:
+
+- **PFX in secrets** — `WINDOWS_CERTIFICATE` (base64 `.pfx`) and
+  `WINDOWS_CERTIFICATE_PASSWORD`. CI imports it into
+  `Cert:\CurrentUser\My`, and the CLI writes the thumbprint into
+  `tauri.generated.conf.json` so Tauri calls `signtool`.
+- **Azure Artifact Signing / custom tool** — set the
+  `OWASIDEA_WINDOWS_SIGN_COMMAND` variable (for example
+  `artifact-signing-cli -e https://<region>.codesigning.azure.net -a <account> -c <profile> -d Owasidea %1`)
+  and the Azure secrets. CI installs `artifact-signing-cli` only when that
+  command is configured.
+
+Verify an installer with:
+
+```powershell
+Get-ChildItem .\dist\*-setup.exe | Get-AuthenticodeSignature |
+  Format-List Status, StatusMessage, SignerCertificate
+```
+
+`Status` must be `Valid`. Full variable list, skip semantics and limitations:
+[`CODE_SIGNING.md`](CODE_SIGNING.md). Signing cannot be cross-compiled from
+Linux: `signtool` and the certificate store are Windows-only.
 
 ## Cross-compilation from Linux
 

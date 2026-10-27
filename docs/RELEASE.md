@@ -62,11 +62,34 @@ Three independent keys exist; do not mix them:
 | --- | --- | --- |
 | `[signing]` Ed25519 | plugin manifests (`owasidea build`/`bundle`) | `keys/owasidea.key` locally; CI secret in release |
 | `TAURI_SIGNING_PRIVATE_KEY` (minisign) | updater artifacts (`.sig`) | CI secret only |
-| OS code-signing certificate | Windows Authenticode / macOS notarization | CI secret (RL-03) |
+| OS code-signing certificate | Windows Authenticode / macOS notarization | CI secrets only (RL-03) |
 
 Without the updater key, `bundle` still succeeds but produces no `.sig` files
 and skips `latest.json` with a message. That is the expected local/CI default.
 See [`UPDATER.md`](UPDATER.md) for key generation and verification.
+
+### 3.1 Code signing and notarization (RL-03)
+
+Code signing is independent from the updater key. CI asks the CLI for a plan
+before bundling:
+
+```bash
+owasidea signing plan --platform windows --json   # skip | windows-pfx | windows-trusted-signing
+owasidea signing plan --platform macos --json     # skip | macos-developer-id
+```
+
+With no certificate secrets the plan is `skip`: the bundle still runs, the
+artifacts stay unsigned, and a workflow step lists the missing names. A partial
+configuration (certificate without password/identity) is `invalid` and fails the
+plan step instead of silently producing an unsigned release.
+
+Windows uses `WINDOWS_CERTIFICATE` + `WINDOWS_CERTIFICATE_PASSWORD` (PFX
+imported into the runner store) or `OWASIDEA_WINDOWS_SIGN_COMMAND` (Azure
+Artifact Signing and other tools). macOS uses `APPLE_CERTIFICATE` +
+`APPLE_CERTIFICATE_PASSWORD` + `APPLE_SIGNING_IDENTITY`, plus one notarization
+credential set. Signed artifacts are verified in CI (`Get-AuthenticodeSignature`,
+`codesign --verify`, `xcrun stapler validate`). Full variable list, commands,
+verification and limitations: [`CODE_SIGNING.md`](CODE_SIGNING.md).
 
 ---
 
@@ -105,6 +128,20 @@ The `full` job in `.github/workflows/ci.yml` reads:
 | `OWASIDEA_UPDATER_PUBKEY` | variable (inline public key) | yes |
 | `OWASIDEA_UPDATER_BASE_URL` | variable | optional |
 | `OWASIDEA_UPDATE_CHANNEL` | variable | optional (`stable`) |
+
+Code signing (RL-03) is optional and independent; see
+[`CODE_SIGNING.md`](CODE_SIGNING.md):
+
+| Name | Kind | Required for |
+| --- | --- | --- |
+| `WINDOWS_CERTIFICATE` / `WINDOWS_CERTIFICATE_PASSWORD` | secret | Windows PFX signing |
+| `OWASIDEA_WINDOWS_SIGN_COMMAND` | variable | Windows custom signing (Azure Artifact Signing, relic, ...) |
+| `OWASIDEA_WINDOWS_DIGEST_ALGORITHM` / `OWASIDEA_WINDOWS_TIMESTAMP_URL` | variable | Windows PFX metadata |
+| `OWASIDEA_WINDOWS_CERT_THUMBPRINT` | variable | preinstalled Windows certificate (self-hosted) |
+| `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` / `AZURE_TENANT_ID` | secret | Azure Artifact Signing |
+| `APPLE_CERTIFICATE` / `APPLE_CERTIFICATE_PASSWORD` / `APPLE_SIGNING_IDENTITY` | secret | macOS Developer ID signing |
+| `APPLE_API_KEY` / `APPLE_API_ISSUER` / `APPLE_API_KEY_P8` | secret | macOS notarization (API key) |
+| `APPLE_ID` / `APPLE_PASSWORD` / `APPLE_TEAM_ID` | secret | macOS notarization (Apple ID) |
 
 Missing values are not an error: the bundle step runs without updater signing,
 the updater verification step is skipped, and a message explains what to set.
