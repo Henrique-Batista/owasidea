@@ -65,10 +65,10 @@ Status permitidos: `todo`, `doing`, `review`, `done`, `blocked`.
 | AX-06 | done | wt-config | 5689baf + fc95870 (merge fec01b4) | fmt/clippy/test | `doctor --fix/--yes`; `tools.lock`; dry-run sem sudo |
 | AX-07 | done | wt-authoring | 861cd23 + 1b82fea (merge 09f3ce2) | fmt/clippy/test + schema --check | JSON Schema (`additionalProperties:false`); comando `schema`; docs |
 | AX-08 | done | wt-authoring | 47cc2db (merge b50c283) | fmt/clippy/test | `plugin add` com preview de permissões; `--dry-run`; sem overwrite |
-| PX-01 | todo | — | — | — | — |
+| PX-01 | done | wt-host | 0b96e3c + 4f4abaa (merge b0fa228) | fmt/clippy/test (71 unit + 13 CLI) | `permissions.lock.json`/diff; `--fail-on-widen`; endpoint/UI |
 | PX-02 | todo | — | — | — | — |
 | PX-03 | todo | — | — | — | — |
-| PX-04 | todo | — | — | — | — |
+| PX-04 | done | wt-config | 8c48009 (merge 14d212a) | fmt/clippy/test | `plugins.lock`; `install --locked`; `update`; `outdated`; digest/assinatura |
 | PX-05 | todo | — | — | — | — |
 | PX-06 | todo | — | — | — | — |
 | PX-07 | todo | — | — | — | — |
