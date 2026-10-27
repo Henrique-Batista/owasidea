@@ -957,6 +957,7 @@ mod tests {
 
     #[test]
     fn profile_tauri_config_uses_merged_identity_and_csp() {
+        let _g = ENV_LOCK.lock().unwrap();
         let root = profile_root("identity");
         let dev = profile_cfg(
             "127.0.0.1:9100",
@@ -992,6 +993,7 @@ mod tests {
 
     #[test]
     fn render_tauri_for_profile_writes_distinct_configs() {
+        let _g = ENV_LOCK.lock().unwrap();
         let root = profile_root("render");
         let dev = profile_cfg(
             "127.0.0.1:9100",
@@ -1001,7 +1003,15 @@ mod tests {
         let prod = profile_cfg("127.0.0.1:9200", "Shipyard", "dev.owasidea.shipyard");
 
         let path = render_tauri_for_profile(&root, &dev, Some("dev")).unwrap();
-        assert_eq!(path, root.join("desktop").join("tauri.generated.conf.json"));
+        // The renderer resolves the app root, so Windows returns the long
+        // (canonical) form while temp_dir() may use 8.3 short names.
+        assert_eq!(
+            path,
+            root.canonicalize()
+                .unwrap()
+                .join("desktop")
+                .join("tauri.generated.conf.json")
+        );
         let dev_raw = std::fs::read_to_string(&path).unwrap();
         render_tauri_for_profile(&root, &prod, Some("prod")).unwrap();
         let prod_raw = std::fs::read_to_string(&path).unwrap();
@@ -1013,6 +1023,7 @@ mod tests {
 
     #[test]
     fn tauri_content_generates_bundle_resources_from_config() {
+        let _g = ENV_LOCK.lock().unwrap();
         let root = profile_root("resources");
         std::fs::create_dir_all(root.join("manifests")).unwrap();
         std::fs::create_dir_all(root.join("plugins/core-rust")).unwrap();

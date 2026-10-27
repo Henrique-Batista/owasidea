@@ -263,10 +263,13 @@ type = "executable"
         let cfg = merged_config(&config, None).unwrap();
         let dev = output_dir(&dir, &cfg, Some("dev")).unwrap();
         let prod = output_dir(&dir, &cfg, Some("prod")).unwrap();
-        assert_eq!(dev, dir.join("dist/dev"));
-        assert_eq!(prod, dir.join("dist/prod"));
+        // safe_resolve canonicalizes the root, which on Windows expands 8.3
+        // short names; compare against the canonical root.
+        let root = dir.canonicalize().unwrap();
+        assert_eq!(dev, root.join("dist/dev"));
+        assert_eq!(prod, root.join("dist/prod"));
         assert_ne!(dev, prod);
-        assert_eq!(output_dir(&dir, &cfg, None).unwrap(), dir.join("dist"));
+        assert_eq!(output_dir(&dir, &cfg, None).unwrap(), root.join("dist"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

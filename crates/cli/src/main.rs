@@ -6590,12 +6590,11 @@ mod dev_tests {
         )
         .unwrap();
         let config_path = root.join("wasm-app.toml");
+        // Relative to the config file; absolute Windows paths would need TOML
+        // escaping and would hide that requirement in the product.
         std::fs::write(
             &config_path,
-            format!(
-                "[app]\nname = \"Demo\"\n\n[desktop]\npath = \"{}\"\n",
-                desktop.display()
-            ),
+            "[app]\nname = \"Demo\"\n\n[desktop]\npath = \"desktop\"\n",
         )
         .unwrap();
         let path =
