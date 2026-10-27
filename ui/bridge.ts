@@ -4,18 +4,21 @@ const BRIDGE_MAX_IN_FLIGHT = 4;
 const BRIDGE_MAX_TIMEOUT_MS = 30000;
 const BRIDGE_DEFAULT_TIMEOUT_MS = 10000;
 const BRIDGE_HANDSHAKE_TIMEOUT_MS = 5000;
+const BRIDGE_SEEN_IDS_LIMIT = 1024;
 
 type BridgePlugin = { name: string; bridge?: string[] };
 
-interface Pending {
-  resolve: (v: any) => void;
-  reject: (e: any) => void;
-  controller: AbortController;
-  timer: number;
-}
-
 function byteLength(value: unknown): number {
   return new TextEncoder().encode(JSON.stringify(value)).length;
+}
+
+function makeNonce(): string {
+  if (typeof crypto === 'undefined' || typeof crypto.getRandomValues !== 'function') {
+    throw new Error('crypto unavailable');
+  }
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
 function codeForStatus(status: number, body: string): string {
@@ -36,12 +39,20 @@ export function attachBridge(frame: HTMLIFrameElement, plugin: BridgePlugin, hos
   let disposed = false;
   let inFlight = 0;
   const seenIds = new Set<string>();
+  const controllers = new Map<string, AbortController>();
+
+  const resetState = () => {
+    inFlight = 0;
+    seenIds.clear();
+    controllers.clear();
+  };
 
   const disposePort = () => {
     if (currentPort) {
       try { currentPort.close(); } catch {}
       currentPort = null;
     }
+    resetState();
   };
 
   const handleRequest = async (port: MessagePort, msg: any) => {
@@ -52,9 +63,15 @@ export function attachBridge(frame: HTMLIFrameElement, plugin: BridgePlugin, hos
       if (id) reply({ id, ok: false, error: { code, message } });
     };
 
-    // cancel
-    if (msg?.type === 'cancel' && id) {
-      // best-effort: cannot abort tracked easily here; handled by id map below
+    if (msg?.type === 'cancel') {
+      const cid = typeof msg?.id === 'string' ? msg.id : null;
+      if (cid && controllers.has(cid)) {
+        const c = controllers.get(cid)!;
+        c.abort();
+        controllers.delete(cid);
+        reply({ id: cid, ok: false, error: { code: 'CANCELLED', message: 'cancelled' } });
+        inFlight = Math.max(0, inFlight - 1);
+      }
       return;
     }
 
@@ -77,16 +94,22 @@ export function attachBridge(frame: HTMLIFrameElement, plugin: BridgePlugin, hos
 
     if (inFlight >= BRIDGE_MAX_IN_FLIGHT) { fail('CONCURRENCY_LIMIT', 'too many in-flight'); return; }
 
-    let timeoutMs = BRIDGE_DEFAULT_TIMEOUT_MS;
-    if (typeof msg?.timeout === 'number' && Number.isFinite(msg.timeout)) {
-      timeoutMs = Math.max(1, Math.min(BRIDGE_MAX_TIMEOUT_MS, Math.floor(msg.timeout)));
+    // bound seenIds
+    if (seenIds.size >= BRIDGE_SEEN_IDS_LIMIT) {
+      // drop oldest-ish by clearing
+      seenIds.clear();
     }
-
     seenIds.add(id);
-    inFlight++;
 
+    inFlight++;
     const controller = new AbortController();
-    const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+    controllers.set(id, controller);
+    const timer = window.setTimeout(() => controller.abort(), BRIDGE_DEFAULT_TIMEOUT_MS);
+
+    let timedOut = false;
+    // ensure abort due to timeout marks timedOut
+    const onAbort = () => { timedOut = true; };
+    controller.signal.addEventListener('abort', onAbort);
 
     try {
       const res = await fetch(`${host}/plugin/${encodeURIComponent(pluginName)}/call`, {
@@ -95,27 +118,23 @@ export function attachBridge(frame: HTMLIFrameElement, plugin: BridgePlugin, hos
         body: JSON.stringify({ function: fnName, args }),
         signal: controller.signal,
       });
+      window.clearTimeout(timer);
+
       const text = await res.text();
       let data: any = null;
       try { data = text ? JSON.parse(text) : null; } catch { data = null; }
 
-      if (timer) window.clearTimeout(timer);
-
       if (!res.ok) {
-        const code = codeForStatus(res.status, text);
-        // refine arity/type if message indicates
-        let finalCode = code;
+        let finalCode = codeForStatus(res.status, text);
         const msgText = (data?.error ?? text ?? '').toString().toLowerCase();
         if (msgText.includes('expected') && msgText.includes('args')) finalCode = 'ARITY_MISMATCH';
         else if (msgText.includes('type') || msgText.includes('json')) finalCode = 'TYPE_MISMATCH';
-        // map 404 export
         if (res.status === 404 && msgText.includes('export')) finalCode = 'UNKNOWN_EXPORT';
         if (res.status === 404 && msgText.includes('plugin')) finalCode = 'UNKNOWN_PLUGIN';
         fail(finalCode, 'host error');
         return;
       }
 
-      // response size check
       if (byteLength(data) > BRIDGE_MAX_RESPONSE_BYTES) {
         fail('PAYLOAD_TOO_LARGE', 'response too large');
         return;
@@ -129,13 +148,19 @@ export function attachBridge(frame: HTMLIFrameElement, plugin: BridgePlugin, hos
         reply({ id, ok: true, result: data });
       }
     } catch (err: any) {
-      if (timer) window.clearTimeout(timer);
-      if (err?.name === 'AbortError') {
-        fail('TIMEOUT', 'timeout');
+      window.clearTimeout(timer);
+      if (timedOut || err?.name === 'AbortError') {
+        // distinguish cancel vs timeout: if controller aborted due to cancel request, controllers no longer has id
+        if (!controllers.has(id)) {
+          fail('CANCELLED', 'cancelled');
+        } else {
+          fail('TIMEOUT', 'timeout');
+        }
       } else {
         fail('INTERNAL', 'internal error');
       }
     } finally {
+      controllers.delete(id);
       inFlight = Math.max(0, inFlight - 1);
     }
   };
@@ -148,15 +173,22 @@ export function attachBridge(frame: HTMLIFrameElement, plugin: BridgePlugin, hos
     const port2 = channel.port2;
     currentPort = port1;
 
-    const nonce = (crypto as any).randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
+    let nonce = '';
+    try {
+      nonce = makeNonce();
+    } catch {
+      try { port1.close(); } catch {}
+      currentPort = null;
+      return;
+    }
 
-    let activated = false;
     let helloReceived = false;
 
     const handshakeTimer = window.setTimeout(() => {
       if (!helloReceived) {
         try { port1.close(); } catch {}
         if (currentPort === port1) currentPort = null;
+        resetState();
       }
     }, BRIDGE_HANDSHAKE_TIMEOUT_MS);
 
@@ -169,21 +201,13 @@ export function attachBridge(frame: HTMLIFrameElement, plugin: BridgePlugin, hos
         }
         helloReceived = true;
         window.clearTimeout(handshakeTimer);
-        activated = true;
         port1.onmessage = (e: MessageEvent) => {
-          const m = e.data;
-          if (m?.type === 'cancel') {
-            // no-op here; cancellation handled by id not tracked in this simple impl
-            return;
-          }
-          void handleRequest(port1, m);
+          void handleRequest(port1, e.data);
         };
         return;
       }
-      // before activation ignore
     };
 
-    // send init control
     try {
       (frame.contentWindow as any)?.postMessage(
         { type: 'owasidea:bridge:init', version: 1, nonce, port: port2 },
@@ -197,11 +221,7 @@ export function attachBridge(frame: HTMLIFrameElement, plugin: BridgePlugin, hos
   };
 
   frame.addEventListener('load', handleLoad);
-  // if already loaded
-  // trigger once
-  // handleLoad will be called on next load; also call if complete
   if (frame.contentDocument?.readyState === 'complete') {
-    // small delay to ensure contentWindow
     window.setTimeout(handleLoad, 0);
   }
 
@@ -211,5 +231,3 @@ export function attachBridge(frame: HTMLIFrameElement, plugin: BridgePlugin, hos
     disposePort();
   };
 }
-
-
