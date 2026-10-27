@@ -78,12 +78,30 @@ enum Commands {
         /// Download and install wasi-sdk + the reactor adapter when missing.
         #[arg(long)]
         install_wasi_sdk: bool,
-        /// Show (and optionally run) install commands for missing tools.
+        /// Compatibility alias: plan/install missing required tools.
         #[arg(long)]
         fix: bool,
-        /// Execute safe install commands (no sudo) when --fix is set.
+        /// Execute the plan (sudo commands only with --allow-sudo).
         #[arg(long)]
         yes: bool,
+        /// Install every required and optional toolchain for this OS.
+        #[arg(long)]
+        install_all: bool,
+        /// Install one tool by its tools.lock name (repeatable).
+        #[arg(long, value_name = "TOOL")]
+        install: Vec<String>,
+        /// Print the plan without executing it (this is the default).
+        #[arg(long)]
+        dry_run: bool,
+        /// Execute the plan; alias for --yes.
+        #[arg(long)]
+        execute: bool,
+        /// Allow commands containing sudo to run with --yes/--execute.
+        #[arg(long)]
+        allow_sudo: bool,
+        /// Re-run install commands even when the tool is already present.
+        #[arg(long)]
+        force: bool,
     },
     /// Manage plugins (create new plugins).
     #[command(about = "Manage plugins (create new plugins).")]
@@ -711,7 +729,7 @@ async fn install_wasi_sdk() -> anyhow::Result<PathBuf> {
                 std::fs::copy(&adapter, &bundled)?;
             }
         }
-        println!("wasi-sdk already installed at {}", dest.display());
+        eprintln!("wasi-sdk already installed at {}", dest.display());
         return Ok(dest);
     }
     let version = std::env::var("WASI_SDK_VERSION").unwrap_or_else(|_| "34.0".to_string());
@@ -725,7 +743,7 @@ async fn install_wasi_sdk() -> anyhow::Result<PathBuf> {
     let url = format!(
         "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-{release}/wasi-sdk-{version}-{arch}-{platform}.tar.gz"
     );
-    println!("downloading {}", url);
+    eprintln!("downloading {}", url);
     let response = reqwest::get(&url).await?.error_for_status()?;
     let bytes = response.bytes().await?;
     let temp = std::env::temp_dir().join(format!("owasidea-wasi-sdk-{}", std::process::id()));
@@ -820,7 +838,27 @@ async fn main() -> anyhow::Result<()> {
             install_wasi_sdk,
             fix,
             yes,
-        } => cmd_doctor(cli.json, install_wasi_sdk, fix, yes).await,
+            install_all,
+            install,
+            dry_run,
+            execute,
+            allow_sudo,
+            force,
+        } => {
+            cmd_doctor(doctor::DoctorOptions {
+                json: cli.json,
+                install_wasi_sdk,
+                fix,
+                yes,
+                execute,
+                dry_run,
+                allow_sudo,
+                force,
+                install_all,
+                install,
+            })
+            .await
+        }
         Commands::Plugin { cmd } => match cmd {
             PluginCmd::New {
                 name,
@@ -1245,13 +1283,10 @@ fn cmd_init(dir: Option<PathBuf>, preset: &str, yes: bool, json: bool) -> anyhow
     Ok(())
 }
 
-async fn cmd_doctor(
-    json: bool,
-    install_wasi_sdk_requested: bool,
-    fix: bool,
-    yes: bool,
-) -> anyhow::Result<()> {
-    if install_wasi_sdk_requested {
+async fn cmd_doctor(options: doctor::DoctorOptions) -> anyhow::Result<()> {
+    // Historical `--install-wasi-sdk` on its own downloads immediately and
+    // then prints the normal report. All new install modes go through the plan.
+    if options.legacy_wasi_sdk_only() {
         let sdk = install_wasi_sdk().await?;
         if find_wasi_adapter(Some(&sdk)).is_none() {
             eprintln!(
@@ -1259,6 +1294,122 @@ async fn cmd_doctor(
             );
         }
     }
+
+    if let Some(selection) = options.selection() {
+        let lock = doctor::load_lock(&doctor::lock_path())?;
+        let (wasi_sdk, _) = wasi_toolchain();
+        let statuses = doctor::probe_tools(&lock.tools, Some(wasi_sdk.is_some()));
+        let plan_options = doctor::PlanOptions {
+            execute: options.execute(),
+            allow_sudo: options.allow_sudo,
+            force: options.force,
+        };
+        let mut plan = doctor::build_plan(
+            &lock,
+            doctor::detect_os(),
+            &statuses,
+            &selection,
+            plan_options,
+        )
+        .map_err(anyhow::Error::msg)?;
+
+        if !options.json {
+            if plan_options.execute {
+                print!("{}", doctor::render_plan_entries(&plan));
+            } else {
+                print!("{}", doctor::render_plan(&plan));
+            }
+        }
+
+        if plan_options.execute {
+            let mut executed = 0usize;
+            let mut failed = 0usize;
+            let mut installed_wasi = false;
+            for entry in plan.entries.clone() {
+                if entry.action != doctor::PlanAction::Install {
+                    continue;
+                }
+                let Some(command) = entry.command.as_deref() else {
+                    continue;
+                };
+                if options.json {
+                    eprintln!("running ({}): {command}", entry.tool);
+                } else {
+                    println!("running ({}): {command}", entry.tool);
+                }
+                executed += 1;
+                let success = if entry.tool == doctor::WASI_SDK_TOOL {
+                    match install_wasi_sdk().await {
+                        Ok(_) => {
+                            installed_wasi = true;
+                            true
+                        }
+                        Err(error) => {
+                            eprintln!("failed ({}): {error}", entry.tool);
+                            false
+                        }
+                    }
+                } else if options.json {
+                    // Keep stdout machine-readable; installer output goes to
+                    // stderr while `--json` is active.
+                    match shell_command(command).output() {
+                        Ok(output) => {
+                            if !output.stdout.is_empty() {
+                                eprint!("{}", String::from_utf8_lossy(&output.stdout));
+                            }
+                            if !output.stderr.is_empty() {
+                                eprint!("{}", String::from_utf8_lossy(&output.stderr));
+                            }
+                            if !output.status.success() {
+                                eprintln!("failed ({}): {command}", entry.tool);
+                            }
+                            output.status.success()
+                        }
+                        Err(error) => {
+                            eprintln!("failed ({}): {command}: {error}", entry.tool);
+                            false
+                        }
+                    }
+                } else {
+                    match shell_command(command).status() {
+                        Ok(status) if status.success() => true,
+                        Ok(status) => {
+                            eprintln!("failed ({}): {command} ({status})", entry.tool);
+                            false
+                        }
+                        Err(error) => {
+                            eprintln!("failed ({}): {command}: {error}", entry.tool);
+                            false
+                        }
+                    }
+                };
+                if !success {
+                    failed += 1;
+                }
+            }
+
+            let (wasi_sdk_now, adapter_now) = wasi_toolchain();
+            if installed_wasi && adapter_now.is_none() {
+                eprintln!(
+                    "warning: reactor adapter not found; run a Rust/Wasmtime build or set WASI_PREVIEW1_ADAPTER"
+                );
+            }
+            let statuses = doctor::probe_tools(&lock.tools, Some(wasi_sdk_now.is_some()));
+            plan.apply_outcome(&lock, &selection, &statuses, executed, failed);
+            if !options.json {
+                print!("{}", doctor::render_summary(&plan));
+            }
+        }
+
+        if options.json {
+            println!("{}", serde_json::to_string_pretty(&plan)?);
+        }
+        if !plan.summary.ok {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
     let checks = [
         ("rustc", "rustc --version"),
         ("cargo", "cargo --version"),
@@ -1272,8 +1423,10 @@ async fn cmd_doctor(
         ("clang (C/C++)", "clang --version"),
         ("dotnet (C#)", "dotnet --version"),
         ("jco (JS/TS)", "jco --version"),
+        ("componentize-go (Go)", "componentize-go --version"),
         ("componentize-dotnet (C#)", "componentize-dotnet --version"),
         ("trunk (Yew UI)", "trunk --version"),
+        ("wasmtime (runtime)", "wasmtime --version"),
         ("python3 (optional)", "python3 --version"),
     ];
     let (wasi_sdk, wasi_adapter) = wasi_toolchain();
@@ -1300,7 +1453,7 @@ async fn cmd_doctor(
             .unwrap_or(false);
         results.push((name, ok, true));
     }
-    if json {
+    if options.json {
         let mut v: Vec<_> = results
             .iter()
             .map(|(n, ok, opt)| serde_json::json!({"tool": n, "ok": ok, "optional": opt}))
@@ -1327,36 +1480,6 @@ async fn cmd_doctor(
                 .map(|path| path.display().to_string())
                 .unwrap_or_else(|| "MISSING (needed for C/C++)".to_string());
             println!("{:20} {}", name, label);
-        }
-    }
-    if fix {
-        // dry-run by default: only print install commands; never run sudo.
-        let os = doctor::detect_os();
-        for (name, ok, opt) in &results {
-            if *ok || *opt {
-                continue;
-            }
-            // find command from tools.lock if present
-            let mut cmd = None;
-            if let Ok(content) = std::fs::read_to_string("tools.lock") {
-                if let Ok(lock) = doctor::parse_lock(&content) {
-                    for spec in &lock.tools {
-                        if spec.name == *name {
-                            cmd = doctor::install_command(spec, os);
-                        }
-                    }
-                }
-            }
-            if let Some(c) = cmd {
-                if yes && !c.contains("sudo") {
-                    println!("running: {}", c);
-                    let _ = shell_command(&c).status();
-                } else {
-                    println!("install (dry-run): {}", c);
-                }
-            } else {
-                println!("no install command known for {}", name);
-            }
         }
     }
     if results.iter().any(|(_, ok, opt)| !ok && !*opt) {

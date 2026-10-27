@@ -29,17 +29,103 @@ Scaffold an app directory with `wasm-app.toml`, `plugins/`, `manifests/`, `ui/`,
 and `docs/`. The UI files are the generic dashboard: `index.html`, `main.ts`,
 `vite.config.ts`, `tsconfig.json`, and `package.json`.
 
-### `doctor [--json] [--install-wasi-sdk]`
+### `doctor [--json] [--install-all] [--install <tool>]... [--fix] [--dry-run] [--yes|--execute] [--allow-sudo] [--force] [--install-wasi-sdk]`
 
 Check required tooling (rustc, cargo, cargo-component, wasm-tools, go, node, npm)
-and optional per-language tools (clang, dotnet, jco, componentize-dotnet, trunk,
-python3). It also reports wasi-sdk and the WASI preview1 reactor adapter. Exits
-non-zero when a required tool is missing.
+and optional per-language tools (clang, dotnet, jco, componentize-go,
+componentize-dotnet, trunk, wasmtime, python3). It also reports wasi-sdk and the
+WASI preview1 reactor adapter. Exits non-zero when a required tool is missing.
 
-`--install-wasi-sdk` downloads wasi-sdk 34 to `~/.local/wasi-sdk` (or
-`WASI_SDK_DIR`) and copies the reactor adapter when available. On Windows it
-downloads the Windows archive and detects `%USERPROFILE%\.local\wasi-sdk`
-plus `clang.exe`.
+Install planning reads `tools.lock` (the current directory or its nearest
+ancestor) and is platform-aware (`linux`, `macos`, `windows`):
+
+- `--install-all` plans every required **and** optional toolchain for the
+  current OS, including wasi-sdk through the built-in downloader.
+- `--install <tool>` plans one `tools.lock` name and is repeatable. An unknown
+  name fails with the list of valid names.
+- `--fix` is a compatibility alias for planning the missing **required** tools.
+- `--dry-run` prints the plan without executing it and is the default.
+- `--yes` / `--execute` runs the planned commands. `--force` re-plans installs
+  for tools that are already present (wasi-sdk's built-in installer still skips
+  an existing SDK).
+- `--allow-sudo` only applies together with `--yes`/`--execute`. Without it,
+  commands containing `sudo` are printed as `SKIP sudo` and are not executed.
+  `doctor` never prompts and never hides a skipped command.
+- Selection precedence is `--install-all`, then explicit `--install`, then
+  `--fix`, then `--install-wasi-sdk`. `--dry-run` without a selection plans the
+  missing required tools.
+
+Commands run in dependency order (rustup/cargo before cargo-installed tools, Go
+before componentize-go, Node/npm before jco, .NET before
+componentize-dotnet) and identical commands are only planned once (for example
+`node` and `npm` on macOS/Windows). When a probe reports a parseable version, a
+tool below `min_version` is treated as missing and re-planned.
+
+`--install-wasi-sdk` on its own keeps its historical behavior: it downloads
+wasi-sdk 34 to `~/.local/wasi-sdk` (or `WASI_SDK_DIR`) and copies the reactor
+adapter when available, then prints the normal report. Combined with a plan flag
+it is folded into the plan; combine it with `--yes` to execute that plan. On
+Windows it downloads the Windows archive and detects
+`%USERPROFILE%\.local\wasi-sdk` plus `clang.exe`.
+
+Examples:
+
+```bash
+# Linux (sudo only when explicitly allowed)
+owasidea doctor --install-all                      # print the full plan
+owasidea doctor --install-all --yes --allow-sudo   # run it
+owasidea doctor --fix --yes                        # missing required tools only
+owasidea doctor --install jco --install trunk --yes
+owasidea doctor --install wasi-sdk --yes
+
+# macOS (Homebrew commands need no sudo)
+owasidea doctor --install-all
+owasidea doctor --install-all --yes
+owasidea doctor --install dotnet --install trunk --yes
+
+# Windows (winget; run from a shell that can show the UAC prompt)
+owasidea doctor --install-all
+owasidea doctor --install-all --yes
+owasidea doctor --install componentize-dotnet --yes
+```
+
+`doctor --json` without install flags keeps the stable probe array
+(`{tool, ok, optional}` plus `path` for wasi-sdk and the adapter). With an
+install selection, `--json` emits one plan document:
+
+```json
+{
+  "platform": "linux",
+  "dry_run": true,
+  "allow_sudo": false,
+  "entries": [
+    {
+      "tool": "jco",
+      "required": false,
+      "present": false,
+      "action": "install",
+      "command": "npm install -g @bytecodealliance/jco",
+      "platform": "linux",
+      "reason": "not found"
+    }
+  ],
+  "summary": {
+    "total": 1,
+    "install": 1,
+    "skip": 0,
+    "skip_sudo": 0,
+    "manual": 0,
+    "executed": 0,
+    "failed": 0,
+    "missing_required": [],
+    "ok": true
+  }
+}
+```
+
+`action` is one of `install`, `skip`, `skip-sudo`, `manual`. `--json` writes
+installer output to stderr so stdout stays parseable. The command exits non-zero
+when a required tool in the selection is still missing after the run.
 
 ### `plugin new <name> --lang <language> [--type library|executable|service|ui] [--runtime wasi-component|js-wasm]`
 
