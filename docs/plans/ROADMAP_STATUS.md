@@ -76,10 +76,10 @@ Status permitidos: `todo`, `doing`, `review`, `done`, `blocked`.
 | PX-09 | done | wt-config | e60d558 (merge 13a11e8) | fmt/clippy/test | shell helper cmd/sh; paths/temp; CI Windows fmt/clippy/test; docs |
 | RL-01 | done | wt-config | d5ec289 (merge 9c38779) | fmt/clippy/test (86 unit + 17 CLI) | `--profile`; overlays `wasm-app.<profile>.toml`; dist/<profile> |
 | RL-02 | done | wt-release | 981cef4 (merge 90be49b) | fmt/clippy/test (100 unit + 19 CLI) + cargo check desktop + latest.json local | `tauri-plugin-updater`; `[updater]`/env; `owasidea latest` + `--check`; CI opcional; docs/UPDATER.md |
-| RL-03 | done | wt-release | — | fmt/clippy/test (unit + CLI), YAML parse, skip/dry-run matrix | `owasidea signing plan`; PFX/Azure Windows + Developer ID/notarization macOS; CI opcional; docs/CODE_SIGNING.md |
+| RL-03 | done | wt-release | d1f83a6 (merge 3f6b697) | fmt/clippy/test (118 unit + 22 CLI), YAML parse, skip/dry-run | `signing plan`; PFX/Azure Windows + Developer ID/notarization; CI opcional |
 | RL-04 | todo | — | — | — | — |
 | RL-05 | done | wt-host | b6b1a66 (merge 434383d) | fmt/clippy/test com e sem feature `otel`; teste live OTLP | spans `plugin.call`/`http.request`; endpoint OTLP; desligado sem feature/env |
-| RL-06 | review | wt-host | — | fmt/clippy/test com e sem feature `streaming`; hardening SEC | ADR-0005 + jobs/SSE/cancel; ressalvas SEC corrigidas (cancel/queued, limites, panic, SSE, bind) |
+| RL-06 | done | wt-host | 5ce286c + 4b5e8d0 (merge 8fcea64) | fmt/clippy/test com/sem `streaming` (32 streaming); SEC aprovado | ADR-0005; jobs/SSE/cancel; limites/panic/bind; ressalvas menores |
 | RL-07 | todo | — | — | — | — |
 | G0 | todo | — | — | — | — |
 | G1 | todo | — | — | — | — |
