@@ -47,6 +47,12 @@ enum Commands {
         /// Target directory (optional; prompted interactively).
         #[arg(help = "Target directory.")]
         dir: Option<PathBuf>,
+        /// Scaffold preset: minimal, desktop, or full.
+        #[arg(long, default_value = "full")]
+        preset: String,
+        /// Non-interactive mode (use defaults).
+        #[arg(long)]
+        yes: bool,
     },
     /// Check required and optional toolchain dependencies.
     #[command(about = "Check required and optional toolchain dependencies.")]
@@ -286,6 +292,14 @@ enum PluginCmd {
         r#type: Option<String>,
         #[arg(long)]
         runtime: Option<String>,
+        #[arg(long)]
+        template: Option<String>,
+        #[arg(long)]
+        with_test: bool,
+        #[arg(long)]
+        no_register: bool,
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -586,7 +600,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let manifest_dir = app_path(&app_root(&cli.config), &cli.manifest_dir);
     match cli.cmd {
-        Commands::Init { dir } => cmd_init(dir, cli.json),
+        Commands::Init { dir, preset, yes } => cmd_init(dir, &preset, yes, cli.json),
         Commands::Doctor { install_wasi_sdk } => cmd_doctor(cli.json, install_wasi_sdk).await,
         Commands::Plugin { cmd } => match cmd {
             PluginCmd::New {
@@ -594,7 +608,22 @@ async fn main() -> anyhow::Result<()> {
                 lang,
                 r#type,
                 runtime,
-            } => cmd_plugin_new(name, lang, r#type, runtime, &cli.config, cli.json),
+                template,
+                with_test,
+                no_register,
+                dry_run,
+            } => cmd_plugin_new(
+                name,
+                lang,
+                r#type,
+                runtime,
+                template,
+                with_test,
+                no_register,
+                dry_run,
+                &cli.config,
+                cli.json,
+            ),
         },
         Commands::Build { no_sign } => cmd_build(&cli.config, &cli.manifest_dir, !no_sign),
         Commands::Test {
@@ -779,8 +808,8 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-fn cmd_init(dir: Option<PathBuf>, json: bool) -> anyhow::Result<()> {
-    let interactive = !json && std::io::stdin().is_terminal();
+fn cmd_init(dir: Option<PathBuf>, preset: &str, yes: bool, json: bool) -> anyhow::Result<()> {
+    let interactive = !json && !yes && std::io::stdin().is_terminal();
     let target_dir = match dir {
         Some(d) => d,
         None => {
@@ -810,19 +839,25 @@ fn cmd_init(dir: Option<PathBuf>, json: bool) -> anyhow::Result<()> {
         let content = templates::render(templates::INIT_WASM_APP_TOML, &[("app_name", &app_name)]);
         std::fs::write(&cfg, content)?;
     }
-    for sub in ["plugins", "manifests", "ui", "docs"] {
+    let mut subs = vec!["plugins", "manifests", "docs"];
+    if preset != "minimal" {
+        subs.push("ui");
+    }
+    for sub in &subs {
         std::fs::create_dir_all(target_dir.join(sub))?;
     }
-    for (relative, contents) in [
-        ("package.json", include_str!("../../../ui/package.json")),
-        ("index.html", include_str!("../../../ui/index.html")),
-        ("main.ts", include_str!("../../../ui/main.ts")),
-        ("vite.config.ts", include_str!("../../../ui/vite.config.ts")),
-        ("tsconfig.json", include_str!("../../../ui/tsconfig.json")),
-    ] {
-        let path = target_dir.join("ui").join(relative);
-        if !path.exists() {
-            std::fs::write(path, contents)?;
+    if preset != "minimal" {
+        for (relative, contents) in [
+            ("package.json", include_str!("../../../ui/package.json")),
+            ("index.html", include_str!("../../../ui/index.html")),
+            ("main.ts", include_str!("../../../ui/main.ts")),
+            ("vite.config.ts", include_str!("../../../ui/vite.config.ts")),
+            ("tsconfig.json", include_str!("../../../ui/tsconfig.json")),
+        ] {
+            let path = target_dir.join("ui").join(relative);
+            if !path.exists() {
+                std::fs::write(path, contents)?;
+            }
         }
     }
     println!("scaffolded {}", target_dir.display());
@@ -915,11 +950,16 @@ async fn cmd_doctor(json: bool, install_wasi_sdk_requested: bool) -> anyhow::Res
 }
 
 #[allow(clippy::useless_format)]
+#[allow(clippy::too_many_arguments)]
 fn cmd_plugin_new(
     name: Option<String>,
     lang: Option<String>,
     kind: Option<String>,
     runtime: Option<String>,
+    template: Option<String>,
+    with_test: bool,
+    no_register: bool,
+    dry_run: bool,
     config_path: &Path,
     json: bool,
 ) -> anyhow::Result<()> {
@@ -1015,6 +1055,19 @@ fn cmd_plugin_new(
     let dir = root.join("plugins").join(&name);
     if dir.exists() {
         anyhow::bail!("plugin directory already exists: {}", dir.display());
+    }
+    if dry_run {
+        println!("dry-run: would create {}", dir.display());
+        if !no_register {
+            println!("dry-run: would register in {}", config_path.display());
+        }
+        if with_test {
+            println!("dry-run: would add test/smoke");
+        }
+        if let Some(t) = &template {
+            println!("dry-run: template={t}");
+        }
+        return Ok(());
     }
     let runtime = runtime.unwrap_or_else(|| {
         if kind == "ui" {
@@ -1158,7 +1211,9 @@ fn cmd_plugin_new(
             "uno" => &["dotnet", "build"],
             _ => &[],
         };
-        register_plugin_config(config_path, &name, &lang, &kind, &runtime, ui_build)?;
+        if !no_register {
+            register_plugin_config(config_path, &name, &lang, &kind, &runtime, ui_build)?;
+        }
         if json {
             println!(
                 "{}",
@@ -1296,7 +1351,9 @@ fn cmd_plugin_new(
             &[("name", &name), ("lang", &lang), ("kind", &kind)],
         ),
     )?;
-    register_plugin_config(config_path, &name, &lang, &kind, &runtime, &[])?;
+    if !no_register {
+        register_plugin_config(config_path, &name, &lang, &kind, &runtime, &[])?;
+    }
     if json {
         println!(
             "{}",
