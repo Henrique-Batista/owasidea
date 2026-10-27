@@ -1566,6 +1566,9 @@ fn generate_manifest(
         "name": name,
         "version": version,
         "language": language,
+        "schema_version": 1,
+        "host_abi": owasidea_host::HOST_ABI,
+        "min_host": owasidea_host::HOST_VERSION,
         "abi": abi,
         "runtime": "wasi-component",
         "type": kind,
@@ -1961,6 +1964,9 @@ fn build_ui_plugin(
         "version": plugin.version.as_deref().unwrap_or(app_version),
         "language": plugin.language,
         "abi": "webview-v1",
+        "schema_version": 1,
+        "host_abi": owasidea_host::HOST_ABI,
+        "min_host": owasidea_host::HOST_VERSION,
         "runtime": "js-wasm",
         "type": "ui",
         "component": "",
@@ -2912,6 +2918,30 @@ fn cmd_validate(config: &Path, manifest_dir: &Path) -> anyhow::Result<()> {
         }
         let mraw = std::fs::read_to_string(&manifest_path)?;
         let manifest: serde_json::Value = serde_json::from_str(&mraw)?;
+        // CT-08 ABI fields
+        let sv = manifest["schema_version"].as_u64().unwrap_or(0);
+        if sv != 1 {
+            println!("{}: bad schema_version {}", name, sv);
+            errors += 1;
+        }
+        if let Some(ha) = manifest["host_abi"].as_str() {
+            if ha != owasidea_host::HOST_ABI {
+                println!("{}: host_abi {} != {}", name, ha, owasidea_host::HOST_ABI);
+                errors += 1;
+            }
+        }
+        if let Some(mh) = manifest["min_host"].as_str() {
+            // simple check: must be <= host version
+            if mh > owasidea_host::HOST_VERSION {
+                println!(
+                    "{}: min_host {} > host {}",
+                    name,
+                    mh,
+                    owasidea_host::HOST_VERSION
+                );
+                errors += 1;
+            }
+        }
         if p.runtime.as_deref() == Some("js-wasm") {
             if manifest["runtime"].as_str() != Some("js-wasm")
                 || manifest["type"].as_str() != Some("ui")

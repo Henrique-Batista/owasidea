@@ -31,6 +31,13 @@ use wasmtime_wasi::{
 use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpCtxView, WasiHttpView};
 
 // ---------------------------------------------------------------------------
+// Host ABI version (CT-08)
+// ---------------------------------------------------------------------------
+
+pub const HOST_ABI: &str = "1";
+pub const HOST_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+// ---------------------------------------------------------------------------
 // Manifest (subset used by the POC host)
 // ---------------------------------------------------------------------------
 
@@ -40,6 +47,12 @@ struct Manifest {
     version: String,
     language: String,
     abi: String,
+    #[serde(default = "default_schema_version")]
+    schema_version: u32,
+    #[serde(default)]
+    host_abi: Option<String>,
+    #[serde(default)]
+    min_host: Option<String>,
     #[serde(default)]
     runtime: Option<String>,
     #[serde(rename = "type")]
@@ -132,6 +145,9 @@ struct FsPerm {
 
 fn default_true() -> bool {
     true
+}
+fn default_schema_version() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -1198,6 +1214,9 @@ async fn reload(
     })?;
     let manifest: Manifest = serde_json::from_str(&raw)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid manifest: {e}")))?;
+    if let Err(e) = validate_manifest_abi(&manifest) {
+        return Err((StatusCode::BAD_REQUEST, format!("invalid manifest: {e}")));
+    }
     if manifest.name != name {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -2433,9 +2452,45 @@ fn load_manifests(dir: &Path) -> Result<Vec<(Manifest, PathBuf)>> {
         let raw = std::fs::read_to_string(&path)?;
         let manifest: Manifest =
             serde_json::from_str(&raw).with_context(|| format!("invalid manifest {path:?}"))?;
+        validate_manifest_abi(&manifest).with_context(|| format!("invalid manifest {path:?}"))?;
         out.push((manifest, path));
     }
     Ok(out)
+}
+
+fn validate_manifest_abi(manifest: &Manifest) -> Result<()> {
+    if manifest.schema_version != 1 {
+        anyhow::bail!(
+            "plugin {} manifest schema_version {} is not supported (expected 1)",
+            manifest.name,
+            manifest.schema_version
+        );
+    }
+    if let Some(host_abi) = &manifest.host_abi {
+        if host_abi != HOST_ABI {
+            anyhow::bail!(
+                "plugin {} manifest host_abi {} is incompatible with host {}",
+                manifest.name,
+                host_abi,
+                HOST_ABI
+            );
+        }
+    }
+    if let Some(min_host) = &manifest.min_host {
+        let required = semver::Version::parse(min_host)
+            .with_context(|| format!("invalid min_host {min_host:?}"))?;
+        let host = semver::Version::parse(HOST_VERSION)
+            .with_context(|| format!("invalid host version {HOST_VERSION:?}"))?;
+        if required > host {
+            anyhow::bail!(
+                "plugin {} manifest min_host {} is greater than host {}",
+                manifest.name,
+                min_host,
+                HOST_VERSION
+            );
+        }
+    }
+    Ok(())
 }
 
 fn validate_plugin_name(name: &str) -> Result<()> {
