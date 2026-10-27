@@ -10,6 +10,7 @@ mod dev_desktop;
 mod dev_next_steps;
 mod doctor;
 mod errors;
+mod go_build;
 mod logs;
 mod permissions;
 mod profile;
@@ -1617,7 +1618,13 @@ fn cmd_plugin_new(
                 dir.join("go.mod"),
                 templates::render(templates::GO_MOD, &[("name", &name)]),
             )?;
-            std::fs::write(dir.join("main.go"), templates::GO_MAIN)?;
+            // componentize-go generates wit_exports.go at build time and calls
+            // into this package for the WIT exports.
+            std::fs::create_dir_all(dir.join("export_wit_world"))?;
+            std::fs::write(
+                dir.join("export_wit_world").join("wit_bindings.go"),
+                templates::GO_EXPORT_IMPL,
+            )?;
         }
         "typescript" | "javascript" => {
             std::fs::write(
@@ -2235,53 +2242,26 @@ fn cmd_build(
             }
             "go" => {
                 let _ = generate_wit(&plugin_dir);
-                let wit_dir = plugin_dir.join("wit");
-                let status = if wit_dir.exists() {
-                    // derive world arg from generated WIT
-                    let mut world_arg: Option<String> = None;
-                    let world_re = regex::Regex::new(r"world\s+([A-Za-z0-9_-]+)").unwrap();
-                    let pkg_re =
-                        regex::Regex::new(r"package\s+([A-Za-z0-9_-]+:[A-Za-z0-9_-]+)").unwrap();
-                    if let Ok(entries) = std::fs::read_dir(&wit_dir) {
-                        for e in entries.flatten() {
-                            let pp = e.path();
-                            if pp.extension().and_then(|x| x.to_str()) == Some("wit") {
-                                if let Ok(content) = std::fs::read_to_string(&pp) {
-                                    let world =
-                                        world_re.captures(&content).map(|c| c[1].to_string());
-                                    let pkg = pkg_re.captures(&content).map(|c| c[1].to_string());
-                                    if let (Some(w), Some(pk)) = (world, pkg) {
-                                        world_arg = Some(format!("{}/{}", pk, w));
-                                    }
-                                }
-                                break;
-                            }
-                        }
-                    }
-                    let mut cmd = std::process::Command::new("go");
-                    cmd.current_dir(&plugin_dir);
-                    if let Some(wa) = &world_arg {
-                        cmd.args([
-                            "tool",
-                            "componentize-go",
-                            "-d",
-                            "wit",
-                            "-w",
-                            wa,
-                            "build",
-                            "-o",
-                            "main.wasm",
-                        ]);
-                    } else {
-                        cmd.args(["tool", "componentize-go", "build"]);
-                    }
-                    cmd.status()?
+                let world_arg = go_build::world_arg(&plugin_dir);
+                go_build::ensure_bindings(&plugin_dir, world_arg.as_deref())?;
+                let mut cmd = std::process::Command::new("go");
+                cmd.current_dir(&plugin_dir);
+                if let Some(wa) = &world_arg {
+                    cmd.args([
+                        "tool",
+                        "componentize-go",
+                        "-d",
+                        "wit",
+                        "-w",
+                        wa,
+                        "build",
+                        "-o",
+                        "main.wasm",
+                    ]);
                 } else {
-                    std::process::Command::new("go")
-                        .args(["tool", "componentize-go", "build"])
-                        .current_dir(&plugin_dir)
-                        .status()?
-                };
+                    cmd.args(["tool", "componentize-go", "build"]);
+                }
+                let status = cmd.status()?;
                 if !status.success() {
                     anyhow::bail!("go build failed for {}", name);
                 }

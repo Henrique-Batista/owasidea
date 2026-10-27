@@ -19,7 +19,7 @@ pub const RUST_LIB_SERVICE: &str = include_str!("../templates/plugin/rust/lib_se
 pub const RUST_LIB: &str = include_str!("../templates/plugin/rust/lib.rs");
 
 pub const GO_MOD: &str = include_str!("../templates/plugin/go/go.mod");
-pub const GO_MAIN: &str = include_str!("../templates/plugin/go/main.go");
+pub const GO_EXPORT_IMPL: &str = include_str!("../templates/plugin/go/wit_bindings.go");
 
 pub const TS_PACKAGE_JSON: &str = include_str!("../templates/plugin/ts/package.json");
 pub const TS_INDEX: &str = include_str!("../templates/plugin/ts/index.ts");

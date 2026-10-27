@@ -1,4 +1,4 @@
-module owasidea/{{name}}
+module wit_component
 
 go 1.27.1
 

@@ -56,13 +56,52 @@ Notes:
 2. `jco componentize src/index.ts --wit wit --world name -o name.component.wasm`.
 3. Generate manifest.
 
+## Verify the scaffolds compile (FIX-03)
+
+`scripts/test-templates.sh` scaffolds a temporary app
+(`owasidea init --preset minimal`), creates Rust, Go, and TypeScript library
+plugins with `owasidea plugin new`, runs `owasidea build`, and validates every
+generated manifest (name, runtime, `greet` export, component file, checksum).
+
+```bash
+cargo build -p owasidea-cli
+scripts/test-templates.sh                              # skip missing toolchains
+OWASIDEA_TEMPLATE_STRICT=1 scripts/test-templates.sh   # fail on missing toolchain
+OWASIDEA_TEMPLATE_LANGS=rust,go scripts/test-templates.sh
+```
+
+Environment:
+
+- `OWASIDEA_BIN`: CLI binary. Defaults to `$CARGO_TARGET_DIR/debug/owasidea`
+  when `CARGO_TARGET_DIR` is set, otherwise `target/debug/owasidea`.
+- `OWASIDEA_TEMPLATE_LANGS`: comma-separated list, default
+  `rust,go,typescript`.
+- `OWASIDEA_TEMPLATE_STRICT=1`: a missing toolchain is an error instead of a
+  skip.
+- `OWASIDEA_TEMPLATE_KEEP=1`: keep the temporary app and print its path.
+- `OWASIDEA_TEMPLATE_BUILD=1 cargo test -p owasidea-cli --test cli
+  templates_build`: run the same script from the Rust integration test. Without
+  the variable the test is skipped, so the default `cargo test` stays fast.
+
+CI runs the script in the fast job with all three languages and strict mode.
+The TypeScript scaffold does not need a global `jco`: `npm install` brings the
+`@bytecodealliance/jco` devDependency used by `npm run build`.
+
 ## Go (componentize-go)
 
-1. `go.mod` with `tool github.com/bytecodealliance/componentize-go`.
-2. Write `main.go` implementing WIT exports.
-3. Build: `go tool componentize-go build`.
+1. `go.mod` with `tool github.com/bytecodealliance/componentize-go` and
+   `module wit_component` (the generated glue imports
+   `wit_component/export_wit_world`).
+2. Implement the WIT exports in `export_wit_world/wit_bindings.go`.
+3. Build with `owasidea build`. On the first build it generates `wit_exports.go`
+   with `componentize-go bindings`, runs `go mod tidy`, then runs
+   `componentize-go build`; later builds reuse `wit_exports.go`.
 4. Copy `main.wasm` to `*.component.wasm`.
 5. Generate manifest with `--language go`.
+
+To regenerate the glue after changing WIT, delete `wit_exports.go` (or run
+`go tool componentize-go -d wit -w <pkg>/<world> bindings` manually) and build
+again.
 
 ## Manifest rules
 
