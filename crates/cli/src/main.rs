@@ -1134,21 +1134,6 @@ fn cmd_plugin_new(
                 )?;
                 std::fs::write(dir.join("nuget.config"), templates::CSHARP_NUGET_CONFIG)?;
             }
-            std::fs::create_dir_all(dir.join("wit"))?;
-            std::fs::create_dir_all(dir.join("wit/deps/host"))?;
-            std::fs::write(
-                dir.join("wit").join(format!("{name}.wit")),
-                templates::render(templates::CSHARP_WIT, &[("name", &name)]),
-            )?;
-            std::fs::write(
-                dir.join("wit/deps/host/host.wit"),
-                templates::CSHARP_HOST_WIT,
-            )?;
-            std::fs::write(
-                dir.join(format!("{}Impl.cs", name)),
-                templates::render(templates::CSHARP_IMPL, &[("name", &name)]),
-            )?;
-            std::fs::write(dir.join("nuget.config"), templates::CSHARP_NUGET_CONFIG)?;
         }
         "c" | "cpp" | "c++" => {
             let ext = if lang == "c" { "c" } else { "cpp" };
