@@ -43,6 +43,10 @@ for name in "${EXAMPLES[@]}"; do
     echo "error: no example named '$name' ($dir/wasm-app.toml missing)" >&2
     exit 2
   fi
+  # Keep each example's Rust target separate. Examples and the repository app
+  # can share crate names (both have `notes`), and a shared CARGO_TARGET_DIR
+  # would let one build overwrite the other's .wasm.
+  export CARGO_TARGET_DIR="$dir/.owasidea/cargo-target"
   echo "==> $name: build"
   "$BIN" --config "$dir/wasm-app.toml" build
   echo "==> $name: smoke"
