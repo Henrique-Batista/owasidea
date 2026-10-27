@@ -95,8 +95,9 @@ ui_entry = "wwwroot/index.html"
 - The iframe uses `sandbox="allow-scripts allow-forms"`; it does not receive
   same-origin, top-navigation, or popup privileges.
 - UI plugins do not receive WASI, host KV/log, filesystem, socket, or native host
-  capabilities. v1 does not provide a privileged parent-to-plugin host API
-  bridge; keep UI plugins standalone or add explicit app-owned integration.
+  capabilities. v1 keeps the iframe isolated by default; an opt-in, least-privilege
+  parent-to-plugin bridge is planned (ADR-0004, CT-05/CT-06/CT-07) and remains
+  denied unless explicitly allowlisted.
 - UI assets are included in local desktop bundles; remote registry entries list
   each file separately and verify it against the same manifest digest map.
 
@@ -137,9 +138,10 @@ iframe with an integrity error.
 
 - The iframe uses `sandbox="allow-scripts allow-forms"`; it has an opaque origin
   and cannot read the parent DOM, cookies, or storage.
-- No host bridge is provided. A UI plugin that needs live host data must be
-  replaced by a main-dashboard view, or the app must add an explicit,
-  least-privilege `postMessage` protocol (not part of v1).
+- No host bridge is enabled by default. A UI plugin that needs live host data
+  must either be a main-dashboard view or opt into the planned allowlisted bridge
+  (ADR-0004, CT-05/CT-06/CT-07); the protocol remains least-privilege and
+  denied unless allowlisted.
 - UI plugins receive no WASI, KV, filesystem, socket, or native capabilities.
 - Keep each plugin's bundle self-contained: relative asset URLs (`base: './'`)
   and no cross-origin runtime fetches unless the Tauri CSP allows them.

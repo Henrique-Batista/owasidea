@@ -1,6 +1,6 @@
 # ADR 0004 — Bridge de UI plugin (MessageChannel, nonce, allowlist)
 
-- Status: Proposed (SEC review pendente)
+- Status: Accepted (REV/SEC reviewed)
 - Data: 2026-10-26
 - Relacionado: CT-05, CT-06, CT-07, RF-04, RF-05, ADR 0001, ADR 0003
 
@@ -56,29 +56,43 @@ args/aridade/tipos, timeout, limites de payload e concorrência.
    `port2` é transferido **uma única vez**, no handshake, e o parent mantém o
    mapeamento `port -> {iframe, uiPlugin, nonce, inFlight}`.
 
-4. **Handshake com nonce.**
-   - Parent gera `nonce` (128 bits, `crypto.randomUUID()` ou equivalente) por
-     sessão de iframe.
-   - Após o `load` do iframe (e após verificação de hashes, que ocorre antes da
-     criação do iframe), o parent envia:
-     ```js
-     iframe.contentWindow.postMessage(
-       { type: 'owasidea:bridge:init', version: 1, nonce, port: port2 },
-       '*', [port2]
-     );
-     ```
-   - O iframe (SDK) responde pelo `port2`:
-     ```js
-     port.postMessage({ type: 'owasidea:bridge:hello', nonce });
-     ```
-   - O parent valida `nonce` contra o pendente daquele iframe e só então ativa
-     o `port1` (`port1.onmessage = handleRequest`). Qualquer `hello` com nonce
-     errado/duplicado é descartado e o port fechado.
+4. **Handshake com nonce (fluxo explícito).**
+   - O `port2` é transferido por uma mensagem de **controle na `window`** (único
+     canal possível para entregar um `MessagePort` a um iframe sandboxed). O
+     `hello` subsequente chega pelo **port transferido**, não pela `window`; por
+     isso não existe `event.source` nessa mensagem.
+   - Fluxo:
+     1. Parent cria `MessageChannel` (`port1`, `port2`) e gera `nonce` (128 bits)
+        para a sessão do iframe. Nenhum dado é enviado ainda.
+     2. Após `load` do iframe (hashes já verificados antes do mount), o parent
+        envia a mensagem de controle:
+        ```js
+        iframe.contentWindow.postMessage(
+          { type: 'owasidea:bridge:init', version: 1, nonce, port: port2 },
+          '*', [port2]
+        );
+        ```
+        Neste ponto o parent valida `event.source === iframe.contentWindow` na
+        **mensagem de controle** (window) e descarta qualquer mensagem de outras
+        fontes.
+     3. O iframe (SDK) recebe o `port2` e responde **pelo port**:
+        ```js
+        port.postMessage({ type: 'owasidea:bridge:hello', nonce });
+        ```
+     4. O parent valida no `port1`: (a) o port é o pendente daquele iframe;
+        (b) o `nonce` bate com o gerado; (c) é a primeira `hello` (single-use).
+        Só então ativa `port1.onmessage = handleRequest`.
+     5. Qualquer `hello` tardia/duplicada/nonce errado fecha o port e não ativa
+        o bridge.
+   - Autorização efetiva: posse do `port` + nonce single-use. `event.source` só
+     se aplica à mensagem de controle (passo 2), nunca ao `hello`.
 
-5. **Origem e identidade.** O parent valida `event.source === iframe.contentWindow`
-   na mensagem de controle inicial. Como o port é a capacidade, as mensagens
-   subsequentes não dependem de `origin`; a posse do port + nonce é o que
-   autoriza. O parent nunca aceita `postMessage` de janelas não registradas.
+5. **Origem e identidade.** `event.source === iframe.contentWindow` é validado
+   apenas na mensagem de controle da `window` (passo 2 do handshake). As
+   mensagens de dados trafegam pelo `MessagePort` e não carregam `origin` nem
+   `source`; a autorização é a posse do port + nonce single-use + mapeamento
+   `port -> iframe`. O parent nunca aceita mensagem de controle de janelas não
+   registradas.
 
 6. **Processamento de requests (parent).** Mensagem recebida em `port1`:
    `{ id, plugin, function, args }`.
@@ -92,10 +106,20 @@ args/aridade/tipos, timeout, limites de payload e concorrência.
    - Payload serializado <= `BRIDGE_MAX_REQUEST_BYTES` (default 64 KiB).
    - Concorrência: <= `BRIDGE_MAX_IN_FLIGHT` (default 4) por iframe; excesso
      recebe `CONCURRENCY_LIMIT` imediatamente (fail fast).
-   - Timeout: `min(manifest timeout, BRIDGE_MAX_TIMEOUT_MS)` (default 10 s,
-     teto 30 s). Implementado com `AbortController`/`tokio::time::timeout`.
-   - O parent chama internamente `POST /plugin/{plugin}/call` (ou equivalente
-     in-process) e devolve:
+   - Timeout: bridge default 10 s, teto 30 s, `timeout = min(configurado, teto)`.
+     O default do bridge (10 s) prevalece quando o manifesto não declara
+     timeout; o manifesto pode reduzir, nunca ampliar além de 30 s.
+     Implementado no parent com `AbortController` e no host com
+     `tokio::time::timeout`.
+   - O parent (webview) chama o host via HTTP local
+     `POST /plugin/{plugin}/call` (único canal disponível ao browser). O host
+     **não** deve fazer chamada HTTP a si mesmo; componentes nativos do host
+     (se existirem) invocam in-process. Cancelamento é propagado por
+     `AbortController` no parent e, no host, pelo drop do future + epoch
+     deadline do Wasmtime. Se a implementação não conseguir cancelar o guest
+     cooperativamente, isso deve ser documentado como limitação e coberto pelo
+     teste de cancelamento (CT-06).
+   - O parent devolve:
      ```js
      { id, ok: true, result }          // um valor de retorno
      { id, ok: true, results: [...] }  // múltiplos
@@ -121,9 +145,15 @@ args/aridade/tipos, timeout, limites de payload e concorrência.
 
 ### SDK (`owasidea-bridge.js`)
 
-- Módulo ES pequeno, distribuído pelo framework (CT-07) em
-  `/owasidea-bridge.js` (servido pelo dashboard/host com CORS para origens
-  sandboxed) e/ou copiado nos templates.
+- Módulo ES pequeno, **empacotado same-origin com o bundle do UI plugin**:
+  `owasidea build` copia `owasidea-bridge.js` para o output do plugin
+  (`dist/owasidea-bridge.js`) e o inclui no manifesto/hashes. O plugin importa
+  por caminho relativo (`./owasidea-bridge.js`); não há fetch cross-origin e
+  **não** se usa CORS para origem `null`. O framework também pode fornecer o
+  arquivo em templates para desenvolvimento local.
+- (Dev opcional) o dashboard pode servir o mesmo arquivo em
+  `/owasidea-bridge.js`, mas a fonte de verdade em produção é a cópia no bundle
+  verificada por hash.
 - API mínima:
   ```js
   import { connect } from '/owasidea-bridge.js';
@@ -176,6 +206,21 @@ ao "sem wildcard": o transfer carrega apenas o `MessagePort` (nenhum dado/segred
 é feito uma única vez por sessão, após verificação de hashes e `load`, e é
 gatilhado por `event.source === iframe.contentWindow`. Todo o tráfego posterior
 ocorre pelo port transferido, validado por nonce e posse.
+
+### Matriz de validação (CT-06 gate)
+
+| Engine | Status | Observação |
+|---|---|---|
+| Chromium (Linux) | Validado (2026-10-26) | `postMessage(..., 'null')` inválido; `'*'` entrega; `location` inacessível |
+| WebKitGTK (Tauri Linux) | **Não validado** — gate obrigatório do CT-06 antes do merge | Comportamento esperado idêntico; se divergir, usar fallback |
+| WebView2 (Tauri Windows) | **Não validado** — gate obrigatório do CT-06 antes do merge | Comportamento esperado idêntico; se divergir, usar fallback |
+
+**Fallback documentado (se um engine rejeitar o transfer ou bloquear a entrega):**
+controle via `postMessage` com envelope `{type, nonce, payload}` (sem transferência
+de port) + `MessageChannel` criado no parent e compartilhado por nome de sessão
+apenas se o engine permitir; caso contrário, desabilitar o bridge naquele
+engine (`BRIDGE_DISABLED`) e manter o iframe isolado. A implementação não deve
+afirmar suporte validado onde não foi testado.
 
 ### Limites operacionais (constantes)
 
@@ -239,7 +284,11 @@ WIT (CT-02). Erros usam apenas os códigos listados em "Erros tipados".
   `BRIDGE_DISABLED`.
 - Iframe não registrado => sem port; sem chamada possível.
 - Timeout => `TIMEOUT`; port permanece utilizável depois.
+- Cancelamento => `CANCELLED` propagado ao host/guest; teste de cancelamento
+  obrigatório (CT-06).
 - Concorrência > limite => `CONCURRENCY_LIMIT`.
+- Matriz: testes de handshake/transfer/call executados em Chromium, WebKitGTK
+  e WebView2; CT-06 não fecha sem os três.
 - Reload => port antigo fechado, chamadas em voo `CANCELLED`, novo handshake
   com novo nonce.
 - Playwright: `board-svelte` chama `changelog-ts.render` via bridge e exibe
@@ -252,11 +301,12 @@ WIT (CT-02). Erros usam apenas os códigos listados em "Erros tipados".
   perder isolamento; allowlist e validação centralizadas no parent; erros
   tipados e previsíveis; compatível com manifests antigos.
 - Negativas: parent assume responsabilidade de proxy/validação; complexidade de
-  handshake/reload; SDK precisa ser distribuído e versionado (CT-07); CORS do
-  endpoint do SDK.
+  handshake/reload; SDK precisa ser empacotado e versionado com o bundle
+  (CT-07); sem CORS para origem `null`.
 - Riscos: `targetOrigin '*'` na transferência do port é inevitável no sandbox
-  (validado); depende de verificação de hashes antes do mount; SEC deve
-  revisar constantes e sanitização de erros.
+  (validado apenas em Chromium; WebKitGTK/WebView2 são gates do CT-06); depende
+  de verificação de hashes antes do mount; SEC deve revisar constantes e
+  sanitização de erros.
 
 ## Referências
 
