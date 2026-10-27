@@ -1,13 +1,21 @@
 # Source Generators
 
-Owasidea gera WIT automaticamente a partir de anotações no código-fonte. O comando
-`owasidea wit generate [path]` (e `owasidea build`, que o invoca por plugin) escreve
-`wit/<world>.wit` e `wit/deps/host/host.wit` quando necessário.
+Owasidea gera WIT automaticamente a partir de anotações no código-fonte.
+
+- **Rust**: o contrato é um artefato. O build escreve `.owasidea/wit/<world>.wit`
+  e `.owasidea/wit/deps/host/host.wit` e aponta o metadata do `Cargo.toml` para
+  esse diretório. Nenhum arquivo WIT precisa existir no repositório.
+- **Go, TypeScript, C#, C e C++**: as ferramentas leem `wit/`, então o gerador
+  escreve `wit/<world>.wit` e `wit/deps/host/host.wit` quando necessário.
+
+`owasidea wit generate [path]` faz o mesmo sob demanda. `wit_source` em
+`wasm-app.toml` escolhe `auto` (padrão), `wit` ou `attributes`; ver
+[`PLUGIN_AUTHORING.md`](PLUGIN_AUTHORING.md#rust-cargo-component).
 
 Todos os geradores produzem o mesmo formato WIT:
 
 ```wit
-package poc:<world>@0.1.0;
+package poc:<world>@<version>;
 
 world <world> {
     import poc:host/host-log@0.1.0;
@@ -23,10 +31,11 @@ declaradas no manifest.
 
 ## Rust
 
-Atributos do crate `owasidea-macros`:
+Atributos do crate `owasidea` (re-exportado no template). O `wit_bindgen` lê o
+artefato gerado:
 
 ```rust
-use owasidea_macros::*;
+wit_bindgen::generate!({ world: "tester", path: ".owasidea/wit" });
 
 #[owasidea::host_log]
 #[owasidea::host_kv]
@@ -145,4 +154,6 @@ std::string greet(std::string name);
 
 `owasidea validate` confere checksum e capabilities do manifest gerado. `owasidea build`
 regenera o WIT a partir do código-fonte antes de compilar; um manifesto stale é
-rejeitado.
+rejeitado. Se um plugin Rust tiver marcadores **e** um `wit/` escrito à mão, o
+build falha em vez de escolher silenciosamente: remova o `wit/` ou declare
+`wit_source = "wit"` (e mantenha os dois em sincronia).

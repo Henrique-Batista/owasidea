@@ -17,7 +17,8 @@ and the example build scripts) over prose.
    WASI components. `js-wasm` is webview-only.
 3. **WIT is the API.** If a function is not exported in WIT, `/call` cannot see
    it. Kebab-case WIT names stay kebab-case in HTTP (`next-version`,
-   `save-report`).
+   `save-report`). Rust plugins generate WIT from `#[owasidea::world]` and
+   `#[owasidea::export]` into `.owasidea/wit`; do not commit that directory.
 4. **Paths in `wasm-app.toml` are relative to the config file**, not the current
    working directory.
 5. **UI-plugin output goes through `owasidea build`.** It hashes files, writes a
@@ -181,11 +182,13 @@ For a `result<T,E>` export, the body is `{"result":{"ok":...}}` or
 
 1. Pick language and type. Use an existing Shipyard plugin as the template.
 2. Create `plugins/<name>/`:
-   - `wit/<name>.wit`
+   - Rust: `src/lib.rs` with `#[owasidea::world]` / `#[owasidea::export]`; the
+     contract is generated into `.owasidea/wit`
+   - Other languages: `wit/<name>.wit`
    - language source
    - build config (`Cargo.toml`, `go.mod`, `package.json`, `.csproj`, `Makefile`)
 3. Add `[plugins.<name>]` in `wasm-app.toml` with `path`, `language`, `type`.
-4. Add permissions only if WIT imports them:
+4. Add permissions only if WIT imports them (Rust: `#[owasidea::host_kv]`):
    - `poc:host/host-kv` → `kv = "<namespace>:read-write"`
    - `poc:host/host-log` → no config needed
    - `wasi:filesystem` → `fs = ["<guest-path>:read-write"]`
