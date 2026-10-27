@@ -201,6 +201,23 @@ fn add_origin_to_csp_inner(csp: &str, origin: &str, dev: bool) -> String {
         if let Some(rest) = d.strip_prefix("connect-src") {
             if rest.is_empty() || rest.starts_with(char::is_whitespace) {
                 let mut tokens: Vec<String> = rest.split_whitespace().map(String::from).collect();
+                // Normalize loopback origins: drop stale loopback ports/wildcards
+                // except the configured origin (and the dev wildcard in dev mode).
+                tokens.retain(|t| {
+                    let norm = t.trim_end_matches('/');
+                    if norm.starts_with("http://127.0.0.1:")
+                        || norm.starts_with("http://localhost:")
+                    {
+                        if norm == origin {
+                            return true;
+                        }
+                        if dev && (norm == "http://127.0.0.1:*" || norm == "http://localhost:*") {
+                            return true;
+                        }
+                        return false;
+                    }
+                    true
+                });
                 if !tokens.iter().any(|t| t.trim_end_matches('/') == origin) {
                     tokens.push(origin.clone());
                 }
@@ -512,6 +529,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("manifests")).unwrap();
         dir
+    }
+
+    #[test]
+    fn bundle_normalizes_loopback_origins() {
+        let csp = "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:8790 http://127.0.0.1:5180";
+        let out = add_origin_to_csp(csp, "http://127.0.0.1:8899");
+        assert!(out.contains("http://127.0.0.1:8899"));
+        assert!(!out.contains("8790"));
+        assert!(!out.contains("5180"));
+        assert!(csp_is_strict(&out));
+    }
+
+    #[test]
+    fn dev_keeps_wildcard() {
+        let csp = "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:8790";
+        let out = add_dev_origin_to_csp(csp, "http://127.0.0.1:8899");
+        assert!(out.contains("http://127.0.0.1:8899"));
+        assert!(out.contains("http://127.0.0.1:*"));
+        assert!(!out.contains("8790"));
     }
 
     #[test]
