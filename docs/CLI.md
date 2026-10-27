@@ -55,6 +55,21 @@ UI plugins write a minimal static `dist/index.html`. Stateful service scaffoldin
 currently exists for Rust. TypeScript/UI plugins need `npm install` in the
 plugin directory before build.
 
+Rust plugins are scaffolded **without a WIT file**: `src/lib.rs` carries
+`#[owasidea::world("<name>")]` and `#[owasidea::export]` markers, and `build`
+renders the contract into `.owasidea/wit` (gitignored). Other languages keep
+`wit/<name>.wit`. The optional `wit_source` key selects the behavior:
+
+```toml
+[plugins.notes]
+wit_source = "auto"       # auto (default) | wit | attributes
+```
+
+- `auto`: use `wit/` when it exists, otherwise render from markers.
+- `wit`: require a hand-written contract; markers must match it or the build fails.
+- `attributes`: render from markers and require the artifact target
+  (`.owasidea/wit` for Rust).
+
 ### `build [--no-sign]`
 
 Build configured plugins, compose clients declared with `compose_with`,
@@ -63,6 +78,9 @@ assets.
 
 Behavior:
 
+0. Each plugin contract is resolved from `wit_source` first. Attribute
+   contracts are regenerated as artifacts; a `wit/` directory beside an
+   attribute plugin fails instead of being ignored or overwritten.
 1. Ordinary plugins build before composed plugins.
 2. Missing npm dependencies for the dashboard, TypeScript plugins and UI plugins are installed
    automatically.
@@ -75,7 +93,8 @@ Behavior:
 5. `wasm-tools component wit --json` derives imports/exports; the generated
    manifest includes a SHA-256 checksum.
 6. A component importing `poc:host/host-kv` without a matching `kv` permission
-   fails the build.
+   fails with the exact `wasm-app.toml` snippet to add; an unused `kv` line
+   tells you which marker/line to remove.
 7. UI plugins (`runtime = "js-wasm"`, `type = "ui"`) run `ui_build`, copy
    `dist/` to `ui/public/plugins/<name>/`, and hash every file. Their digests
    are also written to `ui/public/ui-plugins.json`, so the dashboard verifies
