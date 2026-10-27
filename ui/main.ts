@@ -1,4 +1,4 @@
-import { attachBridge } from './bridge.ts';
+import { attachBridge, bridgeSrcWithNonce, createBridgeNonce } from './bridge.ts';
 interface OwasideaRuntime {
   host?: string;
   app?: string;
@@ -35,6 +35,18 @@ const HOST = resolvedHost;
 const OWASIDEA_BUILD_ID = window.__OWASIDEA__?.build_id ?? null;
 const view = document.getElementById('view')!;
 let uiPluginReloadTimer: number | null = null;
+let uiPluginDispose: (() => void) | null = null;
+
+function cleanupUiPlugin() {
+  if (uiPluginReloadTimer) {
+    clearInterval(uiPluginReloadTimer);
+    uiPluginReloadTimer = null;
+  }
+  if (uiPluginDispose) {
+    uiPluginDispose();
+    uiPluginDispose = null;
+  }
+}
 
 function escapeHtml(value: unknown): string {
   return String(value).replace(/[&<>"']/g, ch => ({
@@ -43,6 +55,7 @@ function escapeHtml(value: unknown): string {
 }
 
 function route() {
+  cleanupUiPlugin();
   const hash = location.hash || '#/overview';
   if (hash.startsWith('#/ui/')) {
     renderUiPlugin(decodeURIComponent(hash.slice('#/ui/'.length)));
@@ -300,10 +313,7 @@ async function fetchUiPluginIndex(): Promise<any[]> {
 }
 
 async function renderUiPlugin(name: string) {
-  if (uiPluginReloadTimer) {
-    clearInterval(uiPluginReloadTimer);
-    uiPluginReloadTimer = null;
-  }
+  cleanupUiPlugin();
   const plugins = await fetchUiPluginIndex();
   const plugin = plugins.find((item: any) => item.name === name);
   if (!plugin) {
@@ -321,29 +331,50 @@ async function renderUiPlugin(name: string) {
     view.append(message);
     return;
   }
-  const frame = document.createElement('iframe');
-  frame.title = `${plugin.name} UI`;
-  frame.src = `/${plugin.entry.split('/').map(encodeURIComponent).join('/')}`;
-  frame.setAttribute('sandbox', 'allow-scripts allow-forms');
-  frame.referrerPolicy = 'no-referrer';
-  frame.style.cssText = 'width:100%;height:75vh;border:1px solid #8884;border-radius:8px';
-  view.append(frame);
+  const status = document.createElement('p');
+  status.className = 'ui-plugin-status';
+  view.append(status);
 
-  if (Array.isArray(plugin.bridge) && plugin.bridge.length > 0) {
-    attachBridge(frame, plugin, HOST);
-  }
-
+  let frame = mountUiPluginFrame(plugin, '');
   let currentKey = `${plugin.version ?? ''}:${plugin.sha256 ?? ''}`;
   uiPluginReloadTimer = window.setInterval(async () => {
     const nextPlugins = await fetchUiPluginIndex();
     const next = nextPlugins.find((item: any) => item.name === name);
     if (!next) return;
     const nextKey = `${next.version ?? ''}:${next.sha256 ?? ''}`;
-    if (nextKey !== currentKey) {
-      currentKey = nextKey;
-      frame.src = `/${next.entry.split('/').map(encodeURIComponent).join('/')}?v=${encodeURIComponent(next.sha256 ?? Date.now())}`;
+    if (nextKey === currentKey) return;
+    try {
+      // Re-verify before swapping: a rebuilt plugin is a new document, so the
+      // bridge is re-attached to a fresh iframe instead of being re-armed on
+      // the live one (ADR-0004: no init after navigation).
+      await verifyUiPluginAssets(next);
+    } catch (error) {
+      status.textContent = `UI plugin reload rejected: ${String(error)}`;
+      return;
     }
+    currentKey = nextKey;
+    if (uiPluginDispose) { uiPluginDispose(); uiPluginDispose = null; }
+    frame.remove();
+    frame = mountUiPluginFrame(next, `?v=${encodeURIComponent(next.sha256 ?? String(Date.now()))}`);
+    status.textContent = '';
   }, 1500);
+}
+
+function mountUiPluginFrame(plugin: any, cacheKey: string): HTMLIFrameElement {
+  const frame = document.createElement('iframe');
+  frame.title = `${plugin.name} UI`;
+  const baseSrc = `/${plugin.entry.split('/').map(encodeURIComponent).join('/')}${cacheKey}`;
+  const bridged = Array.isArray(plugin.bridge) && plugin.bridge.length > 0;
+  const nonce = bridged ? createBridgeNonce() : '';
+  frame.src = bridged ? bridgeSrcWithNonce(baseSrc, nonce) : baseSrc;
+  frame.setAttribute('sandbox', 'allow-scripts allow-forms');
+  frame.referrerPolicy = 'no-referrer';
+  frame.style.cssText = 'width:100%;height:75vh;border:1px solid #8884;border-radius:8px';
+  view.append(frame);
+  if (bridged) {
+    uiPluginDispose = attachBridge(frame, plugin, HOST, nonce);
+  }
+  return frame;
 }
 
 async function verifyUiPluginAssets(plugin: any) {

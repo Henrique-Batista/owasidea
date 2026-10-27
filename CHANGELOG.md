@@ -22,6 +22,12 @@ below; see [`docs/UPDATER.md`](docs/UPDATER.md).
 
 ### Fixed
 
+- UI plugin bridge binds the handshake to the verified document: the dashboard
+  mounts the iframe with a one-time `__owasidea_bridge` nonce, validates
+  `event.source`/nonce on both sides, arms only the first `load`, and closes the
+  port without re-sending `init` after any navigation or reload. In-flight calls
+  are cancelled once, replay ids are evicted instead of cleared, and the bridge
+  timeout honours the manifest (10 s default, 30 s cap) (G1).
 - `owasidea validate --json` now emits a stable `{ok, plugins, errors,
   warnings}` document (per-plugin status, ABI warnings included) and still exits
   non-zero on drift; text output is unchanged without `--json` (FIX-02).

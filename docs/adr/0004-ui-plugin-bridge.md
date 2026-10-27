@@ -53,44 +53,60 @@ args/aridade/tipos, timeout, limites de payload e concorrência.
 
 3. **Canal por iframe.** Para cada iframe bridged, o parent cria um
    `MessageChannel` (`port1` no parent, `port2` transferido ao iframe). O
-   `port2` é transferido **uma única vez**, no handshake, e o parent mantém o
-   mapeamento `port -> {iframe, uiPlugin, nonce, inFlight}`.
+   `port2` só é transferido depois que o documento prova o nonce do mount, e o
+   parent mantém o mapeamento `port -> {iframe, uiPlugin, nonce, inFlight}`. São
+   no máximo 3 tentativas de `init` por documento verificado (novo canal por
+   tentativa), nunca após navegação.
 
-4. **Handshake com nonce (fluxo explícito).**
+4. **Handshake com nonce ligado ao documento (fluxo explícito).**
    - O `port2` é transferido por uma mensagem de **controle na `window`** (único
      canal possível para entregar um `MessagePort` a um iframe sandboxed). O
      `hello` subsequente chega pelo **port transferido**, não pela `window`; por
      isso não existe `event.source` nessa mensagem.
+   - **Nonce ligado ao documento.** O parent gera um nonce (128 bits) por mount
+     e o coloca na URL do iframe (`?__owasidea_bridge=<nonce>`) **antes** de
+     definir `src`. O SDK lê o nonce da própria URL (e remove o parâmetro via
+     `history.replaceState` quando permitido). Como a origem é opaca, a URL é o
+     único valor que distingue o documento verificado de um documento para o
+     qual o plugin navegou: `https://example.com` não carrega o nonce.
    - Fluxo:
-     1. Parent cria `MessageChannel` (`port1`, `port2`) e gera `nonce` (128 bits)
-        para a sessão do iframe. Nenhum dado é enviado ainda.
-     2. Após `load` do iframe (hashes já verificados antes do mount), o parent
-        envia a mensagem de controle:
+     1. Parent verifica hashes, monta o iframe com a URL contendo o nonce e
+        arma o bridge **uma única vez** (primeiro `load`).
+     2. Parent envia `{ type: 'owasidea:bridge:probe', version: 1 }` na `window`
+        (sem port, sem segredo) para acordar um SDK já carregado.
+     3. O SDK responde na `window`:
+        ```js
+        { type: 'owasidea:bridge:ready', version: 1, nonce }
+        ```
+        O parent só aceita essa mensagem se `event.source === iframe.contentWindow`
+        e `nonce === nonceDoDocumento`; qualquer outra janela/nonce é descartada.
+     4. Só então o parent cria `MessageChannel` e envia:
         ```js
         iframe.contentWindow.postMessage(
           { type: 'owasidea:bridge:init', version: 1, nonce, port: port2 },
           '*', [port2]
         );
         ```
-        Neste ponto o parent valida `event.source === iframe.contentWindow` na
-        **mensagem de controle** (window) e descarta qualquer mensagem de outras
-        fontes.
-     3. O iframe (SDK) recebe o `port2` e responde **pelo port**:
+     5. O SDK valida `event.source === window.parent`, `version`, `type` e
+        `nonce === nonceDaURL` antes de aceitar o port; inits de outra janela ou
+        com nonce errado são ignorados. Ele responde **pelo port**:
         ```js
         port.postMessage({ type: 'owasidea:bridge:hello', nonce });
         ```
-     4. O parent valida no `port1`: (a) o port é o pendente daquele iframe;
-        (b) o `nonce` bate com o gerado; (c) é a primeira `hello` (single-use).
-        Só então ativa `port1.onmessage = handleRequest`.
-     5. Qualquer `hello` tardia/duplicada/nonce errado fecha o port e não ativa
-        o bridge.
-   - Autorização efetiva: posse do `port` + nonce single-use. `event.source` só
-     se aplica à mensagem de controle (passo 2), nunca ao `hello`.
+     6. O parent valida no `port1` que o `nonce` bate com o do documento e que é
+        a primeira `hello` (single-use). Só então ativa
+        `port1.onmessage = handleRequest`.
+     7. Qualquer `hello` tardia/duplicada/nonce errado fecha o port e não ativa
+        o bridge. O número de `init` por documento é limitado a 3 tentativas.
+   - Autorização efetiva: posse do `port` + nonce ligado ao documento +
+     single-use. `event.source` é validado em **todas** as mensagens de controle
+     (probe/ready), nos dois lados.
 
 5. **Origem e identidade.** `event.source === iframe.contentWindow` é validado
-   apenas na mensagem de controle da `window` (passo 2 do handshake). As
-   mensagens de dados trafegam pelo `MessagePort` e não carregam `origin` nem
-   `source`; a autorização é a posse do port + nonce single-use + mapeamento
+   em toda mensagem de controle da `window` (probe/ready) no parent, e
+   `event.source === window.parent` no SDK. As mensagens de dados trafegam pelo
+   `MessagePort` e não carregam `origin` nem `source`; a autorização é a posse
+   do port + nonce ligado ao documento + single-use + mapeamento
    `port -> iframe`. O parent nunca aceita mensagem de controle de janelas não
    registradas.
 
@@ -139,9 +155,14 @@ args/aridade/tipos, timeout, limites de payload e concorrência.
    `message` é genérico (sem stack trace, paths, SQL, segredos). `HOST_ERROR`
    não repassa o erro bruto do host.
 
-9. **Ciclo de vida.** Reload do iframe invalida o port antigo (close + remoção
-   do mapeamento); chamadas em voo recebem `CANCELLED`. Novo handshake cria
-   novo nonce/port. Unmount fecha o port. Nenhum port vaza entre iframes.
+9. **Ciclo de vida e navegação.** O bridge é armado **só no primeiro `load`**
+   do documento verificado. Qualquer `load` subsequente (reload, `location.href`,
+   redirect) fecha o port, cancela chamadas em voo (`CANCELLED`) e **nunca**
+   reenvia `init`; o nonce do documento também não existe no novo documento.
+   Recarregar um plugin reconstruído é responsabilidade do dashboard: ele
+   re-verifica os hashes e **substitui o iframe** por um novo (novo nonce/port),
+   em vez de rearmar o iframe existente. Unmount fecha o port. Nenhum port vaza
+   entre iframes.
 
 ### SDK (`owasidea-bridge.js`)
 
@@ -183,11 +204,12 @@ args/aridade/tipos, timeout, limites de payload e concorrência.
 |---|---|---|
 | UI plugin malicioso | Allowlist por função; validação de args/aridade/tipos; sandbox; timeouts; limites de payload/concorrência | Pode chamar funções permitidas repetidamente dentro dos limites (rate limit futuro) |
 | XSS no plugin | Port já está na página; atacante só acessa funções allowlisted; erros sanitizados; sem escalação | XSS ainda pode abusar das funções permitidas |
-| Replay de nonce | Nonce por sessão, single-use na ativação, invalidado no reload | Janela entre geração e ativação (mitigada por `event.source`) |
+| Replay de nonce | Nonce por mount, ligado à URL do documento, single-use na ativação, invalidado no reload | Nonce pode ser repassado por um plugin que o exfiltre deliberadamente (o plugin já possui o port) |
 | Port leak | Um port por iframe; close em unmount/reload; sem broadcast; transferido só após verificação de hashes | Port pode ser usado por código injetado no mesmo iframe (mesmo sandbox) |
 | DoS | Limites de payload, concorrência, timeout; fail fast | Atacante pode abrir muitos iframes (limitado pelo dashboard) |
 | Cross-iframe | Ports não compartilhados; mapeamento `port -> iframe` no parent | Nenhum |
-| Spoof de origem | `event.source` validado na handshake; dados trafegam pelo port (posse = capacidade) | Origem `null` não é verificável como string (ver abaixo) |
+| Spoof de origem | `event.source` validado em todo controle (parent e SDK) + nonce do documento; dados trafegam pelo port (posse = capacidade) | Origem `null` não é verificável como string (ver abaixo) |
+| Navegação para origem remota | Handshake armado só no primeiro `load`; `load` posterior fecha o port/cancela e nunca reenvia `init`; o nonce do documento não existe no destino | Plugin que navegue preservando o nonce na URL (exfiltração deliberada) |
 | Bypass de allowlist | Allowlist lida do manifesto no parent; match exato `plugin.fn`; sem wildcards/dinâmico | Manifesto adulterado poderia ampliar lista (mitigado por build-time validation e signing) |
 | Vazamento de segredos | Erros com código + mensagem genérica; sem stack/path/SQL | Mensagens do host podem conter detalhes do plugin; sanitizar no parent |
 
@@ -211,16 +233,17 @@ ocorre pelo port transferido, validado por nonce e posse.
 
 | Engine | Status | Observação |
 |---|---|---|
-| Chromium (Linux) | Validado (2026-10-26) | `postMessage(..., 'null')` inválido; `'*'` entrega; `location` inacessível |
-| WebKitGTK (Tauri Linux) | **Não validado** — gate obrigatório do CT-06 antes do merge | Comportamento esperado idêntico; se divergir, usar fallback |
-| WebView2 (Tauri Windows) | **Não validado** — gate obrigatório do CT-06 antes do merge | Comportamento esperado idêntico; se divergir, usar fallback |
+| Chromium (Linux) | Validado (2026-10-26 e 2026-10-27) | `postMessage(..., 'null')` inválido; `'*'` entrega; `location` inacessível |
+| WebKit (Playwright, Linux) | Validado (2026-10-27) | Transfer de `MessagePort` para iframe sandboxed funciona; `event.source === window.parent` verdadeiro; `contentDocument` lança em vez de retornar `null` (tratado) |
+| WebView2 (Tauri Windows) | **Não validado** — gate obrigatório antes de afirmar suporte | Comportamento esperado idêntico ao Chromium; sem fallback implementado |
 
 **Fallback documentado (se um engine rejeitar o transfer ou bloquear a entrega):**
 controle via `postMessage` com envelope `{type, nonce, payload}` (sem transferência
 de port) + `MessageChannel` criado no parent e compartilhado por nome de sessão
 apenas se o engine permitir; caso contrário, desabilitar o bridge naquele
 engine (`BRIDGE_DISABLED`) e manter o iframe isolado. A implementação não deve
-afirmar suporte validado onde não foi testado.
+afirmar suporte validado onde não foi testado. Chromium e WebKit não precisaram
+do fallback; WebView2 continua não validado.
 
 ### Limites operacionais (constantes)
 
@@ -241,6 +264,8 @@ afirmar suporte validado onde não foi testado.
 
 **Controle (window postMessage):**
 ```
+parent -> iframe: { type: 'owasidea:bridge:probe', version: 1 }
+iframe -> parent: { type: 'owasidea:bridge:ready', version: 1, nonce }
 parent -> iframe: { type: 'owasidea:bridge:init', version: 1, nonce, port }  // port transferido
 iframe -> parent(port): { type: 'owasidea:bridge:hello', nonce }
 ```
@@ -289,8 +314,10 @@ WIT (CT-02). Erros usam apenas os códigos listados em "Erros tipados".
 - Concorrência > limite => `CONCURRENCY_LIMIT`.
 - Matriz: testes de handshake/transfer/call executados em Chromium, WebKitGTK
   e WebView2; CT-06 não fecha sem os três.
-- Reload => port antigo fechado, chamadas em voo `CANCELLED`, novo handshake
-  com novo nonce.
+- Reload/navegação => port antigo fechado, chamadas em voo `CANCELLED`, nenhum
+  `init` reenviado; plugin reconstruído => iframe novo, novo nonce/port.
+- Plugin que navega para `https://example.com` (inclusive durante o próprio
+  load) não recebe `bridge:init` e não chama o host.
 - Playwright: `board-svelte` chama `changelog-ts.render` via bridge e exibe
   resultado; função negada é rejeitada.
 - Regressão: UI plugin sem `bridge` continua sem port e sem chamadas.
