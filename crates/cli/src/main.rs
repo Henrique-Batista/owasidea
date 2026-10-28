@@ -5159,7 +5159,7 @@ async fn wait_for_host(client: &reqwest::Client, base: &str) -> anyhow::Result<(
     let timeout_ms = std::env::var("OWASIDEA_HOST_READY_TIMEOUT_MS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(180_000);
+        .unwrap_or(600_000);
     let attempts = (timeout_ms / 250).max(1);
     for _ in 0..attempts {
         if let Ok(response) = client.get(format!("{base}/health")).send().await {
@@ -5225,6 +5225,7 @@ async fn run_api_smoke(
         .arg("run")
         .current_dir(&root)
         .env("OWASIDEA_DATA_DIR", &data_dir)
+        .env("OWASIDEA_WASMTIME_CACHE", "off")
         .env("NO_PROXY", "127.0.0.1,localhost")
         .env("no_proxy", "127.0.0.1,localhost")
         .stdout(std::process::Stdio::from(log.try_clone()?))

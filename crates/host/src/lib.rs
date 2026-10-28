@@ -2956,6 +2956,9 @@ async fn proxy_app(
 // ---------------------------------------------------------------------------
 
 fn compilation_cache() -> Option<wasmtime::Cache> {
+    if std::env::var("OWASIDEA_WASMTIME_CACHE").as_deref() == Ok("off") {
+        return None;
+    }
     let dir = std::env::var_os("OWASIDEA_WASMTIME_CACHE")
         .map(PathBuf::from)
         .or_else(|| {

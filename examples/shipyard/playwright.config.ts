@@ -22,7 +22,7 @@ export default defineConfig({
       command: `"${owasidea}" --config wasm-app.toml --http-addr 127.0.0.1:${hostPort} run`,
       url: `http://127.0.0.1:${hostPort}/health`,
       reuseExistingServer: true,
-      timeout: 120_000,
+      timeout: 600_000,
       env: {
         OWASIDEA_DATA_DIR: join(tmpdir(), 'owasidea-shipyard-playwright'),
         OWASIDEA_ALLOWED_ORIGINS: uiUrl,
