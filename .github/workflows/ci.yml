@@ -8,6 +8,9 @@
 #   list is maintained, review tag updates and keep `permissions` minimal.
 # - Steps that consume signing secrets run only on push/tag builds; PRs never
 #   receive `secrets.*` and must not attempt to import certificates.
+# - Build speed: sccache replaces the huge target/ Actions cache; cargo
+#   registry, cargo-installed tools, Go modules and npm are cached separately.
+#   Windows runs for PRs, main, release/1.0 and tags, not every feature push.
 
 name: CI
 
@@ -20,9 +23,16 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: "0"
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
 
 jobs:
   fast:
@@ -36,12 +46,15 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
 
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: "1.27.1"
           cache: true
+          cache-dependency-path: "**/go.sum"
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -58,29 +71,36 @@ jobs:
           key: ${{ runner.os }}-cargo-reg-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-reg-
 
-      - name: Cache cargo target
+      - name: Cache cargo tools
         uses: actions/cache@v4
         with:
-          path: target
-          key: ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-target-
+          path: |
+            ~/.cargo/bin/cargo-component
+            ~/.cargo/bin/cargo-component.exe
+            ~/.cargo/bin/wasm-tools
+            ~/.cargo/bin/wasm-tools.exe
+            ~/.cargo/bin/cargo-tauri
+            ~/.cargo/bin/cargo-tauri.exe
+          key: ${{ runner.os }}-cargo-tools-${{ hashFiles('tools.lock', 'Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-tools-
 
       - name: Install cargo-component and wasm-tools
+        shell: bash
         run: |
-          cargo install cargo-component --locked
-          cargo install wasm-tools --locked
+          command -v cargo-component >/dev/null 2>&1 || cargo install cargo-component --locked
+          command -v wasm-tools >/dev/null 2>&1 || cargo install wasm-tools --locked
 
       - name: cargo fmt --check
         run: cargo fmt --check
 
       - name: cargo clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: cargo test host/cli
-        run: cargo test -p owasidea-host -p owasidea-cli
+        run: cargo test --locked -p owasidea-host -p owasidea-cli
 
       - name: Build owasidea CLI
-        run: cargo build -p owasidea-cli
+        run: cargo build --locked -p owasidea-cli
 
       - name: Put owasidea on PATH
         run: echo "$PWD/target/debug" >> "$GITHUB_PATH"
@@ -120,12 +140,15 @@ jobs:
 
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+      - name: sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
 
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: "1.27.1"
           cache: true
+          cache-dependency-path: "**/go.sum"
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -160,13 +183,6 @@ jobs:
           key: ${{ runner.os }}-cargo-reg-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-reg-
 
-      - name: Cache cargo target
-        uses: actions/cache@v4
-        with:
-          path: target
-          key: ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-target-
-
       - name: Cache Playwright browsers
         uses: actions/cache@v4
         with:
@@ -174,16 +190,31 @@ jobs:
           key: ${{ runner.os }}-playwright-${{ hashFiles('examples/shipyard/playwright.config.ts') }}
           restore-keys: ${{ runner.os }}-playwright-
 
+      - name: Cache cargo tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-component
+            ~/.cargo/bin/cargo-component.exe
+            ~/.cargo/bin/wasm-tools
+            ~/.cargo/bin/wasm-tools.exe
+            ~/.cargo/bin/cargo-tauri
+            ~/.cargo/bin/cargo-tauri.exe
+          key: ${{ runner.os }}-cargo-tools-${{ hashFiles('tools.lock', 'Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-tools-
+
       - name: Install cargo-component and wasm-tools
+        shell: bash
         run: |
-          cargo install cargo-component --locked
-          cargo install wasm-tools --locked
+          command -v cargo-component >/dev/null 2>&1 || cargo install cargo-component --locked
+          command -v wasm-tools >/dev/null 2>&1 || cargo install wasm-tools --locked
 
       - name: Install tauri-cli
-        run: cargo install tauri-cli --version "^2" --locked
+        shell: bash
+        run: cargo tauri --version >/dev/null 2>&1 || cargo install tauri-cli --version "^2" --locked
 
       - name: Build owasidea CLI
-        run: cargo build -p owasidea-cli
+        run: cargo build --locked -p owasidea-cli
 
       - name: Put owasidea on PATH
         run: echo "$PWD/target/debug" >> "$GITHUB_PATH"
@@ -281,12 +312,15 @@ jobs:
 
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+      - name: sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
 
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: "1.27.1"
           cache: true
+          cache-dependency-path: "**/go.sum"
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -332,23 +366,31 @@ jobs:
           key: ${{ runner.os }}-cargo-reg-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-reg-
 
-      - name: Cache cargo target
+      - name: Cache cargo tools
         uses: actions/cache@v4
         with:
-          path: target
-          key: ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-target-
+          path: |
+            ~/.cargo/bin/cargo-component
+            ~/.cargo/bin/cargo-component.exe
+            ~/.cargo/bin/wasm-tools
+            ~/.cargo/bin/wasm-tools.exe
+            ~/.cargo/bin/cargo-tauri
+            ~/.cargo/bin/cargo-tauri.exe
+          key: ${{ runner.os }}-cargo-tools-${{ hashFiles('tools.lock', 'Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-tools-
 
       - name: Install cargo-component and wasm-tools
+        shell: bash
         run: |
-          cargo install cargo-component --locked
-          cargo install wasm-tools --locked
+          command -v cargo-component >/dev/null 2>&1 || cargo install cargo-component --locked
+          command -v wasm-tools >/dev/null 2>&1 || cargo install wasm-tools --locked
 
       - name: Install tauri-cli
-        run: cargo install tauri-cli --version "^2" --locked
+        shell: bash
+        run: cargo tauri --version >/dev/null 2>&1 || cargo install tauri-cli --version "^2" --locked
 
       - name: Build owasidea CLI
-        run: cargo build -p owasidea-cli
+        run: cargo build --locked -p owasidea-cli
 
       - name: Put owasidea on PATH
         run: echo "$PWD/target/debug" >> "$GITHUB_PATH"
@@ -399,6 +441,9 @@ jobs:
   windows:
     name: Windows (host/cli, plugins, NSIS)
     runs-on: windows-latest
+    # Feature pushes use Fast on Linux; Windows runs for PR parity and for
+    # main/release/tag builds so platform regressions still block releases.
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/release/1.0' || startsWith(github.ref, 'refs/tags/')
     # RL-03: non-secret signing settings. The PFX and its password are passed
     # only to the plan/import steps, and Azure credentials only to the bundle
     # step. Secrets are never printed. See docs/CODE_SIGNING.md.
@@ -413,12 +458,15 @@ jobs:
 
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+      - name: sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
 
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: "1.27.1"
           cache: true
+          cache-dependency-path: "**/go.sum"
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -435,32 +483,40 @@ jobs:
           key: ${{ runner.os }}-cargo-reg-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-reg-
 
-      - name: Cache cargo target
+      - name: Cache cargo tools
         uses: actions/cache@v4
         with:
-          path: target
-          key: ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-target-
+          path: |
+            ~/.cargo/bin/cargo-component
+            ~/.cargo/bin/cargo-component.exe
+            ~/.cargo/bin/wasm-tools
+            ~/.cargo/bin/wasm-tools.exe
+            ~/.cargo/bin/cargo-tauri
+            ~/.cargo/bin/cargo-tauri.exe
+          key: ${{ runner.os }}-cargo-tools-${{ hashFiles('tools.lock', 'Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-tools-
 
       - name: Install cargo-component and wasm-tools
+        shell: bash
         run: |
-          cargo install cargo-component --locked
-          cargo install wasm-tools --locked
+          command -v cargo-component >/dev/null 2>&1 || cargo install cargo-component --locked
+          command -v wasm-tools >/dev/null 2>&1 || cargo install wasm-tools --locked
 
       - name: Install tauri-cli
-        run: cargo install tauri-cli --version "^2" --locked
+        shell: bash
+        run: cargo tauri --version >/dev/null 2>&1 || cargo install tauri-cli --version "^2" --locked
 
       - name: cargo fmt --check
         run: cargo fmt --check
 
       - name: cargo clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: cargo test host/cli
-        run: cargo test -p owasidea-host -p owasidea-cli
+        run: cargo test --locked -p owasidea-host -p owasidea-cli
 
       - name: Build host and CLI
-        run: cargo build -p owasidea-host -p owasidea-cli
+        run: cargo build --locked -p owasidea-host -p owasidea-cli
 
       - name: Put owasidea on PATH
         shell: bash
@@ -590,12 +646,15 @@ jobs:
 
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+      - name: sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
 
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: "1.27.1"
           cache: true
+          cache-dependency-path: "**/go.sum"
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -623,23 +682,31 @@ jobs:
           key: ${{ runner.os }}-cargo-reg-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-reg-
 
-      - name: Cache cargo target
+      - name: Cache cargo tools
         uses: actions/cache@v4
         with:
-          path: target
-          key: ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-target-
+          path: |
+            ~/.cargo/bin/cargo-component
+            ~/.cargo/bin/cargo-component.exe
+            ~/.cargo/bin/wasm-tools
+            ~/.cargo/bin/wasm-tools.exe
+            ~/.cargo/bin/cargo-tauri
+            ~/.cargo/bin/cargo-tauri.exe
+          key: ${{ runner.os }}-cargo-tools-${{ hashFiles('tools.lock', 'Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-tools-
 
       - name: Install cargo-component and wasm-tools
+        shell: bash
         run: |
-          cargo install cargo-component --locked
-          cargo install wasm-tools --locked
+          command -v cargo-component >/dev/null 2>&1 || cargo install cargo-component --locked
+          command -v wasm-tools >/dev/null 2>&1 || cargo install wasm-tools --locked
 
       - name: Install tauri-cli
-        run: cargo install tauri-cli --version "^2" --locked
+        shell: bash
+        run: cargo tauri --version >/dev/null 2>&1 || cargo install tauri-cli --version "^2" --locked
 
       - name: Build owasidea CLI
-        run: cargo build -p owasidea-cli
+        run: cargo build --locked -p owasidea-cli
 
       - name: Put owasidea on PATH
         run: echo "$PWD/target/debug" >> "$GITHUB_PATH"
