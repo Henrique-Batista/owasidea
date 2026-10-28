@@ -5225,15 +5225,22 @@ async fn run_api_smoke(
         .arg("run")
         .current_dir(&root)
         .env("OWASIDEA_DATA_DIR", &data_dir)
+        .env("NO_PROXY", "127.0.0.1,localhost")
+        .env("no_proxy", "127.0.0.1,localhost")
         .stdout(std::process::Stdio::from(log.try_clone()?))
         .stderr(std::process::Stdio::from(log));
     apply_signing_env_to(&mut command, cfg, &root);
     let child = command.spawn()?;
     let mut host = TestHost { child, data_dir };
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .context("failed to build smoke HTTP client")?;
     if let Err(error) = wait_for_host(&client, &base).await {
         let status = host.child.try_wait();
+        let connect = std::net::TcpStream::connect(&port);
         eprintln!("host process status after timeout: {status:?}");
+        eprintln!("host port {port} connect: {connect:?}");
         eprintln!(
             "host log:\n{}",
             std::fs::read_to_string(&log_path).unwrap_or_default()

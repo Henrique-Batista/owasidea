@@ -3139,6 +3139,7 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
     let telemetry = otel::init_tracing();
 
     let loaded = load_manifests(&manifests_dir)?;
+    println!("loading {} plugin manifests", loaded.len());
     if loaded.is_empty() {
         return Err(anyhow!("no manifests found in {manifests_dir:?}"));
     }
