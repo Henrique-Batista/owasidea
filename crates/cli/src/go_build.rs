@@ -65,6 +65,38 @@ pub fn component_source(plugin_dir: &Path, wit_dir: &Path, name: &str) -> Result
     )
 }
 
+/// Resolve the WIT directory and world declared by a Go SDK module
+/// (`go.wasmcloud.dev/component`). The SDK's `componentize-go.toml` uses
+/// `wit_paths = ["wit"]` relative to the module, so the CLI must pass the
+/// absolute module path; relying on the bare `componentize-go build` defaults
+/// to `./wit` and fails on a clean current working directory.
+pub fn sdk_world(plugin_dir: &Path) -> Result<(PathBuf, String)> {
+    let output = std::process::Command::new("go")
+        .args(["list", "-m", "-f", "{{.Dir}}", "go.wasmcloud.dev/component"])
+        .current_dir(plugin_dir)
+        .output()
+        .context("failed to resolve go.wasmcloud.dev/component")?;
+    if !output.status.success() {
+        bail!(
+            "go list -m failed for go.wasmcloud.dev/component: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let module_dir = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    let wit_dir = module_dir.join("wit");
+    if !wit_dir.is_dir() {
+        bail!("SDK module {} has no wit directory", module_dir.display());
+    }
+    let config =
+        std::fs::read_to_string(module_dir.join("componentize-go.toml")).unwrap_or_default();
+    let world_re = regex::Regex::new(r#"worlds\s*=\s*\[\s*"([^"]+)"\s*\]"#).unwrap();
+    let world = world_re
+        .captures(&config)
+        .map(|captures| captures[1].to_string())
+        .unwrap_or_else(|| "wasmcloud:component-go/wasip2@0.2.0".to_string());
+    Ok((wit_dir, world))
+}
+
 /// Derive `<package>/<world>` from the plugin's `wit/*.wit`.
 pub fn world_arg(wit_dir: &Path) -> Option<String> {
     let world_re = regex::Regex::new(r"world\s+([A-Za-z0-9_-]+)").unwrap();
