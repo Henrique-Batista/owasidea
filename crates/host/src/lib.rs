@@ -3142,7 +3142,6 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
     let telemetry = otel::init_tracing();
 
     let loaded = load_manifests(&manifests_dir)?;
-    println!("loading {} plugin manifests", loaded.len());
     if loaded.is_empty() {
         return Err(anyhow!("no manifests found in {manifests_dir:?}"));
     }
@@ -3155,8 +3154,6 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
     // artifact so restarts and `owasidea dev` reloads do not pay it again.
     config.cache(compilation_cache());
     let engine = Engine::new(&config)?;
-    println!("wasmtime engine ready");
-
     let mut plugins = HashMap::new();
     let mut ui_plugins = Vec::new();
     let mut seen_plugins = HashSet::new();
@@ -3203,7 +3200,6 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
                 let manifest = manifest.clone();
                 let manifest_value = manifest_value.clone();
                 let component_path = component_path.clone();
-                println!("compiling component {name}");
                 jobs.push((
                     name,
                     tokio::task::spawn_blocking(move || {
@@ -3220,7 +3216,6 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
                 let component = job
                     .await
                     .with_context(|| format!("component compilation task failed for {name}"))??;
-                println!("compiled component {name}");
                 compiled.insert(name, component);
             }
         }
@@ -3313,7 +3308,6 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
             ));
         }
 
-        println!("preparing component {}", manifest.name);
         let component = compiled.remove(&manifest.name).ok_or_else(|| {
             anyhow!(
                 "component for plugin {} was not compiled at startup",
@@ -3346,7 +3340,6 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
         instantiate(&engine, &runtime)
             .await
             .with_context(|| format!("startup smoke test failed for {}", manifest.name))?;
-        println!("instantiated component {}", manifest.name);
 
         plugins.insert(manifest.name.clone(), std::sync::Arc::new(runtime));
     }

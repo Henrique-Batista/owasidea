@@ -274,7 +274,7 @@ Objetivo: o desenvolvedor não precisa criar, ler ou versionar arquivos WIT.
 
 | Gate | Resultado |
 | --- | --- |
-| `cargo test -p owasidea-cli -p owasidea-host` | unit 212, integração 49 + 4 (`wit_flow`), host 34 + 3 + 3, 0 falhas |
+| `cargo test -p owasidea-cli -p owasidea-host` | unit 213, integração 49 + 4 (`wit_flow`), host 34 + 3 + 3, 0 falhas |
 | `examples/hello` | build **sem `wit/`**, smoke 2/2, Playwright 3/3 |
 | `plugins/attr-example` | `owasidea wit generate` + `cargo component build` sem `wit/` |
 | App da raiz (`owasidea build`) | 10 plugins; `attr-example` gerado, demais em modo `wit` |
@@ -318,3 +318,26 @@ Objetivo: o desenvolvedor não precisa criar, ler ou versionar arquivos WIT.
   teste `#[cfg(windows)]`. O job Windows do CI também passou o próprio
   `owasidea doctor --json` e o build do Shipyard. Nenhum instalador real foi
   executado nesta máquina Linux.
+
+## 13. CI: tempo e estabilidade
+
+- **sccache** (GHA backend) substitui o cache de `target/`; registry/git e os
+  binários de `cargo-component`, `wasm-tools`, `wit-bindgen` e `tauri-cli`
+  ficam em caches separados. `CARGO_INCREMENTAL=0` e `cargo --locked`.
+- `setup-go` usa `cache-dependency-path: "**/go.sum"`; o aviso de cache miss do
+  `go.sum` na raiz desapareceu.
+- Node 22 no CI: `@napi-rs/lzma` 1.5.1 exige Node ≥22.20; com Node 20 o npm
+  omitia o binding nativo e o `jco componentize` do `changelog-ts` falhava.
+- `npm ci --include=optional` quando há lockfile; `wit-bindgen` instalado
+  explicitamente; `webhook-go` (SDK `go.wasmcloud.dev/component`) resolve o
+  WIT do módulo com `go list -m` + `go mod download`.
+- O host compila componentes em lotes limitados pelas CPUs (máx. 4) e o host
+  de smoke/test usa `OWASIDEA_WASMTIME_CACHE=off`, evitando travas do cache
+  concorrente no runner; a janela de readiness é 600 s e o Playwright usa o
+  mesmo limite.
+- **Resultado medido** no run `40632718708` (commit `5c789b5`): Fast ~3 min,
+  Windows ~10 min, macOS ~6 min, Full ~22 min (cache de Wasmtime desligado no
+  smoke), AppImage ~5 min. sccache: 89–100% de hit nos jobs. O run completo
+  passou todos os jobs.
+- O Windows roda em PR, `main`, `release/1.0` e tags; pushes de feature usam o
+  Fast Linux. Runs de PR antigos são cancelados por concurrency.
