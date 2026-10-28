@@ -211,7 +211,7 @@ The CLI expects `<plugin-name>.component.wasm` in the plugin directory.
 | Language | Build command | Output note |
 |---|---|---|
 | Rust | `cargo component build --release` | copy `target/wasm32-wasip1/release/<crate>.wasm` |
-| Go | `go tool componentize-go -d wit -w <pkg>/<world> build -o main.wasm` | copy to `<name>.component.wasm` |
+| Go | `go tool componentize-go -d wit -w <pkg>/<world> build -o main.wasm`; SDK worlds use `go tool componentize-go build` | copy to `<name>.component.wasm` |
 | TypeScript | `jco componentize ... -o <name>.component.wasm` | local `jco` in `node_modules` |
 | C# | `dotnet build -c Release --source ""` | publish output `bin/Release/net10.0/wasi-wasm/publish/<name>.wasm` |
 | C | `wit-bindgen c` + wasi-sdk clang + `wasm-tools component new` | Makefile must output `<name>.component.wasm` |

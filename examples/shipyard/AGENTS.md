@@ -74,7 +74,8 @@ package comes from `wit/deps/core/core.wit`.
 The CLI expects `plugins/<name>/<name>.component.wasm`:
 
 - Rust: copy `target/wasm32-wasip1/release/<crate>.wasm`.
-- Go: copy `main.wasm`.
+- Go: copy `main.wasm`. An SDK-world module (webhook-go) is built with
+  `go tool componentize-go build` and needs no prebuilt `main.wasm`.
 - TypeScript: `jco componentize ... -o <name>.component.wasm`.
 - C#: copy the publish output.
 - C/C++: Makefiles must write `<name>.component.wasm` (the plugin name, not the

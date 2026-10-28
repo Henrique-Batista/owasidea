@@ -2589,6 +2589,23 @@ fn cmd_build(
                         );
                         src
                     }
+                    go_build::ComponentSource::SdkBuild => {
+                        // The SDK owns the world (componentize-go.toml), so no
+                        // -d/-w flags are needed.
+                        let mut cmd = std::process::Command::new("go");
+                        cmd.current_dir(&plugin_dir).args([
+                            "tool",
+                            "componentize-go",
+                            "build",
+                            "-o",
+                            "main.wasm",
+                        ]);
+                        let status = cmd.status()?;
+                        if !status.success() {
+                            anyhow::bail!("go build failed for {}", name);
+                        }
+                        plugin_dir.join("main.wasm")
+                    }
                     go_build::ComponentSource::Build => {
                         let world_arg = go_build::world_arg(&wit_dir);
                         go_build::ensure_bindings(&plugin_dir, &wit_dir, world_arg.as_deref())?;

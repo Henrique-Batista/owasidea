@@ -172,6 +172,10 @@ least two host minors and six months; see `docs/ABI_POLICY.md`.
 
 - `owasidea dev` in a terminal no longer lets the UI dev server read keys from
   the dashboard. Vite's own shortcuts (`r`, `o`, `q`) fired on the same keys.
+- Go `wasi:http` plugins that carry their world in the SDK
+  (`go.wasmcloud.dev/component` / `componentize-go.toml`) now build with
+  `componentize-go build` when there is no `wit/` and no prebuilt `main.wasm`;
+  Shipyard's `webhook-go` builds from a clean checkout.
 - The Output of the dashboard shows child logs without ANSI escape codes.
 
 - Stop-service drops the component instance instead of calling the guest stop

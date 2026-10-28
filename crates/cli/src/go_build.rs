@@ -14,6 +14,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub enum ComponentSource {
     /// Compile the plugin's `wit/` world with `componentize-go`.
     Build,
+    /// Build a Go module that carries its WIT world in the SDK
+    /// (`componentize-go.toml`, e.g. go.wasmcloud.dev/component).
+    SdkBuild,
     /// Reuse an existing `main.wasm` because the plugin has no WIT source.
     ///
     /// Executable `wasi:http` plugins (e.g. `webhook-go`) are plain Go
@@ -43,13 +46,20 @@ pub fn component_source(plugin_dir: &Path, wit_dir: &Path, name: &str) -> Result
     if has_wit {
         return Ok(ComponentSource::Build);
     }
+    let sdk_world = plugin_dir.join("componentize-go.toml").is_file()
+        || std::fs::read_to_string(plugin_dir.join("go.mod"))
+            .map(|manifest| manifest.contains("go.wasmcloud.dev/component"))
+            .unwrap_or(false);
+    if sdk_world {
+        return Ok(ComponentSource::SdkBuild);
+    }
     let prebuilt = plugin_dir.join("main.wasm");
     if prebuilt.is_file() {
         return Ok(ComponentSource::Prebuilt(prebuilt));
     }
     bail!(
-        "go plugin {name} has no wit/ directory or .owasidea/wit ({}) and no prebuilt main.wasm at {}; \
-         add marker comments (attributes mode) or wit/*.wit, or build the component and keep it as main.wasm",
+        "go plugin {name} has no wit/ directory or .owasidea/wit ({}), no componentize-go.toml \
+         SDK world, and no prebuilt main.wasm at {}; add marker comments, wit/*.wit, or build the component",
         wit_dir.display(),
         prebuilt.display()
     )
@@ -193,6 +203,19 @@ mod tests {
         assert_eq!(
             component_source(&plugin, &plugin.join("wit"), "notes").unwrap(),
             ComponentSource::Build
+        );
+    }
+
+    #[test]
+    fn sdk_world_uses_componentize_go_without_a_wit_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = dir.path().join("webhook-go");
+        std::fs::create_dir_all(&plugin).unwrap();
+        std::fs::write(plugin.join("componentize-go.toml"), "").unwrap();
+
+        assert_eq!(
+            component_source(&plugin, &plugin.join("wit"), "webhook-go").unwrap(),
+            ComponentSource::SdkBuild
         );
     }
 

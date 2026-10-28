@@ -134,7 +134,9 @@ The TypeScript scaffold does not need a global `jco`: `npm install` brings the
 2. Implement the WIT exports in `export_wit_world/wit_bindings.go`.
 3. Build with `owasidea build`. On the first build it generates `wit_exports.go`
    with `componentize-go bindings`, runs `go mod tidy`, then runs
-   `componentize-go build`; later builds reuse `wit_exports.go`.
+   `componentize-go build`; later builds reuse `wit_exports.go`. A Go module
+   with `componentize-go.toml` (for example `go.wasmcloud.dev/component`) owns
+   its own world and is built with `componentize-go build` without `wit/`.
 4. Copy `main.wasm` to `*.component.wasm`.
 5. Generate manifest with `--language go`.
 
