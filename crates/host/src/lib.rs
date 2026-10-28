@@ -3152,6 +3152,7 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
     // artifact so restarts and `owasidea dev` reloads do not pay it again.
     config.cache(compilation_cache());
     let engine = Engine::new(&config)?;
+    println!("wasmtime engine ready");
 
     let mut plugins = HashMap::new();
     let mut ui_plugins = Vec::new();
@@ -3182,6 +3183,7 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
             let manifest = manifest.clone();
             let manifest_value = manifest_value.clone();
             let name = manifest.name.clone();
+            println!("compiling component {name}");
             jobs.push((
                 name,
                 tokio::task::spawn_blocking(move || {
