@@ -1,8 +1,13 @@
-#include "{{name}}_cpp.h"
+#include "{{ident}}_cpp.h"
 #include <cstring>
 #include <cstdlib>
+#include <string>
 
-namespace exports::poc::{{name}}::api {
+// owasidea:world {{name}}
+// owasidea:export
+std::string greet(std::string name);
+
+namespace exports::poc::{{ident}}::api {
     wit::string Greet(wit::string name) {
         const char* prefix = "Hello, ";
         const char* suffix = "! (from C++)";

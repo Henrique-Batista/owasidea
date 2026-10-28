@@ -6,8 +6,8 @@ Owasidea gera WIT automaticamente a partir de anotações no código-fonte.
   `.owasidea/wit/` (`deps/host/host.wit` incluído). O template/toolchain aponta
   para esse diretório; nenhum WIT precisa existir no repositório. C# usa o
   package do plugin e o world `library`, com uma interface `api`.
-- **C e C++**: as ferramentas ainda leem `wit/`; o gerador escreve
-  `wit/<world>.wit` quando esses marcadores são usados.
+- **C e C++**: os Makefiles/templates leem `.owasidea/wit`; o gerador escreve
+  `<world>.wit` com a interface `api`. Os símbolos C usam `_` no lugar de `-`.
 
 `owasidea wit generate [path]` faz o mesmo sob demanda. `wit_source` em
 `wasm-app.toml` escolhe `auto` (padrão), `wit` ou `attributes`; ver

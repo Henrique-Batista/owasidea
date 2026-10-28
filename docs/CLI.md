@@ -156,10 +156,10 @@ UI plugins write a minimal static `dist/index.html`. Stateful service scaffoldin
 currently exists for Rust. TypeScript/UI plugins need `npm install` in the
 plugin directory before build.
 
-Rust plugins are scaffolded **without a WIT file**: `src/lib.rs` carries
-`#[owasidea::world("<name>")]` and `#[owasidea::export]` markers, and `build`
-renders the contract into `.owasidea/wit` (gitignored). Other languages keep
-`wit/<name>.wit`. The optional `wit_source` key selects the behavior:
+Rust, Go, TypeScript, C#, C and C++ plugins are scaffolded **without a WIT
+file**. Their sources carry the language's markers and `build` renders the
+contract into `.owasidea/wit` (gitignored); the language toolchain/Makefile
+reads that artifact. The optional `wit_source` key selects the behavior:
 
 ```toml
 [plugins.notes]

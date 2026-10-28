@@ -1906,16 +1906,12 @@ fn cmd_plugin_new(
             } else {
                 "-std=c++23 -fno-exceptions"
             };
-            std::fs::create_dir_all(dir.join("wit"))?;
             std::fs::create_dir_all(dir.join("src"))?;
-            std::fs::write(
-                dir.join("wit").join(format!("{name}.wit")),
-                templates::render(templates::C_WIT, &[("name", &name)]),
-            )?;
+            let ident = c_ident(&name);
             let source = if lang == "c" {
-                format!("src/{name}.c")
+                format!("src/{ident}.c")
             } else {
-                format!("src/{name}.cpp")
+                format!("src/{ident}.cpp")
             };
             let lang_kind = if lang == "c" { "c" } else { "cpp" };
             std::fs::write(
@@ -1924,6 +1920,7 @@ fn cmd_plugin_new(
                     templates::C_MAKEFILE,
                     &[
                         ("name", &name),
+                        ("ident", &ident),
                         ("lang", lang_kind),
                         ("compiler", compiler),
                         ("stdflag", stdflag),
@@ -1933,11 +1930,12 @@ fn cmd_plugin_new(
                 ),
             )?;
             let impl_content = if lang == "c" {
-                templates::render(templates::C_IMPL, &[("name", &name)])
+                templates::render(templates::C_IMPL, &[("name", &name), ("ident", &ident)])
             } else {
-                templates::render(templates::CPP_IMPL, &[("name", &name)])
+                templates::render(templates::CPP_IMPL, &[("name", &name), ("ident", &ident)])
             };
             std::fs::write(dir.join("src").join(format!("impl.{ext}")), impl_content)?;
+            wit_flow::generate(&dir, &name, if lang == "c" { "c" } else { "cpp" }, "0.1.0")?;
         }
         _ => {}
     }
@@ -1959,7 +1957,7 @@ fn cmd_plugin_new(
             (kind != "executable"
                 && matches!(
                     lang.as_str(),
-                    "rust" | "go" | "typescript" | "javascript" | "csharp"
+                    "rust" | "go" | "typescript" | "javascript" | "csharp" | "c" | "cpp" | "c++"
                 ))
             .then_some("attributes"),
         )?;
@@ -2091,6 +2089,22 @@ fn ensure_plugin_config_available(config_path: &Path, name: &str) -> anyhow::Res
 /// The macro crate ships with the framework checkout; an installed CLI falls
 /// back to the published version.
 /// componentize-dotnet turns `l-csharp` into the `lCsharp` namespace segment.
+/// `wit-bindgen` turns `l-c` into the `l_c` C identifier and file prefix.
+fn c_ident(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        out.insert(0, '_');
+    }
+    out
+}
+
 fn csharp_ident(name: &str) -> String {
     let mut out = String::new();
     for (index, part) in name
@@ -5832,7 +5846,7 @@ fn to_kebab_case(input: &str) -> String {
 
 #[cfg(test)]
 mod kebab_tests {
-    use super::{csharp_ident, to_kebab_case};
+    use super::{c_ident, csharp_ident, to_kebab_case};
 
     #[test]
     fn converts_rust_names_to_wit_names() {
@@ -5846,6 +5860,8 @@ mod kebab_tests {
         assert_eq!(csharp_ident("demo"), "demo");
         assert_eq!(csharp_ident("l-csharp"), "lCsharp");
         assert_eq!(csharp_ident("my_plugin"), "my_plugin");
+        assert_eq!(c_ident("l-c"), "l_c");
+        assert_eq!(c_ident("9-lives"), "_9_lives");
     }
 }
 
@@ -6253,7 +6269,7 @@ pub(crate) fn render_wit_source(
                             let name = if fname.is_empty() {
                                 String::new()
                             } else {
-                                fname
+                                to_kebab_case(&fname)
                             };
                             if !name.is_empty() {
                                 let params = if is_cpp {
@@ -6643,10 +6659,10 @@ fn parse_c_params(raw: &str) -> String {
         }
         if toks.len() == 1 {
             // name only -> default string
-            out.push(format!("{}: string", toks[0]));
+            out.push(format!("{}: string", to_kebab_case(toks[0])));
             continue;
         }
-        let pname = toks[toks.len() - 1].trim_matches('*');
+        let pname = to_kebab_case(toks[toks.len() - 1].trim_matches('*'));
         let ty = toks[..toks.len() - 1].join(" ");
         let wit = if ty.to_lowercase().contains("char") && part.contains('*') {
             "string".to_string()
@@ -6677,7 +6693,7 @@ fn parse_cpp_params(raw: &str) -> String {
         // support "type name" or "name: type"
         if part.contains(':') && !part.contains("::") {
             if let Some(colon) = part.find(':') {
-                let name = part[..colon].trim().to_string();
+                let name = to_kebab_case(part[..colon].trim());
                 let ty = part[colon + 1..].trim();
                 let wit = cpp_type_to_wit(ty);
                 if wit.is_empty() {

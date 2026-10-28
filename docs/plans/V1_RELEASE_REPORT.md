@@ -223,7 +223,7 @@ Publicados: `main`, `release/1.0` e a tag `v1.0.0` (recriada no HEAD final desta
 seção; antes apontava para `c4aaf80`, tag local nunca publicada). O CI de `main`
 passou em Linux (`Fast`) e Windows; a tag final repete o mesmo código.
 
-## 11. Contratos sem WIT por atributos (Rust, Go, TypeScript, C#)
+## 11. Contratos sem WIT por atributos (todas as linguagens headless)
 
 Objetivo: o desenvolvedor não precisa criar, ler ou versionar arquivos WIT.
 
@@ -233,15 +233,15 @@ Objetivo: o desenvolvedor não precisa criar, ler ou versionar arquivos WIT.
   `attributes`. `auto` usa `wit/` quando existe e, caso contrário, gera a partir
   dos marcadores.
 - Marcadores por linguagem: Rust `#[owasidea::world]`/`#[owasidea::export]` e
-  host markers; Go `// owasidea:world`/`// owasidea:export`; TypeScript
+  host markers; Go e C/C++ `// owasidea:world`/`// owasidea:export`; TypeScript
   `@owasidea-world`/`@owasidea-export`; C# `[OwasideaWorld("library")]` +
   `[OwasideaExport]` (com `Attributes.cs`).
-- O contrato gerado é **artefato**: as quatro linguagens gravam
+- O contrato gerado é **artefato**: as seis linguagens gravam
   `.owasidea/wit/<world>.wit` e `.owasidea/wit/deps/host/host.wit`. Rust aponta
-  o metadata do `Cargo.toml`; Go passa o diretório ao `componentize-go`; TypeScript
-  usa `jco --wit`; C# usa `<Wit Include>`. Nada disso é versionado. C# usa o
-  package do plugin e o world `library`, com interface `api`, para preservar o
-  formato do componentize-dotnet.
+  o metadata do `Cargo.toml`; Go passa o diretório ao `componentize-go`;
+  TypeScript usa `jco --wit`; C# usa `<Wit Include>`; C/C++ usam o Makefile.
+  Nada disso é versionado. C# usa o package do plugin e o world `library`; C/C++
+  usam a interface `api` e um identificador `_` para os símbolos (`l-c` → `l_c`).
 - `owasidea build` regenera o contrato antes de compilar, sem silenciar erros, e
   poda `*.wit` órfãos quando o world é renomeado.
 - **Drift**: marcadores + `wit/` escrito à mão no mesmo plugin falham o build;
@@ -251,9 +251,10 @@ Objetivo: o desenvolvedor não precisa criar, ler ou versionar arquivos WIT.
   `some_arg` → `some-arg`.
 - Tipos cobertos: escalares, `String`/`&str`, `Vec`, slices, arrays, `Option`,
   `Result`, tuplas, `Box`/`Arc`/`Rc` e tipos nomeados em kebab-case.
-- `plugin new` cria Rust, Go, TypeScript e C# **sem** `wit/`, semeia
+- `plugin new` cria **todas as seis linguagens** sem `wit/`, semeia
   `.owasidea/wit`, registra `wit_source = "attributes"` e preenche os marcadores
-  no template. C/C++ continuam com `wit/`.
+  no template. O template C/C++ também corrigiu o Makefile (`\t` literal e
+  `EXE` sem render).
 - O erro de capability agora mostra o trecho exato de `wasm-app.toml` a adicionar
   (`kv = "<name>:read-write"`) ou o marcador/linha a remover.
 
@@ -264,7 +265,8 @@ Objetivo: o desenvolvedor não precisa criar, ler ou versionar arquivos WIT.
 - `crates/cli/src/main.rs` — `render_wit_source`/`write_wit`, package/world/interface
   por linguagem, kebab-case e mapas de tipo.
 - `crates/cli/src/go_build.rs` — `componentize-go` lê o diretório escolhido.
-- `crates/cli/templates/plugin/{rust,go,ts,csharp}/*` — templates por atributos.
+- `crates/cli/templates/plugin/{rust,go,ts,csharp,c}/*` e
+  `templates/plugin/cpp/impl.cpp` — templates por atributos.
 - `examples/hello` e `plugins/attr-example` — apps Rust migrados, sem `wit/`.
 - `crates/cli/tests/wit_flow.rs` — integração do comando e dos scaffolds.
 
@@ -272,13 +274,14 @@ Objetivo: o desenvolvedor não precisa criar, ler ou versionar arquivos WIT.
 
 | Gate | Resultado |
 | --- | --- |
-| `cargo test -p owasidea-cli -p owasidea-host` | unit 210, integração 49 + 4 (`wit_flow`), host 34 + 3 + 3, 0 falhas |
+| `cargo test -p owasidea-cli -p owasidea-host` | unit 212, integração 49 + 4 (`wit_flow`), host 34 + 3 + 3, 0 falhas |
 | `examples/hello` | build **sem `wit/`**, smoke 2/2, Playwright 3/3 |
 | `plugins/attr-example` | `owasidea wit generate` + `cargo component build` sem `wit/` |
 | App da raiz (`owasidea build`) | 10 plugins; `attr-example` gerado, demais em modo `wit` |
 | Shipyard (`build` + `smoke --no-build`) | pass; 11 manifests assinados e 19 checks |
 | `scripts/test-templates.sh --langs rust,go,typescript` | templates por atributos compilam e validam |
 | App poliglota temporário (Rust+Go+TS+C#) | build e smoke `greet` nas quatro linguagens; C# com namespace `lCsharp` |
+| App temporário C e C++ | build e smoke `greet` com `.owasidea/wit`; C `l_c`, C++ `l_cpp` |
 | Drift | `wit/` legado ao lado de atributos: build rejeitado com mensagem de remoção |
 | Rename de world | `old.wit` gerado é removido; só `<world>.wit` permanece |
 
@@ -288,8 +291,8 @@ Objetivo: o desenvolvedor não precisa criar, ler ou versionar arquivos WIT.
   de código; esses plugins continuam em `wit_source = "wit"`. O guia
   [`PLUGIN_AUTHORING.md`](../PLUGIN_AUTHORING.md#rust-cargo-component) registra o
   limite.
-- C e C++ continuam usando `wit/`; o gerador por comentários existe, mas os
-  Makefiles/wit-bindgen ainda não apontam para `.owasidea/wit`.
+- C/C++ usam a interface `api` e identificadores `_`; plugins antigos com
+  `wit/` continuam em modo `wit` e não são migrados automaticamente.
 - No checkout local o template usa uma dependência de path para
   `crates/owasidea`; um CLI publicado deve resolver o crate `owasidea` da mesma
   forma que os demais crates do framework.

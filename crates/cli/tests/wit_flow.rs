@@ -120,6 +120,8 @@ fn go_typescript_and_csharp_scaffolds_have_no_wit_file() {
         ("go", "demo", "demo.wit"),
         ("typescript", "demo", "demo.wit"),
         ("csharp", "library", "library.wit"),
+        ("c", "demo", "demo.wit"),
+        ("cpp", "demo", "demo.wit"),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("wasm-app.toml");

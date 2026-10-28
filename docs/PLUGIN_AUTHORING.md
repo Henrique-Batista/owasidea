@@ -36,11 +36,10 @@ world = "<name>"
 | `auto` (default) | Use `wit/` when it exists, otherwise render from markers. |
 
 A `wit/` directory next to an attribute plugin is an error: remove it or set
-`wit_source = "wit"`. Committing `.owasidea/wit` is never necessary. Go uses
-`// owasidea:world` / `// owasidea:export`; TypeScript uses the `@owasidea-*`
-JSDoc tags; C# uses `[OwasideaWorld("library")]` and `[OwasideaExport]` plus
-`Attributes.cs`. C and C++ still use `wit/` (the generator can emit it from
-their marker comments).
+`wit_source = "wit"`. Committing `.owasidea/wit` is never necessary. Go and
+C/C++ use `// owasidea:world` / `// owasidea:export`; TypeScript uses the
+`@owasidea-*` JSDoc tags; C# uses `[OwasideaWorld("library")]` and
+`[OwasideaExport]` plus `Attributes.cs`.
 
 The attribute mapper covers scalars, `String`/`&str`, `Vec`, slices, arrays,
 `Option`, `Result`, tuples, `Box`/`Arc`/`Rc`, and kebab-cased named types. Rust
@@ -51,8 +50,9 @@ against markers).
 ## C/C++ (wasi-sdk + wasm-tools + wit-bindgen)
 
 1. Scaffold: `owasidea plugin new <name> --lang c|cpp`.
-2. Annotate the source with `// owasidea:...` markers (see `docs/SOURCE_GENERATORS.md`).
-   `owasidea wit generate` (and `owasidea build`) regenerates `wit/<name>.wit`.
+2. Annotate the source with `// owasidea:world` / `// owasidea:export` markers
+   (see `docs/SOURCE_GENERATORS.md`). `owasidea build` regenerates
+   `.owasidea/wit/<name>.wit`; the Makefile reads that artifact.
 3. Build the generated bindings and implementation with the scaffolded `Makefile`
    (`make`), which runs `wit-bindgen` and `clang`/`clang++`. Set `WASI_SDK_PATH`
    and `WASI_PREVIEW1_ADAPTER` for your installed toolchain; templates contain no

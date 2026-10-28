@@ -82,13 +82,16 @@ First supported release. The `v1.0.0` tag is cut by the release gate
   start/stop (`s`), rebuild (`R`), open UI (`o`), an interactive call form with
   JSON args, and a `?` help overlay. Works without a TTY by falling back to the
   plain log; `--no-tui` forces it.
-- **Attribute contracts without WIT** for Rust, Go, TypeScript and C#:
+- **Attribute contracts without WIT** for every headless language (Rust, Go,
+  TypeScript, C#, C, C++):
   `wit_source = auto|wit|attributes` per plugin. Attribute builds render
   `.owasidea/wit` (gitignored), point Cargo/componentize-go/jco/componentize-dotnet
   at it, and derive the manifest from the real component. `owasidea build`
   fails on drift instead of silently choosing a contract, prunes stale worlds,
   converts Rust/Go/TS/C# names to WIT kebab-case, and `plugin new` scaffolds
-  these languages without a `wit/` directory. C and C++ still use `wit/`.
+  these languages without a `wit/` directory. The C/C++ Makefile bug (`\t`
+  literal, unrendered `EXE`) was fixed and C/C++ now use the `api` interface
+  with sanitized `_` identifiers.
 - **Minimal example apps** under `examples/`: `hello` (Rust library + UI),
   `notes` (host KV and the `kv` capability), `ticker` (service lifecycle and
   the 409 reload rule). Each has smoke checks and Playwright tests;

@@ -199,7 +199,8 @@ pub fn detect_language(plugin_dir: &Path) -> &'static str {
 /// `owasidea wit generate` and by `plugin new` to seed a buildable plugin.
 pub fn generate(plugin_dir: &Path, name: &str, language: &str, version: &str) -> Result<Prepared> {
     let csharp = language == "csharp";
-    let (dir, world, package, wrap_interface, version) = if language == "rust" {
+    let wrap_interface = csharp || matches!(language, "c" | "cpp" | "c++");
+    let (dir, world, package, version) = if language == "rust" {
         let target = rust_target(plugin_dir)?;
         if !is_artifact_dir(&target.dir) {
             bail!(
@@ -212,7 +213,6 @@ pub fn generate(plugin_dir: &Path, name: &str, language: &str, version: &str) ->
             resolve(plugin_dir, &target.dir),
             target.world,
             None,
-            false,
             target.version,
         )
     } else {
@@ -235,7 +235,6 @@ pub fn generate(plugin_dir: &Path, name: &str, language: &str, version: &str) ->
             plugin_dir.join(".owasidea").join("wit"),
             world,
             csharp.then_some(name),
-            csharp,
             version.to_string(),
         )
     };
@@ -375,7 +374,8 @@ fn prepare_other(
     let artifact_dir = plugin_dir.join(".owasidea").join("wit");
     let csharp = language == "csharp";
     // C# uses a fixed `library` world and the plugin name as the WIT package;
-    // the generated interface keeps the componentize-dotnet shape.
+    // C/C++ keep the `api` interface their templates implement.
+    let wrap_interface = csharp || matches!(language, "c" | "cpp" | "c++");
     let default_world = if csharp {
         "library".to_string()
     } else {
@@ -386,7 +386,7 @@ fn prepare_other(
         &default_world,
         version,
         csharp.then_some(name),
-        csharp,
+        wrap_interface,
     )?;
     let has_source = has_wit(&source_dir);
     let mode = match requested {
@@ -655,6 +655,41 @@ mod other_language_tests {
         assert!(wit.contains("interface api {"));
         assert!(wit.contains("greet: func(name: string) -> string;"));
         assert!(wit.contains("world library {"));
+        assert!(wit.contains("export api;"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn c_markers_generate_the_api_interface() {
+        let dir = temp("c");
+        write(
+            &dir.join("impl.c"),
+            "// owasidea:world demo\n// owasidea:export\nchar *greet(const char *name);\n",
+        );
+        let prepared = prepare(&dir, "demo", "c", None, "0.1.0").unwrap().unwrap();
+        assert_eq!(prepared.mode, WitSource::Attributes);
+        assert!(!dir.join("wit").exists());
+        let wit = std::fs::read_to_string(dir.join(".owasidea/wit/demo.wit")).unwrap();
+        assert!(wit.contains("interface api {"));
+        assert!(wit.contains("greet: func(name: string) -> string;"));
+        assert!(wit.contains("world demo {"));
+        assert!(wit.contains("export api;"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cpp_markers_generate_the_api_interface() {
+        let dir = temp("cpp");
+        write(
+            &dir.join("src/impl.cpp"),
+            "// owasidea:world demo\n// owasidea:export\nstd::string greet(std::string name);\n",
+        );
+        let prepared = prepare(&dir, "demo", "cpp", None, "0.1.0")
+            .unwrap()
+            .unwrap();
+        assert_eq!(prepared.mode, WitSource::Attributes);
+        let wit = std::fs::read_to_string(dir.join(".owasidea/wit/demo.wit")).unwrap();
+        assert!(wit.contains("greet: func(name: string) -> string;"));
         assert!(wit.contains("export api;"));
         let _ = std::fs::remove_dir_all(&dir);
     }

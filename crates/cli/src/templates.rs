@@ -31,7 +31,6 @@ pub const CSHARP_IMPL: &str = include_str!("../templates/plugin/csharp/Impl.cs")
 pub const CSHARP_NUGET_CONFIG: &str = include_str!("../templates/plugin/csharp/nuget.config");
 pub const CSHARP_ATTRIBUTES: &str = include_str!("../templates/plugin/csharp/Attributes.cs");
 
-pub const C_WIT: &str = include_str!("../templates/plugin/c/wit.wit");
 pub const C_IMPL: &str = include_str!("../templates/plugin/c/impl.c");
 pub const C_MAKEFILE: &str = include_str!("../templates/plugin/c/Makefile");
 

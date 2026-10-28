@@ -41,9 +41,10 @@ Four files matter for every headless plugin:
 | `wasm-app.toml` | Source/build config: path, language, type, permissions, composition. |
 | `manifests/<name>.manifest.json` | Generated from the real WIT. Never hand-edit. |
 
-Rust, Go, TypeScript and C# plugins do not need the `wit/` file: `owasidea build`
-renders the contract from source markers into `.owasidea/wit` (gitignored),
-compiles against it, and derives the manifest from the real component. `wit_source` in `wasm-app.toml` selects `attributes`, `wit` or
+Rust, Go, TypeScript, C#, C and C++ plugins do not need the `wit/` file:
+`owasidea build` renders the contract from source markers into `.owasidea/wit`
+(gitignored), compiles against it, and derives the manifest from the real
+component. `wit_source` in `wasm-app.toml` selects `attributes`, `wit` or
 `auto`. See [`PLUGIN_AUTHORING.md`](PLUGIN_AUTHORING.md#rust-cargo-component).
 
 The host verifies the component's actual imports against the generated manifest,
