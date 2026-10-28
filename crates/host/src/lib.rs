@@ -3163,7 +3163,7 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
     let startup_started = std::time::Instant::now();
     let mut compiled = HashMap::new();
     {
-        let mut jobs = Vec::new();
+        let mut pending = Vec::new();
         for (manifest, manifest_value, manifest_path) in &loaded {
             if manifest.runtime.as_deref() == Some("js-wasm") {
                 continue;
@@ -3179,28 +3179,46 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
                     manifest.name
                 ));
             }
-            let engine = engine.clone();
-            let manifest = manifest.clone();
-            let manifest_value = manifest_value.clone();
-            let name = manifest.name.clone();
-            println!("compiling component {name}");
-            jobs.push((
-                name,
-                tokio::task::spawn_blocking(move || {
-                    verify_and_compile_component(
-                        &engine,
-                        &manifest,
-                        &manifest_value,
-                        &component_path,
-                    )
-                }),
+            pending.push((
+                manifest.name.clone(),
+                manifest.clone(),
+                manifest_value.clone(),
+                component_path,
             ));
         }
-        for (name, job) in jobs {
-            let component = job
-                .await
-                .with_context(|| format!("component compilation task failed for {name}"))??;
-            compiled.insert(name, component);
+        // Compiling every component at once can exhaust a 2-core CI runner;
+        // cap the batch to the CPUs we actually have (and at most 4).
+        let concurrency = std::thread::available_parallelism()
+            .map(|value| value.get())
+            .unwrap_or(2)
+            .clamp(1, 4);
+        for chunk in pending.chunks(concurrency) {
+            let mut jobs = Vec::new();
+            for (name, manifest, manifest_value, component_path) in chunk {
+                let engine = engine.clone();
+                let name = name.clone();
+                let manifest = manifest.clone();
+                let manifest_value = manifest_value.clone();
+                let component_path = component_path.clone();
+                println!("compiling component {name}");
+                jobs.push((
+                    name,
+                    tokio::task::spawn_blocking(move || {
+                        verify_and_compile_component(
+                            &engine,
+                            &manifest,
+                            &manifest_value,
+                            &component_path,
+                        )
+                    }),
+                ));
+            }
+            for (name, job) in jobs {
+                let component = job
+                    .await
+                    .with_context(|| format!("component compilation task failed for {name}"))??;
+                compiled.insert(name, component);
+            }
         }
     }
 
