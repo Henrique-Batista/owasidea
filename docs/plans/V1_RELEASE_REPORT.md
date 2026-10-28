@@ -204,9 +204,11 @@ os complementa.
   instalar `componentize-go` 0.5.2 e `jco` 1.39.0. O `.deb` do Shipyard não foi
   reconstruído nesta rodada; o resultado do G5 continua sendo a referência de
   empacotamento.
-- **Windows**: não executado (igual ao G2).
-- **CI remoto**: o workflow está versionado e o push foi feito (seção 10.5),
-  mas nenhum run do GitHub Actions foi observado nesta rodada.
+- **Windows**: o job Windows do GitHub Actions passou no commit final
+  (`cargo test host/cli`, Shipyard build e bundle NSIS). A execução local desta
+  máquina continua Linux-only.
+- **CI remoto**: run de `main` verde (`Fast` + `Windows`). Os jobs `Full`,
+  `AppImage` e `macOS` foram pulados pelas condições do workflow, não por falha.
 - **Dashboard**: testado em pseudo-terminal (pyte) em Linux. Não há teste em
   terminal Windows nem em terminais que não respondem consulta de cursor.
 
@@ -217,8 +219,9 @@ apenas um commit inicial (`339d967`, `LICENSE` MIT); a história foi integrada e
 `release/1.0` com `git merge --allow-unrelated-histories`, sem force-push, e o
 `main` local avançou por fast-forward.
 
-Publicados: `main`, `release/1.0` e a tag `v1.0.0` (recriada no commit final;
-antes apontava para `c4aaf80`, tag local nunca publicada).
+Publicados: `main`, `release/1.0` e a tag `v1.0.0` (recriada no HEAD final desta
+seção; antes apontava para `c4aaf80`, tag local nunca publicada). O CI de `main`
+passou em Linux (`Fast`) e Windows; a tag final repete o mesmo código.
 
 ## 11. Contratos sem WIT por atributos (Rust, Go, TypeScript, C#)
 
@@ -290,8 +293,8 @@ Objetivo: o desenvolvedor não precisa criar, ler ou versionar arquivos WIT.
 - No checkout local o template usa uma dependência de path para
   `crates/owasidea`; um CLI publicado deve resolver o crate `owasidea` da mesma
   forma que os demais crates do framework.
-- O CI Windows deste commit ainda não foi observado; a rodada anterior expôs e
-  corrigiu problemas de path/ambiente, e estes testes novos são multiplataforma.
+- O CI Windows do commit final passou; os testes novos são multiplataforma e a
+  suíte de integração roda o binário com uma thread de 32 MB no Windows.
 
 ## 12. Doctor: instalação de toolchains por plataforma
 
@@ -309,4 +312,6 @@ Objetivo: o desenvolvedor não precisa criar, ler ou versionar arquivos WIT.
   downloader embutido (arquivo Windows, `clang.exe`).
 - Evidência: `cargo test -p owasidea-cli` cobre o plano Linux/macOS/Windows,
   deduplicação, sudo, JSON e o preview `--platform windows`; o PATH Windows tem
-  teste `#[cfg(windows)]`. Nenhum instalador real foi executado nesta máquina.
+  teste `#[cfg(windows)]`. O job Windows do CI também passou o próprio
+  `owasidea doctor --json` e o build do Shipyard. Nenhum instalador real foi
+  executado nesta máquina Linux.
