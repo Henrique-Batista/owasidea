@@ -3217,6 +3217,7 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
                 let component = job
                     .await
                     .with_context(|| format!("component compilation task failed for {name}"))??;
+                println!("compiled component {name}");
                 compiled.insert(name, component);
             }
         }
@@ -3309,6 +3310,7 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
             ));
         }
 
+        println!("preparing component {}", manifest.name);
         let component = compiled.remove(&manifest.name).ok_or_else(|| {
             anyhow!(
                 "component for plugin {} was not compiled at startup",
@@ -3341,6 +3343,7 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
         instantiate(&engine, &runtime)
             .await
             .with_context(|| format!("startup smoke test failed for {}", manifest.name))?;
+        println!("instantiated component {}", manifest.name);
 
         plugins.insert(manifest.name.clone(), std::sync::Arc::new(runtime));
     }
