@@ -33,7 +33,7 @@ and `docs/`. The UI files are the generic dashboard: `index.html`, `main.ts`,
 
 Check required tooling (rustc, cargo, cargo-component, wasm-tools, go, node, npm)
 and optional per-language tools (clang, dotnet, jco, componentize-go,
-componentize-dotnet, trunk, wasmtime, python3). It also reports wasi-sdk and the
+componentize-dotnet, wit-bindgen, trunk, wasmtime, python3). It also reports wasi-sdk and the
 WASI preview1 reactor adapter. An install run exits non-zero when a required
 tool is still missing afterwards; a dry-run plan exits 0 once it is produced.
 

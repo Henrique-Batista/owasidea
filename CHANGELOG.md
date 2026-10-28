@@ -116,8 +116,8 @@ First supported release. The `v1.0.0` tag is cut by the release gate
 - **Toolchain installer**: `owasidea doctor --install-all`, repeatable
   `--install <tool>`, and the compatibility `--fix` now build a platform-aware
   plan from `tools.lock` for every required and optional toolchain
-  (`rustc`/`cargo`, cargo-component, wasm-tools, Go, Node/npm, jco, .NET,
-  componentize-go/dotnet, trunk, wasmtime, python3 and wasi-sdk). Dry-run is the
+  (`rustc`/`cargo`, cargo-component, wasm-tools, wit-bindgen, Go, Node/npm,
+  jco, .NET, componentize-go/dotnet, trunk, wasmtime, python3 and wasi-sdk). Dry-run is the
   default; `--yes`/`--execute` runs it, `--allow-sudo` opts into `sudo`
   commands, `--force` replans present tools, and `--json` emits
   `{tool, required, present, action, command, platform, reason}` entries plus a

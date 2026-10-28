@@ -34,6 +34,14 @@ macos = "cargo install wasm-tools --locked"
 windows = "cargo install wasm-tools --locked"
 
 [[tools]]
+name = "wit-bindgen"
+optional = true
+[tools.install]
+linux = "cargo install wit-bindgen-cli --locked"
+macos = "cargo install wit-bindgen-cli --locked"
+windows = "cargo install wit-bindgen-cli --locked"
+
+[[tools]]
 name = "go"
 min_version = "1.27.1"
 [tools.install]

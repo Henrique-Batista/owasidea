@@ -65,7 +65,8 @@ owasidea doctor --install-all --platform windows   # preview another OS
   per-OS `linux` / `macos` / `windows` command.
 - Required: `rustc`, `cargo`, `cargo-component`, `wasm-tools`, `go`, `node`,
   `npm`. Optional: `jco`, `dotnet`, `componentize-go`,
-  `componentize-dotnet`, `trunk`, `wasmtime`, `python3`, `wasi-sdk`.
+  `componentize-dotnet`, `wit-bindgen`, `trunk`, `wasmtime`, `python3`,
+  `wasi-sdk`.
 - `--fix` is an alias for missing required tools. Optional toolchains are only
   planned with `--install-all` or `--install <tool>`.
 - Without `--allow-sudo`, a command containing `sudo` is printed as
