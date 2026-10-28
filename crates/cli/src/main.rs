@@ -6902,10 +6902,17 @@ fn ensure_npm_dependencies(plugin_dir: &Path) -> anyhow::Result<()> {
         "    installing npm dependencies in {}",
         plugin_dir.display()
     );
-    let status = external_command("npm")
-        .args(["install", "--no-audit", "--no-fund"])
-        .current_dir(plugin_dir)
-        .status()?;
+    let has_lock = plugin_dir.join("package-lock.json").is_file();
+    let mut command = external_command("npm");
+    // npm ci is deterministic and installs optional native bindings (jco's
+    // @napi-rs/lzma) from the lockfile. Fall back to install for scaffolds
+    // without a lockfile.
+    if has_lock {
+        command.args(["ci", "--no-audit", "--no-fund", "--include=optional"]);
+    } else {
+        command.args(["install", "--no-audit", "--no-fund", "--include=optional"]);
+    }
+    let status = command.current_dir(plugin_dir).status()?;
     if !status.success() {
         anyhow::bail!("npm install failed in {}", plugin_dir.display());
     }
