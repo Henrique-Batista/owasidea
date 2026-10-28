@@ -71,6 +71,19 @@ pub fn component_source(plugin_dir: &Path, wit_dir: &Path, name: &str) -> Result
 /// absolute module path; relying on the bare `componentize-go build` defaults
 /// to `./wit` and fails on a clean current working directory.
 pub fn sdk_world(plugin_dir: &Path) -> Result<(PathBuf, String)> {
+    // `go list -m` does not download modules; on a clean CI runner `.Dir` is
+    // empty until the SDK module is present in the module cache.
+    let download = std::process::Command::new("go")
+        .args(["mod", "download", "go.wasmcloud.dev/component"])
+        .current_dir(plugin_dir)
+        .output()
+        .context("failed to download go.wasmcloud.dev/component")?;
+    if !download.status.success() {
+        bail!(
+            "go mod download failed for go.wasmcloud.dev/component: {}",
+            String::from_utf8_lossy(&download.stderr).trim()
+        );
+    }
     let output = std::process::Command::new("go")
         .args(["list", "-m", "-f", "{{.Dir}}", "go.wasmcloud.dev/component"])
         .current_dir(plugin_dir)
