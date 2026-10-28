@@ -5159,7 +5159,7 @@ async fn wait_for_host(client: &reqwest::Client, base: &str) -> anyhow::Result<(
     let timeout_ms = std::env::var("OWASIDEA_HOST_READY_TIMEOUT_MS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(120_000);
+        .unwrap_or(180_000);
     let attempts = (timeout_ms / 250).max(1);
     for _ in 0..attempts {
         if let Ok(response) = client.get(format!("{base}/health")).send().await {
@@ -5229,9 +5229,11 @@ async fn run_api_smoke(
         .stderr(std::process::Stdio::from(log));
     apply_signing_env_to(&mut command, cfg, &root);
     let child = command.spawn()?;
-    let host = TestHost { child, data_dir };
+    let mut host = TestHost { child, data_dir };
     let client = reqwest::Client::new();
     if let Err(error) = wait_for_host(&client, &base).await {
+        let status = host.child.try_wait();
+        eprintln!("host process status after timeout: {status:?}");
         eprintln!(
             "host log:\n{}",
             std::fs::read_to_string(&log_path).unwrap_or_default()
