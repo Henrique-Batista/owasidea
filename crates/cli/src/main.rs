@@ -5154,7 +5154,14 @@ impl Drop for TestHost {
 }
 
 async fn wait_for_host(client: &reqwest::Client, base: &str) -> anyhow::Result<()> {
-    for _ in 0..120 {
+    // A cold CI runner can spend more than 30 s compiling 11 components at
+    // host startup; keep the default generous and allow an override.
+    let timeout_ms = std::env::var("OWASIDEA_HOST_READY_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(120_000);
+    let attempts = (timeout_ms / 250).max(1);
+    for _ in 0..attempts {
         if let Ok(response) = client.get(format!("{base}/health")).send().await {
             if response.status().is_success() {
                 return Ok(());
@@ -5162,7 +5169,7 @@ async fn wait_for_host(client: &reqwest::Client, base: &str) -> anyhow::Result<(
         }
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
-    anyhow::bail!("host did not become ready at {base}")
+    anyhow::bail!("host did not become ready at {base} within {timeout_ms} ms")
 }
 
 fn check(ok: bool, label: impl std::fmt::Display) -> bool {
