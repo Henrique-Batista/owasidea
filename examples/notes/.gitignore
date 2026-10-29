@@ -14,6 +14,7 @@ ui/dist/
 ui/node_modules/
 ui/public/plugins/
 ui/public/ui-plugins.json
+.owasidea/
 ui/.owasidea/
 desktop/target/
 desktop/gen/

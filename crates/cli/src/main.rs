@@ -13,6 +13,7 @@ mod dist_stage;
 mod doctor;
 mod errors;
 mod go_build;
+mod layout;
 mod logs;
 mod migrate;
 mod permissions;
@@ -1778,6 +1779,11 @@ fn cmd_plugin_new(
                 dir.join("package.json"),
                 templates::render(templates::TS_PACKAGE_JSON, &[("name", &name)]),
             )?;
+            std::fs::create_dir_all(dir.join("scripts"))?;
+            std::fs::write(
+                dir.join("scripts").join("build.mjs"),
+                templates::render(templates::TS_BUILD_SCRIPT, &[("name", &name)]),
+            )?;
             std::fs::write(
                 dir.join("src").join("index.ts"),
                 templates::render(templates::TS_INDEX, &[("name", &name)]),
@@ -2375,12 +2381,15 @@ fn generate_manifest(
     });
 
     let manifest_dir = out.parent().unwrap_or_else(|| std::path::Path::new("."));
-    let rel =
-        pathdiff::diff_paths(component, manifest_dir).unwrap_or_else(|| component.to_path_buf());
+    std::fs::create_dir_all(manifest_dir)?;
+    let manifest_dir_abs = manifest_dir
+        .canonicalize()
+        .unwrap_or_else(|_| manifest_dir.to_path_buf());
+    let rel = pathdiff::diff_paths(component, &manifest_dir_abs)
+        .unwrap_or_else(|| component.to_path_buf());
     let mut manifest = manifest;
     manifest["component"] = json!(rel.to_string_lossy().to_string());
 
-    std::fs::create_dir_all(manifest_dir)?;
     std::fs::write(out, serde_json::to_string_pretty(&manifest)? + "\n")?;
     println!(
         "wrote {} ({} wasi imports, {} host imports, {} exports)",
@@ -2429,11 +2438,17 @@ fn validate_dependency_contracts(
         let manifest: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&manifest_path)?)?;
         let mut available = std::collections::BTreeSet::new();
+        let layout = layout::Layout::new(root);
         for dependency in &plugin.dependencies {
             let dep = plugins.get(dependency).ok_or_else(|| {
                 anyhow::anyhow!("plugin {name} depends on unknown plugin {dependency:?}")
             })?;
-            let component = app_path(root, &dep.path).join(format!("{dependency}.component.wasm"));
+            let component = layout.component(dependency);
+            let component = if component.is_file() {
+                component
+            } else {
+                app_path(root, &dep.path).join(format!("{dependency}.component.wasm"))
+            };
             available.extend(component_export_interfaces(&component).with_context(|| {
                 format!("cannot inspect dependency {dependency} for plugin {name}")
             })?);
@@ -2451,6 +2466,63 @@ fn validate_dependency_contracts(
                     plugin.dependencies
                 );
             }
+        }
+    }
+    Ok(())
+}
+
+/// Resolves every plugin contract before compilation and publishes dependency
+/// packages into the project-level `.owasidea/` store. Building the views up
+/// front makes build order irrelevant and removes hand-copied `wit/deps`.
+fn prepare_workspace(
+    root: &Path,
+    layout: &layout::Layout,
+    plugins: &std::collections::BTreeMap<String, PluginSection>,
+) -> anyhow::Result<()> {
+    std::fs::create_dir_all(layout.base())?;
+    let mut providers = std::collections::BTreeMap::new();
+    let mut own_dirs = std::collections::BTreeMap::new();
+
+    for (name, plugin) in plugins {
+        if plugin.runtime.as_deref() == Some("js-wasm") {
+            continue;
+        }
+        let plugin_dir = app_path(root, &plugin.path);
+        let prepared = wit_flow::prepare(
+            &plugin_dir,
+            name,
+            &plugin.language,
+            plugin.wit_source.as_deref(),
+            plugin.version.as_deref().unwrap_or("0.1.0"),
+        )?;
+        let own = prepared
+            .map(|prepared| prepared.dir)
+            .unwrap_or_else(|| plugin_dir.join("wit"));
+        let packages = layout::publish_packages(layout, &own)?;
+        providers.insert(name.clone(), packages);
+        own_dirs.insert(name.clone(), own);
+    }
+    for (name, plugin) in plugins {
+        if plugin.runtime.as_deref() == Some("js-wasm") {
+            continue;
+        }
+        let own = own_dirs.get(name).expect("prepared contract");
+        let deps = layout::publish_deps(layout, own)?;
+        providers.entry(name.clone()).or_default().extend(deps);
+    }
+    layout::write_providers(layout, &providers)?;
+
+    for (name, plugin) in plugins {
+        if plugin.runtime.as_deref() == Some("js-wasm") {
+            continue;
+        }
+        let plugin_dir = app_path(root, &plugin.path);
+        let own = own_dirs.get(name).expect("prepared contract");
+        let mut resolved = plugin.dependencies.clone();
+        resolved.extend(plugin.compose_with.iter().cloned());
+        let view = layout::materialize_view(layout, name, own, &resolved, &providers)?;
+        if !layout::accepts_wit_dir(&plugin.language, &plugin_dir) {
+            layout::mirror_missing(&view, own)?;
         }
     }
     Ok(())
@@ -2496,6 +2568,9 @@ fn cmd_build(
     let build_id = build_id::compute_build_id();
     std::env::set_var("OWASIDEA_BUILD_ID", &build_id);
 
+    let layout = layout::Layout::new(&root);
+    prepare_workspace(&root, &layout, &plugins)?;
+
     // Build ordinary plugins first so composed clients can resolve their
     // dependency components in the same invocation.
     let mut ordered: Vec<(&String, &PluginSection)> = plugins.iter().collect();
@@ -2534,24 +2609,37 @@ fn cmd_build(
                 )? {
                     println!("    {}", prepared.summary());
                 }
-                let status = std::process::Command::new("cargo")
+                let cache = layout.cache("cargo", name);
+                let use_cache = std::env::var_os("CARGO_TARGET_DIR").is_none();
+                let mut build = std::process::Command::new("cargo");
+                build
                     .args(["component", "build", "--release"])
-                    .current_dir(&plugin_dir)
-                    .status()?;
+                    .current_dir(&plugin_dir);
+                if use_cache {
+                    build.env("CARGO_TARGET_DIR", &cache);
+                }
+                let status = build.status()?;
                 if !status.success() {
                     anyhow::bail!("rust build failed for {}", name);
                 }
-                let out = std::process::Command::new("cargo")
+                let mut metadata = std::process::Command::new("cargo");
+                metadata
                     .args(["metadata", "--format-version", "1", "--no-deps"])
-                    .current_dir(&plugin_dir)
-                    .output()?;
+                    .current_dir(&plugin_dir);
+                if use_cache {
+                    metadata.env("CARGO_TARGET_DIR", &cache);
+                }
+                let out = metadata.output()?;
                 let meta: serde_json::Value = serde_json::from_slice(&out.stdout)?;
                 let td = meta["target_directory"].as_str().unwrap_or("");
                 let artifact_name = name.replace('-', "_");
                 let src = std::path::Path::new(td)
                     .join("wasm32-wasip1/release")
                     .join(format!("{}.wasm", artifact_name));
-                let dst = plugin_dir.join(format!("{}.component.wasm", name));
+                let dst = layout.component(name);
+                if let Some(parent) = dst.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
                 std::fs::copy(&src, &dst)?;
             }
             "go" => {
@@ -2565,19 +2653,18 @@ fn cmd_build(
                 if let Some(prepared) = &prepared {
                     println!("    {}", prepared.summary());
                 }
-                let wit_dir = prepared
-                    .as_ref()
-                    .map(|prepared| prepared.dir.clone())
-                    .unwrap_or_else(|| plugin_dir.join("wit"));
+                let wit_dir = layout.wit_view(name);
                 // Go tools run with current_dir = plugin; an app-relative path
                 // would be resolved twice. Pass an absolute path.
                 let wit_dir = wit_dir.canonicalize().unwrap_or(wit_dir);
+                let mut generated = true;
                 let src = match go_build::component_source(&plugin_dir, &wit_dir, name)? {
                     go_build::ComponentSource::Prebuilt(src) => {
                         println!(
                             "    warning: using prebuilt main.wasm (no WIT source) for {name}: {}",
                             src.display()
                         );
+                        generated = false;
                         src
                     }
                     go_build::ComponentSource::SdkBuild => {
@@ -2614,8 +2701,14 @@ fn cmd_build(
                         plugin_dir.join("main.wasm")
                     }
                 };
-                let dst = plugin_dir.join(format!("{}.component.wasm", name));
+                let dst = layout.component(name);
+                if let Some(parent) = dst.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
                 std::fs::copy(&src, &dst)?;
+                if generated && src.starts_with(&plugin_dir) {
+                    let _ = std::fs::remove_file(&src);
+                }
             }
             "typescript" | "javascript" => {
                 if let Some(prepared) = wit_flow::prepare(
@@ -2628,8 +2721,16 @@ fn cmd_build(
                     println!("    {}", prepared.summary());
                 }
                 ensure_npm_dependencies(&plugin_dir)?;
+                let dst = layout.component(name);
+                if let Some(parent) = dst.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let view = layout.wit_view(name);
+                let view = view.canonicalize().unwrap_or(view);
                 let status = external_command("npm")
                     .args(["run", "build"])
+                    .env("OWASIDEA_WIT_DIR", &view)
+                    .env("OWASIDEA_OUT", &dst)
                     .current_dir(&plugin_dir)
                     .status()?;
                 if !status.success() {
@@ -2639,19 +2740,19 @@ fn cmd_build(
                         plugin_dir.display()
                     );
                 }
-                let produced = std::fs::read_dir(&plugin_dir)?
-                    .filter_map(|e| e.ok())
-                    .map(|e| e.path())
-                    .find(|pp| {
-                        pp.file_name()
-                            .and_then(|s| s.to_str())
-                            .map(|s| s.ends_with(".component.wasm"))
-                            .unwrap_or(false)
-                    });
-                if let Some(src) = produced {
-                    let dst = plugin_dir.join(format!("{}.component.wasm", name));
-                    if src != dst {
+                if !dst.exists() {
+                    let produced = std::fs::read_dir(&plugin_dir)?
+                        .filter_map(|e| e.ok())
+                        .map(|e| e.path())
+                        .find(|pp| {
+                            pp.file_name()
+                                .and_then(|s| s.to_str())
+                                .map(|s| s.ends_with(".component.wasm"))
+                                .unwrap_or(false)
+                        });
+                    if let Some(src) = produced {
                         std::fs::copy(&src, &dst)?;
+                        let _ = std::fs::remove_file(&src);
                     }
                 }
             }
@@ -2680,13 +2781,30 @@ fn cmd_build(
                 };
                 let sdk_env = wasi_sdk.display().to_string().replace('\\', "/");
                 let adapter_env = adapter.display().to_string().replace('\\', "/");
+                let dst = layout.component(name);
+                if let Some(parent) = dst.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let view = layout.wit_view(name);
+                let view = view.canonicalize().unwrap_or(view);
+                let view_env = view.display().to_string().replace('\\', "/");
+                let out_env = dst.display().to_string().replace('\\', "/");
                 let status = make
                     .env("WASI_SDK_PATH", sdk_env)
                     .env("WASI_PREVIEW1_ADAPTER", adapter_env)
+                    .env("WIT_DIR", view_env)
+                    .env("OUT", out_env)
                     .current_dir(&plugin_dir)
                     .status()?;
                 if !status.success() {
                     anyhow::bail!("make failed for {}", name);
+                }
+                if !dst.exists() {
+                    let produced = plugin_dir.join(format!("{}.component.wasm", name));
+                    if produced.is_file() {
+                        std::fs::copy(&produced, &dst)?;
+                        let _ = std::fs::remove_file(produced);
+                    }
                 }
             }
             "csharp" => {
@@ -2701,8 +2819,14 @@ fn cmd_build(
                 }
                 let dotnet =
                     tool_path("dotnet").unwrap_or_else(|| std::path::PathBuf::from("dotnet"));
+                let cache = layout.cache("dotnet", name);
+                let view = layout.wit_view(name);
+                let view = view.canonicalize().unwrap_or(view);
                 let mut cmd = std::process::Command::new(&dotnet);
                 cmd.args(["build", "-c", "Release", "--source", ""])
+                    .arg("--artifacts-path")
+                    .arg(&cache)
+                    .arg(format!("-p:OwasideaWitDir={}", view.display()))
                     .current_dir(&plugin_dir);
                 if let Some(wasi_sdk) = std::env::var_os("WASI_SDK_PATH") {
                     cmd.env("WASI_SDK_PATH", wasi_sdk);
@@ -2711,49 +2835,61 @@ fn cmd_build(
                 if !status.success() {
                     anyhow::bail!("dotnet build failed for {}", name);
                 }
-                // componentize-dotnet produces <name>.wasm in publish/.
-                let mut found = None;
-                for candidate in [
-                    plugin_dir.join(format!(
-                        "bin/Release/net10.0/wasi-wasm/publish/{}.wasm",
-                        name
-                    )),
-                    plugin_dir.join(format!("bin/Release/net10.0/wasi-wasm/{}.wasm", name)),
-                ] {
-                    if candidate.exists() {
-                        found = Some(candidate);
-                        break;
-                    }
+                // componentize-dotnet writes <name>.wasm under publish/.
+                let artifact = format!("{name}.wasm");
+                let mut found = walkdir(cache.join("publish")).into_iter().find(|path| {
+                    path.file_name().and_then(|value| value.to_str()) == Some(&artifact)
+                });
+                if found.is_none() {
+                    found = walkdir(cache.join("bin")).into_iter().find(|path| {
+                        path.file_name().and_then(|value| value.to_str()) == Some(&artifact)
+                    });
                 }
                 if found.is_none() {
-                    for entry in walkdir(plugin_dir.join("bin")) {
-                        if entry.extension().and_then(|s| s.to_str()) == Some("wasm")
-                            && !entry.to_string_lossy().contains("component")
-                        {
-                            found = Some(entry);
-                            break;
-                        }
-                    }
+                    found = walkdir(plugin_dir.join("bin")).into_iter().find(|path| {
+                        path.file_name().and_then(|value| value.to_str()) == Some(&artifact)
+                    });
                 }
                 if let Some(src) = found {
-                    let dst = plugin_dir.join(format!("{}.component.wasm", name));
+                    let dst = layout.component(name);
+                    if let Some(parent) = dst.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
                     std::fs::copy(&src, &dst)?;
                 } else {
                     anyhow::bail!("dotnet.wasm not found after build");
                 }
+                let stale = plugin_dir.join(format!("{name}.component.wasm"));
+                let _ = std::fs::remove_file(stale);
             }
             other => anyhow::bail!("unsupported language: {}", other),
         }
 
-        let component = plugin_dir.join(format!("{}.component.wasm", name));
+        let component = layout.component(name);
+        if !component.exists() {
+            // Legacy toolchains still emit into the plugin directory; adopt
+            // the artifact into the project store instead of failing.
+            let legacy = plugin_dir.join(format!("{}.component.wasm", name));
+            if legacy.is_file() {
+                if let Some(parent) = component.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::copy(&legacy, &component)?;
+                let _ = std::fs::remove_file(legacy);
+            }
+        }
         if !component.exists() {
             anyhow::bail!("component not found after build: {}", component.display());
+        }
+        let legacy = plugin_dir.join(format!("{name}.component.wasm"));
+        if legacy.exists() && legacy != component {
+            let _ = std::fs::remove_file(&legacy);
         }
 
         // Build-time composition: turn this plugin's output into a client and
         // link the configured provider components into a self-contained one.
         if !p.compose_with.is_empty() {
-            let client = plugin_dir.join(format!("{}.client.wasm", name));
+            let client = layout.client(name);
             std::fs::rename(&component, &client)?;
             // wasm-tools derives a package name from each definition path and
             // rejects multi-dot file names such as `core-rust.component.wasm`.
@@ -2767,8 +2903,12 @@ fn cmd_build(
                 let Some(dep) = plugins.get(dependency) else {
                     anyhow::bail!("plugin {name} composes with unknown plugin {dependency:?}");
                 };
-                let dep_dir = app_path(&root, &dep.path);
-                let dep_component = dep_dir.join(format!("{}.component.wasm", dependency));
+                let dep_component = layout.component(dependency);
+                let dep_component = if dep_component.is_file() {
+                    dep_component
+                } else {
+                    app_path(&root, &dep.path).join(format!("{}.component.wasm", dependency))
+                };
                 if !dep_component.exists() {
                     anyhow::bail!(
                         "compose dependency {dependency} is not built at {}",
@@ -4422,7 +4562,7 @@ fn copy_runtime_resources(
     std::fs::create_dir_all(destination)?;
     let manifests = root.join("manifests");
     if manifests.is_dir() {
-        copy_dir_all(&manifests, &destination.join("manifests"))?;
+        crate::dist_stage::write_runtime_manifests(&manifests, &destination.join("manifests"))?;
     }
     let runtime_src = runtime_src
         .map(Path::to_path_buf)
@@ -4430,9 +4570,9 @@ fn copy_runtime_resources(
     if runtime_src.is_file() {
         std::fs::copy(&runtime_src, destination.join("owasidea.runtime.json"))?;
     }
-    let plugins = root.join("plugins");
-    if plugins.is_dir() {
-        for entry in std::fs::read_dir(&plugins)? {
+    let built = crate::layout::Layout::new(root).base().join("build");
+    if built.is_dir() {
+        for entry in std::fs::read_dir(&built)? {
             let entry = entry?;
             let path = entry.path();
             if !path.is_dir() {
@@ -4446,6 +4586,29 @@ fn copy_runtime_resources(
                 let target = destination.join("plugins").join(name);
                 std::fs::create_dir_all(&target)?;
                 std::fs::copy(&component, target.join(component.file_name().unwrap()))?;
+            }
+        }
+    }
+    let plugins = root.join("plugins");
+    if plugins.is_dir() {
+        for entry in std::fs::read_dir(&plugins)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let target = destination.join("plugins").join(name);
+            let file = format!("{name}.component.wasm");
+            if target.join(&file).is_file() {
+                continue;
+            }
+            let component = path.join(&file);
+            if component.is_file() {
+                std::fs::create_dir_all(&target)?;
+                std::fs::copy(&component, target.join(&file))?;
             }
         }
     }

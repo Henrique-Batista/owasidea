@@ -21,6 +21,7 @@ pub const GO_MOD: &str = include_str!("../templates/plugin/go/go.mod");
 pub const GO_EXPORT_IMPL: &str = include_str!("../templates/plugin/go/wit_bindings.go");
 
 pub const TS_PACKAGE_JSON: &str = include_str!("../templates/plugin/ts/package.json");
+pub const TS_BUILD_SCRIPT: &str = include_str!("../templates/plugin/ts/build.mjs");
 pub const TS_INDEX: &str = include_str!("../templates/plugin/ts/index.ts");
 
 pub const CSHARP_EXECUTABLE_CSPROJ: &str =

@@ -11,6 +11,37 @@ below; see [`docs/UPDATER.md`](docs/UPDATER.md).
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-10-29
+
+### Added
+
+- Project-level build store: `owasidea build` writes dependency packages,
+  per-consumer WIT views, final components and toolchain caches under
+  `.owasidea/`. See `docs/BUILD_LAYOUT.md`.
+- Dependency WIT is resolved automatically from `.owasidea/deps/`; consumers no
+  longer need a hand-copied `wit/deps/<provider>`.
+- Rust builds use `.owasidea/cache/cargo/<plugin>` as `CARGO_TARGET_DIR` when
+  the variable is not already set. C# builds use
+  `dotnet --artifacts-path .owasidea/cache/dotnet/<plugin>`.
+- C#, C/C++ and TypeScript templates read the resolved WIT view through
+  `OwasideaWitDir`, `WIT_DIR`/`OUT` and `OWASIDEA_WIT_DIR`/`OWASIDEA_OUT`.
+- Bundles stage rewritten manifests in `.owasidea/runtime-manifests/` so the
+  packaged `manifests/` and `plugins/` layout stays self-contained.
+
+### Changed
+
+- Final components live in `.owasidea/build/<plugin>/<plugin>.component.wasm`.
+  `plugins/<plugin>/` keeps sources, contracts and toolchain-owned bindings.
+- `owasidea build` adopts a legacy plugin-local component into the store and
+  removes the duplicate.
+- Manifests keep `host_abi: "2"`; `min_host` follows the 1.3 host.
+
+### Fixed
+
+- Rust dependency mirroring preserves the `wit/deps` paths referenced by
+  `package.metadata.component.target.dependencies`, merges only the interfaces
+  the contract imports, and never replaces existing source packages.
+
 ## [1.2.0] - 2026-10-28
 
 ### Breaking

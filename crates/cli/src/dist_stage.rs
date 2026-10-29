@@ -29,7 +29,53 @@ impl StageReport {
     }
 }
 
-/// Copy `manifests/`, `plugins/*/<name>.component.wasm` and `ui/public/` into
+/// Copies manifests into a runtime layout and rewrites `component` to the
+/// staged `plugins/<name>/<name>.component.wasm` path. The app tree keeps
+/// `.owasidea/build/...`; bundles are self-contained and use this layout.
+pub fn write_runtime_manifests(source: &Path, destination: &Path) -> anyhow::Result<usize> {
+    reset_dir(destination)?;
+    let mut count = 0;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let file_name = entry.file_name();
+        let is_manifest = file_name
+            .to_str()
+            .is_some_and(|name| name.ends_with(".manifest.json"));
+        if !is_manifest {
+            std::fs::copy(&path, destination.join(&file_name))?;
+            continue;
+        }
+        let raw = std::fs::read_to_string(&path)?;
+        let Ok(mut manifest) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            std::fs::copy(&path, destination.join(&file_name))?;
+            count += 1;
+            continue;
+        };
+        if manifest.get("component").is_some() {
+            let fallback = file_name
+                .to_str()
+                .and_then(|name| name.strip_suffix(".manifest.json"))
+                .unwrap_or_default();
+            let plugin = manifest["name"].as_str().unwrap_or(fallback);
+            manifest["component"] =
+                serde_json::json!(format!("../plugins/{plugin}/{plugin}.component.wasm"));
+            std::fs::write(
+                destination.join(&file_name),
+                serde_json::to_string_pretty(&manifest)? + "\n",
+            )?;
+            count += 1;
+        } else {
+            std::fs::copy(&path, destination.join(&file_name))?;
+        }
+    }
+    Ok(count)
+}
+
+/// Copy `manifests/`, the components they reference and `ui/public/` into
 /// `output`. Existing staged copies are replaced so a removed plugin does not
 /// leave a stale manifest behind.
 pub fn stage_dist(root: &Path, output: &Path) -> anyhow::Result<StageReport> {
@@ -50,45 +96,56 @@ pub fn stage_dist(root: &Path, output: &Path) -> anyhow::Result<StageReport> {
     let mut report = StageReport::default();
 
     let manifests_dst = output.join("manifests");
-    reset_dir(&manifests_dst)?;
+    write_runtime_manifests(&manifests_src, &manifests_dst)?;
+    report.manifests = std::fs::read_dir(&manifests_src)?
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.ends_with(".manifest.json"))
+        })
+        .count();
+
+    let plugins_dst = output.join("plugins");
+    reset_dir(&plugins_dst)?;
     for entry in std::fs::read_dir(&manifests_src)? {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        std::fs::copy(&path, manifests_dst.join(entry.file_name()))?;
-        if path
+        let path = entry?.path();
+        if !path
             .file_name()
             .and_then(|name| name.to_str())
             .is_some_and(|name| name.ends_with(".manifest.json"))
         {
-            report.manifests += 1;
+            continue;
         }
-    }
-
-    let plugins_src = root.join("plugins");
-    let plugins_dst = output.join("plugins");
-    reset_dir(&plugins_dst)?;
-    if plugins_src.is_dir() {
-        for entry in std::fs::read_dir(&plugins_src)? {
-            let entry = entry?;
-            let plugin_dir = entry.path();
-            if !plugin_dir.is_dir() {
-                continue;
-            }
-            let Some(name) = plugin_dir.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            let component = plugin_dir.join(format!("{name}.component.wasm"));
-            if !component.is_file() {
-                continue;
-            }
-            let target = plugins_dst.join(name);
-            std::fs::create_dir_all(&target)?;
-            std::fs::copy(&component, target.join(component.file_name().unwrap()))?;
-            report.components += 1;
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        let fallback_name = path
+            .file_name()
+            .and_then(|file| file.to_str())
+            .and_then(|file| file.strip_suffix(".manifest.json"))
+            .unwrap_or_default();
+        let name = manifest["name"].as_str().unwrap_or(fallback_name);
+        let component = manifest["component"]
+            .as_str()
+            .map(|relative| manifests_src.join(relative))
+            .filter(|component| component.is_file())
+            .unwrap_or_else(|| {
+                root.join("plugins")
+                    .join(name)
+                    .join(format!("{name}.component.wasm"))
+            });
+        if !component.is_file() {
+            continue;
         }
+        let target = plugins_dst.join(name);
+        std::fs::create_dir_all(&target)?;
+        std::fs::copy(&component, target.join(component.file_name().unwrap()))?;
+        report.components += 1;
     }
 
     let ui_src = root.join("ui").join("public");

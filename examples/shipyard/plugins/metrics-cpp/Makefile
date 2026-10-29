@@ -9,6 +9,8 @@ CXX = $(WASI_SDK)/bin/clang++$(EXE)
 CXXFLAGS = --target=wasm32-wasip1 --sysroot=$(WASI_SDK)/share/wasi-sysroot -std=c++20 -fno-exceptions -O2
 PLUGIN = metrics-cpp
 NAME = metrics
+WIT_DIR ?= wit
+OUT ?= $(PLUGIN).component.wasm
 
 ifeq ($(strip $(WASI_SDK)),)
 $(error Set WASI_SDK_PATH to a wasi-sdk install)
@@ -20,11 +22,11 @@ endif
 .PHONY: all clean
 
 all:
-	wit-bindgen cpp wit/$(NAME).wit --out-dir gen
+	wit-bindgen cpp $(WIT_DIR) --out-dir gen
 	$(CXX) $(CXXFLAGS) -Igen -c gen/$(NAME).cpp -o gen/$(NAME).o
 	$(CXX) $(CXXFLAGS) -Igen -c src/impl.cpp -o gen/impl.o
 	$(CXX) $(CXXFLAGS) gen/$(NAME)_component_type.o gen/$(NAME).o gen/impl.o -o $(NAME).core.wasm -mexec-model=reactor
-	wasm-tools component new $(NAME).core.wasm --adapt wasi_snapshot_preview1=$(ADAPTER) -o $(PLUGIN).component.wasm
+	wasm-tools component new $(NAME).core.wasm --adapt wasi_snapshot_preview1=$(ADAPTER) -o $(OUT)
 
 clean:
-	rm -rf gen $(NAME).core.wasm $(PLUGIN).component.wasm
+	rm -rf gen $(NAME).core.wasm $(OUT)

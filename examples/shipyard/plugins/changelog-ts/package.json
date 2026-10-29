@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "jco componentize src/index.ts --wit wit --world-name changelog -o changelog-ts.component.wasm"
+    "build": "node scripts/build.mjs"
   },
   "devDependencies": {
     "@bytecodealliance/componentize-js": "0.23.0",

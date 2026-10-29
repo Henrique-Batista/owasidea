@@ -29,8 +29,9 @@ Notes:
   (`import { double } from 'val:provider/api@0.1.0'`); jco reports an
   `UNRESOLVED_IMPORT` warning because the module is a WIT component import, but
   emits the correct component import.
-- C/C++ consumers use `wit-bindgen c` / `wit-bindgen cpp` over the `wit/`
-  directory so `wit/deps/provider` resolves.
+- C/C++ consumers use `wit-bindgen c` / `wit-bindgen cpp` over the resolved
+  view at `.owasidea/build/<consumer>/wit` (`WIT_DIR`), not a hand-copied
+  `wit/deps`.
 - C# consumers use the componentize-dotnet SDK and call
   `ConsumerCsharpWorld.wit.Imports.val.provider.v0_1_0.IApiImports.Double`.
 - The disposable apps live under `/tmp/opencode` during validation and are not

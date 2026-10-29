@@ -326,7 +326,12 @@ fn check_checksum(
     manifest: &Value,
     report: &mut PluginReport,
 ) {
-    let component = resolve(root, Path::new(&plugin.path)).join(format!("{name}.component.wasm"));
+    let stored = crate::layout::Layout::new(root).component(name);
+    let component = if stored.is_file() {
+        stored
+    } else {
+        resolve(root, Path::new(&plugin.path)).join(format!("{name}.component.wasm"))
+    };
     let bytes = match std::fs::read(&component) {
         Ok(bytes) => bytes,
         Err(_) => {

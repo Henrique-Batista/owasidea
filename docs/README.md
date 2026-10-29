@@ -15,6 +15,7 @@ described in `CLI.md` (`dev` and `tui`).
 ## Reference
 
 - [CLI.md](CLI.md) — every `owasidea` command and flag.
+- [BUILD_LAYOUT.md](BUILD_LAYOUT.md) — `.owasidea/` artifacts, dependency resolution and 1.3 migration.
 - [API.md](API.md) — HTTP API, call contract, metrics, streaming jobs, typed client.
 - [ARCHITECTURE.md](ARCHITECTURE.md) — host, runtime, manifests, capability broker.
 - [ERRORS.md](ERRORS.md) — stable `OWASIDEA_E_*` codes and `owasidea explain`.
