@@ -78,22 +78,31 @@ The example Makefiles select `clang.exe`/`clang++.exe` when `OS=Windows_NT`.
 
 ## C# (.NET WASI)
 
-Supported target frameworks: net8.0, net9.0, net10.0 and future net11.0.
+Supported target frameworks: the scaffold uses `net10.0`; componentize-dotnet
+also supports newer SDKs.
 
-Notes:
-- .NET WASI produces a **command component** (`wasi:cli/run`), not a WIT library.
-- The framework builds it as an executable plugin, but serving HTTP requires
-  `wasi:http/incoming-handler` (not provided by the default template), so
-  `/app/{name}` will not work for the default template.
-- For WIT-based libraries (callable via `/call`), use Rust/Go/TypeScript (jco).
+1. `owasidea plugin new <name> --lang csharp` writes a `Library` project using
+   `BytecodeAlliance.Componentize.DotNet.Wasm.SDK`, `RuntimeIdentifier
+   wasi-wasm`, and `<Wit Include="$(OwasideaWitDir)" />`.
+2. `Directory.Build.props` points `OwasideaWitDir` at
+   `.owasidea/build/<plugin>/wit` and `ArtifactsPath` at
+   `.owasidea/cache/dotnet/<plugin>`. `owasidea build` creates both.
+3. Implement the exported functions in `<World>ExportsImpl`. For the world
+   `test-2` the class is `Test2WorldExportsImpl`; its methods are the only
+   implementation the generated interop calls for that world's exports.
+4. Imported provider functions are called through `IApiImports` (for example
+   `IApiImports.Greet("x")`). `owasidea build` also writes
+   `Owasidea.GlobalUsings.g.cs` with
+   `global using static ...IApiImports;`, so `Greet("x")` is enough. Duplicate
+   interface names get aliases (`CoreApi.Greet`).
+5. Run `owasidea build` once before opening the plugin in Rider or Visual
+   Studio. The contract is `plugins/<name>/wit/<name>.wit`; `Test2World` is the
+   generated C# namespace, not a `.wit` file. Generated bindings live under
+   `.owasidea/cache/dotnet/<name>/obj/<project>/release_wasi-wasm/wit_bindgen/`.
+   If the IDE does not index that folder, mark it as a generated sources root.
 
-1. Install .NET SDK + wasi workload + wasi-sdk. Set `WASI_SDK_PATH` when needed.
-   The project needs the platform LLVM runtime package:
-   `runtime.linux-x64.microsoft.dotnet.ilcompiler.llvm` on Linux,
-   `runtime.win-x64.microsoft.dotnet.ilcompiler.llvm` on Windows.
-2. Build with `dotnet publish -c Release -r wasi-wasm`.
-3. The framework copies `dotnet.wasm` and generates the manifest.
-4. Run via host; HTTP proxy may not apply (command component).
+`type = "executable"` C# plugins are plain .NET WASI command components; use
+the library template for `/plugin/{name}/call`.
 
 ## TypeScript/JavaScript (jco)
 

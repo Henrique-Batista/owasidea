@@ -11,6 +11,23 @@ below; see [`docs/UPDATER.md`](docs/UPDATER.md).
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-10-29
+
+### Added
+
+- C# consumers get `Owasidea.GlobalUsings.g.cs` with `global using static` for
+  imported provider interfaces, so `Greet("x")` works without the full
+  namespace. Duplicate interface names use aliases.
+- C# scaffolds write `Directory.Build.props` setting `OwasideaWitDir` to the
+  resolved view and `ArtifactsPath` to `.owasidea/cache/dotnet/<plugin>`.
+  Rider/Visual Studio and plain `dotnet build` now use the same paths as
+  `owasidea build`.
+
+### Fixed
+
+- `dotnet build` outside the CLI resolves the dependency WIT view and writes
+  generated bindings under the project-level artifacts path.
+
 ## [1.3.0] - 2026-10-29
 
 ### Added

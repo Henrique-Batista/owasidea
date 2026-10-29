@@ -1819,6 +1819,10 @@ fn cmd_plugin_new(
                 std::fs::write(dir.join("Attributes.cs"), templates::CSHARP_ATTRIBUTES)?;
                 wit_flow::generate(&dir, &name, "csharp", "0.1.0")?;
             }
+            std::fs::write(
+                dir.join("Directory.Build.props"),
+                templates::CSHARP_DIRECTORY_BUILD_PROPS,
+            )?;
         }
         "c" | "cpp" | "c++" => {
             let ext = if lang == "c" { "c" } else { "cpp" };
@@ -2524,6 +2528,28 @@ fn prepare_workspace(
         if !layout::accepts_wit_dir(&plugin.language, &plugin_dir) {
             layout::mirror_missing(&view, own)?;
         }
+        if plugin.language == "csharp" {
+            write_csharp_global_usings(&plugin_dir, &view)?;
+        }
+    }
+    Ok(())
+}
+
+/// Generates the C# `global using` file for imported provider interfaces.
+/// Only C# has file-wide usings; the other languages keep their normal import.
+fn write_csharp_global_usings(plugin_dir: &Path, view: &Path) -> anyhow::Result<()> {
+    let Some(world) = layout::world_name(view) else {
+        return Ok(());
+    };
+    let imports = layout::imports_in(view);
+    let rendered = layout::render_csharp_global_usings(&world, &imports);
+    let path = plugin_dir.join("Owasidea.GlobalUsings.g.cs");
+    if rendered.lines().count() <= 1 {
+        let _ = std::fs::remove_file(&path);
+        return Ok(());
+    }
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(rendered.as_str()) {
+        std::fs::write(&path, rendered)?;
     }
     Ok(())
 }

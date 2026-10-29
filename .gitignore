@@ -11,6 +11,7 @@
 **/manifests/*.manifest.json
 **/manifests/permissions.*.json
 **/src/bindings.rs
+**/Owasidea.GlobalUsings.g.cs
 **/.owasidea/
 **/ui/public/plugins/
 **/ui/public/ui-plugins.json

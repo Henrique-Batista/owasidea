@@ -63,6 +63,36 @@ C#, C/C++ and TypeScript templates ship the `OwasideaWitDir` / `WIT_DIR` /
 packages into their existing `wit/deps` and still centralizes the final
 component.
 
+## C# global usings and IDE
+
+`owasidea build` writes `plugins/<name>/Owasidea.GlobalUsings.g.cs`:
+
+```csharp
+global using static Test2World.wit.Imports.poc.test.v0_1_0.IApiImports;
+```
+
+so a consumer calls `Greet("x")` without the namespace tree. When two imported
+interfaces share a type name, the generator emits aliases instead
+(`global using CoreApi = ...;`).
+
+C# is the only supported language with file-wide usings. Rust, Go, TypeScript,
+C and C++ still need their normal `use` / `import` / `#include` per file; there
+is no global equivalent.
+
+`Directory.Build.props` in a C# plugin sets:
+
+- `OwasideaWitDir` → `.owasidea/build/<plugin>/wit`
+- `ArtifactsPath` → `.owasidea/cache/dotnet/<plugin>`
+
+Run `owasidea build` once before opening the plugin in Rider or Visual Studio.
+The generated namespace (`Test2World` for world `test-2`) lives in
+`.owasidea/cache/dotnet/<name>/obj/<project>/release_wasi-wasm/wit_bindgen/`.
+There is no `Test2World.wit`: the contract is
+`plugins/<name>/wit/<name>.wit`. Mark the `wit_bindgen` folder as a generated
+sources root if the IDE does not pick it up automatically. The relative paths
+in `Directory.Build.props` assume the standard `plugins/<name>` layout; adjust
+`../../` for a custom plugin path.
+
 ## Bundles
 
 The app keeps `manifests/*.json` pointing at `.owasidea/build/...`. Before
