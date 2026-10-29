@@ -52,6 +52,7 @@ described in `CLI.md` (`dev` and `tui`).
 - [plans/CORRECTIONS_1_1.md](plans/CORRECTIONS_1_1.md) — 1.1 DX/cleanup plan and status.
 - [plans/IMPLEMENTATION_1_2.md](plans/IMPLEMENTATION_1_2.md) — approved 1.2 implementation plan, ABI 2 and acceptance gates.
 - [plans/GATE0_FEASIBILITY.md](plans/GATE0_FEASIBILITY.md) — runtime spike evidence: async host import → separate Go store.
+- [plans/DEPENDENCY_CONSUMPTION.md](plans/DEPENDENCY_CONSUMPTION.md) — consumer matrix for all six languages.
 - [plans/BLOCKERS.md](plans/BLOCKERS.md) — blocker log template and entries.
 
 ## Architecture decisions

@@ -81,12 +81,11 @@ dependencies = ["catalog-go"]
 ```
 
 The consumer imports the provider WIT package and compiles against generated
-bindings (`wit-bindgen` for Rust, `componentize-go` for Go). Consumer-side
-dependency imports are validated for Rust and Go in 1.2; TypeScript, C#, C and
-C++ providers can be called by a Rust/Go glue, but consuming dependencies from
-those languages is not yet validated. At load time the host registers each
-imported interface and dispatches calls to the declared provider in a separate
-store. Undeclared imports fail build and host load.
+bindings. Consumer-side dependency imports are validated for Rust, Go,
+TypeScript, C#, C and C++ (see
+[`plans/DEPENDENCY_CONSUMPTION.md`](plans/DEPENDENCY_CONSUMPTION.md)). At load
+time the host registers each imported interface and dispatches calls to the
+declared provider in a separate store. Undeclared imports fail build and host load.
 Only `library` providers are callable in 1.2; resources/streams/callbacks are
 not supported across the boundary.
 

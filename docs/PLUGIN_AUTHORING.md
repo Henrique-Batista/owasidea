@@ -243,7 +243,8 @@ dependencies = ["catalog-go"]
 
 The consumer imports the provider WIT package and compiles against generated
 bindings; the host dispatches the call. Consumer-side imports are validated for
-Rust and Go in 1.2; other languages can provide callable interfaces. The same
+Rust, Go, TypeScript, C#, C and C++ (see
+[`plans/DEPENDENCY_CONSUMPTION.md`](plans/DEPENDENCY_CONSUMPTION.md)). The same
 edge cannot also use `compose_with`. Declarations may cycle; a runtime A→B→A call fails with
 `OWASIDEA_E_DEPENDENCY_REENTRANT_CALL`.
 
