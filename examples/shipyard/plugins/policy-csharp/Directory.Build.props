@@ -1,0 +1,7 @@
+<Project>
+  <PropertyGroup>
+    <UseArtifactsOutput>true</UseArtifactsOutput>
+    <ArtifactsPath>$(MSBuildThisFileDirectory)../../.owasidea/cache/dotnet/$(MSBuildProjectName)</ArtifactsPath>
+    <OwasideaWitDir Condition="'$(OwasideaWitDir)' == ''">$(MSBuildThisFileDirectory)../../.owasidea/build/$(MSBuildProjectName)/wit</OwasideaWitDir>
+  </PropertyGroup>
+</Project>

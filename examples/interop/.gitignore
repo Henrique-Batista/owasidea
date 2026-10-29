@@ -1,4 +1,5 @@
 .owasidea/
+Owasidea.GlobalUsings.g.cs
 manifests/*.manifest.json
 manifests/permissions.*.json
 plugins/*/target/

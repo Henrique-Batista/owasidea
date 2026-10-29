@@ -28,6 +28,8 @@ pub const CSHARP_EXECUTABLE_CSPROJ: &str =
     include_str!("../templates/plugin/csharp/executable.csproj");
 pub const CSHARP_PROGRAM_CS: &str = include_str!("../templates/plugin/csharp/Program.cs");
 pub const CSHARP_LIBRARY_CSPROJ: &str = include_str!("../templates/plugin/csharp/library.csproj");
+pub const CSHARP_DIRECTORY_BUILD_PROPS: &str =
+    include_str!("../templates/plugin/csharp/Directory.Build.props");
 pub const CSHARP_IMPL: &str = include_str!("../templates/plugin/csharp/Impl.cs");
 pub const CSHARP_NUGET_CONFIG: &str = include_str!("../templates/plugin/csharp/nuget.config");
 pub const CSHARP_ATTRIBUTES: &str = include_str!("../templates/plugin/csharp/Attributes.cs");
