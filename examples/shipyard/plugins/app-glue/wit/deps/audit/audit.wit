@@ -1,0 +1,2 @@
+package shipyard:audit@0.1.0;
+interface api { scan: func(dependencies: list<string>) -> string; }

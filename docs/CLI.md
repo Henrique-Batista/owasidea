@@ -171,11 +171,11 @@ wit_source = "auto"       # auto (default) | wit | attributes
 - `attributes`: render from markers and require the artifact target
   (`.owasidea/wit` for Rust).
 
-### `build [--no-sign]`
+### `build`
 
-Build configured plugins, compose clients declared with `compose_with`,
-regenerate manifests from the real WIT, sign when configured, and copy UI
-assets.
+Build configured plugins, resolve declared runtime dependencies, compose
+clients declared with `compose_with`, regenerate ABI 2 manifests from the real
+WIT, and copy UI assets.
 
 Behavior:
 
@@ -201,10 +201,7 @@ Behavior:
    are also written to `ui/public/ui-plugins.json`, so the dashboard verifies
    the bundle it actually loaded instead of a manifest that may be newer than
    the running desktop binary. The index is a build-consistency artifact;
-   manifests remain the signed source of truth for headless plugins.
-8. If `[signing]` exists, every manifest is signed with the configured Ed25519
-   key. `generate = true` is opt-in and creates a demo key when missing; the
-   example app does not enable it, so run `owasidea keygen --out keys` first.
+   manifests remain the source of truth for headless plugins.
 
 A C/C++ plugin can override the native build command, which is required on
 Windows when `make.exe` is not on `PATH`:
@@ -225,9 +222,17 @@ path = "plugins/pipeline-go"
 language = "go"
 type = "library"
 compose_with = ["core-rust"]
-kv = "shipyard-pipeline:read-write"
+kv = ["shipyard-pipeline:read-write"]
 fs = ["reports:read-write"]
 persistent = true
+```
+
+Runtime dependencies use generated WIT bindings and may cycle:
+
+```toml
+[plugins.app-glue]
+dependencies = ["catalog-go"]
+capabilities = ["network-outbound"]
 ```
 
 Build outputs must be named `<plugin-name>.component.wasm`. C/C++ Makefiles must
@@ -239,7 +244,7 @@ Run the full framework test flow:
 
 1. `build` unless `--no-build`.
 2. Start a temporary host on an ephemeral port with a temporary
-   `OWASIDEA_DATA_DIR` and signing environment.
+   `OWASIDEA_DATA_DIR`.
 3. Run generic checks (health, all headless plugins loaded, UI plugin count) and
    the declarative checks under `[smoke]` in `wasm-app.toml`.
 4. Stop the host.
@@ -247,8 +252,14 @@ Run the full framework test flow:
    at the current CLI. The example uses Playwright.
 
 `--filter` matches a substring of plugin/function in smoke calls, HTTP checks and
-services; `--plugin` restricts the run to one plugin; `--watch` re-runs when
-manifests, config or plugin outputs change.
+services; `--plugin` restricts the run to one plugin. `--watch` is a simple
+polling loop: it re-runs the full suite every second and exits on Ctrl+C. A
+failed run is printed but the loop keeps going.
+
+Timeouts: `OWASIDEA_HOST_READY_TIMEOUT_MS` (default 600000) bounds host startup;
+`OWASIDEA_TEST_REQUEST_TIMEOUT_MS` (default 60000) bounds each HTTP check;
+`OWASIDEA_UI_TEST_TIMEOUT_MS` (default 1800000) bounds the UI command and kills
+it on expiry. The UI child gets `stdin = null`, so `npx`/`npm` cannot prompt.
 
 ### `smoke [--no-build]`
 
@@ -261,6 +272,13 @@ when a `tests/` directory exists) from each plugin manifest's exports, using
 type-default argument values. Never modifies `wasm-app.toml`. Fails if the
 target file exists unless `--force` is given.
 
+### `migrate [--write] [--json]`
+
+Convert supported 1.1 config forms. Without `--write`, reports only and changes
+nothing. With `--write`, converts `kv = "ns:access"` to `["ns:access"]` and
+prompts for explicit review of local WIT dependencies. It never infers or adds
+`dependencies`, never edits plugin source, and never touches KV database files.
+
 ### `validate [--json]`
 
 Check generated manifests against `wasm-app.toml`:
@@ -269,31 +287,21 @@ Check generated manifests against `wasm-app.toml`:
 - component checksum matches
 - filesystem/KV/HTTP permissions match the config
 - UI manifests declare `runtime = "js-wasm"` and `type = "ui"`
-- manifest ABI fields (`schema_version`, `host_abi`, `min_host`) are compatible
-  with the host (see `docs/ABI.md`)
+- manifest ABI is `schema_version: 2` with `host_abi: "2"` and a valid
+  `min_host` (see `docs/ABI.md`)
+- effective permission presets match the generated manifest
 
-Deprecated-but-working manifests produce warnings instead of errors (one line
-per warning; wrapped here for readability):
+ABI 1 and legacy manifests are errors with migration guidance; 1.2 does not
+silently load them:
 
 ```text
-warning: notes: ABI_LEGACY_MANIFEST: deprecated legacy manifest (no integer
-schema_version field); host ABI 1 still accepts it with defaults, but a future
-host ABI will reject it. Regenerate with `owasidea build`
-(see docs/ABI_POLICY.md).
-warning: notes: ABI_MISSING_HOST_FIELDS: manifest has no host_abi or min_host;
-the host applies defaults. Regenerate with `owasidea build`
-(see docs/ABI_POLICY.md).
+error: schema_version 1 is not supported; expected 2. Run `owasidea migrate`
+and rebuild with Owasidea 1.2.
 ```
 
-Warning codes (`ABI_LEGACY_MANIFEST`, `ABI_MISSING_HOST_FIELDS`) are stable;
-match the code, not the prose. Warnings go to stdout and do **not** change the
-exit status: the last line is `Validation OK with N deprecation warning(s)` and
-the command exits `0`. Incompatibilities the host cannot honour (unknown
-`schema_version`, `host_abi` mismatch, `min_host` newer than the host) are
-errors.
-
-Exits non-zero on drift. Run after `build`, especially in CI. Policy and removal
-window: `docs/ABI_POLICY.md`; 0.x upgrade: `docs/MIGRATION_0_X_TO_1_0.md`.
+Exits non-zero on drift. Run after `build`, especially in CI. Migration:
+`owasidea migrate` (report) or `owasidea migrate --write` (rewrite supported
+keys); see `docs/MIGRATION_1_1_TO_1_2.md`.
 
 #### `validate --json`
 
@@ -308,7 +316,7 @@ contract for CI/agents:
       "name": "notes",
       "ok": false,
       "errors": ["CHECKSUM MISMATCH"],
-      "warnings": ["ABI_LEGACY_MANIFEST: deprecated legacy manifest (...)"]
+      "warnings": []
     }
   ],
   "errors": ["notes: CHECKSUM MISMATCH"],
@@ -332,27 +340,23 @@ contract for CI/agents:
   fields by name.
 
 
-### `verify <dist-dir> [--public-key <file>] [--allow-dist-trust] [--json]`
+### `verify <dist-dir> [--json]`
 
 Verify a dist directory produced by `bundle` (or any directory containing
 manifests). `bundle` stages the runtime payload into the output directory
-(`manifests/`, `plugins/<name>/<name>.component.wasm`, `ui/public/` and
-`trust/owasidea.pub`), so verifying `dist/` checks what the installers ship.
+(`manifests/`, `plugins/<name>/<name>.component.wasm`, `ui/public/`), so
+verifying `dist/` checks what the installers ship.
+
 Checks:
 
 - each manifest is valid JSON with compatible ABI fields (`schema_version`,
   `host_abi`, `min_host`)
 - referenced component exists and its sha256 matches `metadata.sha256`
-- Ed25519 signature verifies against a **pinned** public key
 - `metadata.ui` asset digests and bundle digest for UI plugins
 - `ui-plugins.json` index entries match the manifests
 
-The trust root must be supplied out of band: `--public-key <file>` or
-`OWASIDEA_PUBLIC_KEY`. A key copied into `dist/trust` (or `dist/keys`) by the
-same bundle is **not** accepted by default, because whoever can rewrite the
-artifacts can rewrite that key too; `verify` fails with `TRUST_ROOT_UNPINNED`.
-`--allow-dist-trust` opts in for local smoke checks only. With no key at all it
-fails with `TRUST_ROOT_MISSING`.
+There is no manifest signature check: manifests are unsigned. Package integrity
+belongs to OS code signing and the release pipeline.
 
 A directory with no `*.manifest.json` fails with `NO_MANIFESTS`; verification
 never reports success for zero manifests.
@@ -369,8 +373,8 @@ truth for host/port/CSP/dev URL):
 - `playwright` -> `<ui>/.owasidea/playwright.json`
 - `tauri` -> `<desktop>/tauri.generated.conf.json` (copies base `tauri.conf.json`,
   overriding `build.devUrl`, ensuring the host origin is in `connect-src`, and
-  generating `bundle.resources` for `manifests/`, every headless component,
-  `trust/owasidea.pub` and `owasidea.runtime.json`).
+  generating `bundle.resources` for `manifests/`, every headless component and
+  `owasidea.runtime.json`).
   The generated CSP contains exactly the configured host origin (no wildcard);
   `*` and `null` are rejected. `bundle` always renders this file and passes it
   to `cargo tauri build --config`.
@@ -446,8 +450,8 @@ view. A running service still refuses reload with HTTP 409; stop it first.
 ### `run`
 
 Run the current manifests without building or watching. The host address comes
-from `--http-addr`, then `[host].addr`, then `127.0.0.1:0`. Signing environment
-from `[signing]` is applied automatically. The host refuses non-loopback bind
+from `--http-addr`, then `[host].addr`, then `127.0.0.1:0`. The host refuses
+non-loopback bind
 addresses unless `OWASIDEA_ALLOW_NON_LOOPBACK=1` is set (the standalone host
 binary also accepts `--allow-non-loopback`).
 
@@ -480,14 +484,30 @@ Generate a typed TypeScript client from the manifests in `--manifest-dir`.
 Only `ts` is supported. `--check` fails if the file is missing or differs
 without writing.
 
-### `bundle [--no-build] [--bundles <targets>] [--profile <dev|staging|prod>] [--isolate-host-libs]`
+### `bundle [--no-build] [--target desktop|cli] [--bundles <targets>] [--profile <dev|staging|prod>] [--isolate-host-libs]`
 
-Build and sign, build the UI, and produce a Tauri desktop bundle.
+Build the app and package it. `--target desktop` (default) builds the UI and
+produces a Tauri installer. `--target cli` skips Tauri and stages a headless
+directory:
+
+```text
+dist/cli/
+  owasidea(.exe)
+  wasm-app.toml
+  manifests/
+  plugins/<name>/<name>.component.wasm
+  run.sh / run.bat
+```
+
+Run `dist/cli/run.sh` to start the host with the generated manifests and
+components. The HTTP API still listens on `[host].addr` (loopback by default).
+`--target cli` ignores `--bundles` and does not generate SBOM/provenance yet.
 
 Resolution:
 
 - UI directory: `[desktop].ui` or `ui`
-- Desktop crate: `[desktop].path`, then `desktop/`, then `crates/desktop/`
+- Desktop crate: `[desktop].path`, then `desktop/`. There is no silent fallback
+  to the framework repository's own shell; use `--target cli` for a headless app.
 
 ```toml
 [desktop]
@@ -496,12 +516,10 @@ ui = "ui"
 ```
 
 It runs `npm run build` in the UI directory, then `cargo tauri build` in the
-desktop crate. With `[signing]`, manifests are signed during build; the desktop
-shell must set `OWASIDEA_REQUIRE_SIGNATURES=true` and resolve
-`OWASIDEA_PUBLIC_KEY` from its bundled `trust/owasidea.pub`. `bundle` renders
-`bundle.resources` from `wasm-app.toml` (manifests, every headless component,
-the trust key and `runtime.json`), so a new plugin does not need a manual entry;
-explicit entries in the base `tauri.conf.json` are preserved. The webview UI is
+desktop crate. `bundle` renders `bundle.resources` from `wasm-app.toml`
+(manifests, every headless component and `runtime.json`), so a new plugin does
+not need a manual entry; explicit entries in the base `tauri.conf.json` are
+preserved. The webview UI is
 embedded through `build.frontendDist`; the UI build output is only staged as a
 resource when the shell has no frontend directory. See
 `examples/shipyard/desktop`.
@@ -617,7 +635,7 @@ identifier = "dev.owasidea.shipyard.staging"
 addr = "127.0.0.1:9100"
 
 [plugins.webhook-go]
-http_outbound = ["https://staging.example"]
+http_outbound = ["staging.example:443"]   # exact host:port, no scheme/path
 ```
 
 The merged config drives the whole bundle:
@@ -732,24 +750,6 @@ Regenerate WIT from source annotations (`owasidea::*` in Rust, `// owasidea:`
 in Go/C/C++, JSDoc in TypeScript, attributes in C#). `build` calls this per
 plugin. See `docs/SOURCE_GENERATORS.md`.
 
-### `[signing]` configuration
-
-```toml
-[signing]
-key = "keys/owasidea.key"
-public_key = "keys/owasidea.pub"
-require = true
-```
-
-`build` and `bundle` sign every manifest. `run`, `dev` and `test` apply
-`OWASIDEA_PUBLIC_KEY` and `OWASIDEA_REQUIRE_SIGNATURES` before starting the host.
-Create the keypair explicitly with `owasidea keygen --out keys`; the optional
-`generate = true` flag is a demo-only convenience that creates a key when
-missing. Release builds should point `key` at a protected CI secret and keep
-`generate` off, so a missing key fails instead of producing a new trust root.
-Keep private keys out of the repository in production; publish the public key
-out of band (bundled `trust/owasidea.pub` or `--public-key` for `verify`).
-
 ### `[updater]` configuration
 
 ```toml
@@ -769,34 +769,6 @@ Environment overrides: `OWASIDEA_UPDATE_CHANNEL`, `OWASIDEA_UPDATER_ENDPOINT`,
 `OWASIDEA_UPDATER_PUBKEY`, `OWASIDEA_UPDATER_BASE_URL`. The private signing key
 (`TAURI_SIGNING_PRIVATE_KEY`) is only read by the Tauri CLI and is never
 rendered into a file. See [`UPDATER.md`](UPDATER.md).
-
-### `keygen --out <dir>` / `sign <plugin> --key <key>`
-
-Generate an Ed25519 keypair and sign a release manifest plus component bytes.
-Private keys are written mode `0600` on Unix. See `docs/REGISTRY.md` and
-`docs/SECURITY.md`.
-
-### `registry search <query> --url <index.json> [--json]`
-
-Search a static HTTPS registry index. HTTP is allowed only for localhost tests.
-
-### `registry install <name> --version <version> --url <index.json> --public-key <key> [--force] [--locked]`
-
-Download and verify one signed plugin version. Verification happens before
-writing. Unsigned, untrusted, malformed, over-sized, cross-origin, and
-path-traversal packages are rejected.
-
-### `registry update [--name <name>] [--version <version>] --url <index.json> --public-key <key>`
-
-Consult the registry and update `plugins.lock` entries (lock only).
-
-### `registry outdated --url <index.json>`
-
-List lock entries whose version differs from the registry.
-
-Download and verify one signed plugin version. Verification happens before
-writing. Unsigned, untrusted, malformed, over-sized, cross-origin, and
-path-traversal packages are rejected.
 
 ## `[smoke]` configuration
 
@@ -842,7 +814,7 @@ The command is an argv array, not a shell. It runs in the app root with
 - `0` success
 - non-zero build/validation/toolchain error
 - non-zero when `doctor` is missing a required tool
-- non-zero on registry/signature verification failure
+- non-zero on manifest checksum/ABI/UI verification failure
 
 ## Config schema (v1)
 
@@ -852,15 +824,14 @@ line/column. All supported fields:
 
 | Section | Field | Type | Notes |
 |---|---|---|---|
-| `[app]` | `name`, `version`, `identifier` | string | app metadata |
+| `[app]` | `name`, `version`, `identifier`, `ui_plugin` | string | app metadata; `ui_plugin` is the production glue plugin |
 | `[host]` | `addr` | socket addr | host bind address |
 | `[desktop]` | `path`, `ui`, `output` | string | desktop/ui paths |
-| `[signing]` | `key`, `public_key`, `generate`, `require` | string/bool | signing config |
 | `[test]` | `ui` | string[] | UI test command |
 | `[[smoke.calls]]` | `plugin`, `function`, `args`, `expect_contains`, `expect_equals`, `min`, `max` | mixed | smoke calls |
 | `[[smoke.http]]` | `path`, `method`, `body`, `expect_status`, `expect_contains` | mixed | smoke HTTP |
 | `[[smoke.services]]` | `plugin` | string | smoke services |
-| `[plugins.<name>]` | `path`, `language`, `type`, `version`, `fs`, `kv`, `http_outbound`, `network_outbound`, `network_inbound`, `persistent`, `runtime`, `ui_entry`, `ui_build`, `build`, `compose_with` | mixed | plugin config |
+| `[plugins.<name>]` | `path`, `language`, `type`, `version`, `fs`, `kv`, `dependencies`, `capabilities`, `http_outbound`, `network_outbound`, `network_inbound`, `persistent`, `runtime`, `ui_entry`, `ui_build`, `build`, `compose_with`, `bridge` | mixed | plugin config |
 | `[dev]` | `watch`, `hot_reload`, `ui_addr` | bool/string | dev mode |
 
 ### Validation rules (RF-01)
@@ -869,9 +840,9 @@ line/column. All supported fields:
   field and value (e.g. `invalid address for host.addr "127.0.0.1:70000"`).
 - Port `0` is allowed for `run`/`dev` (ephemeral) but is rejected by
   `bundle` via `validate_for_bundle`.
-- Path fields (`[desktop].path/ui/output`, `[signing].key/public_key`,
-  `[plugins.<name>].path`, and each entry of `[plugins.<name>].fs`) must be
-  non-empty strings. Relative paths resolve against the config file directory;
+- Path fields (`[desktop].path/ui/output`, `[plugins.<name>].path`, and each
+  entry of `[plugins.<name>].fs`) must be non-empty strings. Relative paths
+  resolve against the config file directory;
   absolute paths are used unchanged (`resolve_path`).
 - `[app].name`, `[app].identifier`, and `[app].version` (when present) must be
   non-empty (whitespace-only counts as empty).

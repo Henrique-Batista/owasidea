@@ -75,6 +75,9 @@ fn fixture_root(source: &Path) -> Option<tempfile::TempDir> {
         if let Some(metadata) = value.get_mut("metadata").and_then(|m| m.as_object_mut()) {
             metadata.remove("signature");
             metadata.remove("signature_format");
+            // This fixture intentionally loads only two plugins, so it cannot
+            // provide the app glue named by the full Shipyard manifests.
+            metadata.remove("app_ui_plugin");
         }
         std::fs::write(
             manifests.join(format!("{name}.manifest.json")),
@@ -100,6 +103,7 @@ async fn start_host(root: &Path) -> (HostGuard, String) {
         .arg(format!("127.0.0.1:{port}"))
         .current_dir(root)
         .env("OWASIDEA_DATA_DIR", &data)
+        .env("OWASIDEA_DEV_MODE", "1")
         .env_remove("OWASIDEA_PUBLIC_KEY")
         .env_remove("OWASIDEA_REQUIRE_SIGNATURES")
         .spawn()

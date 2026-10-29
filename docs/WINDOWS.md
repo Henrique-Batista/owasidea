@@ -101,7 +101,7 @@ The base config targets Linux `deb`. The platform override files select NSIS on
 Windows:
 
 ```text
-crates/desktop/tauri.windows.conf.json
+examples/shipyard/desktop/tauri.windows.conf.json
 examples/shipyard/desktop/tauri.windows.conf.json
 ```
 

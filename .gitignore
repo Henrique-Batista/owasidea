@@ -139,3 +139,6 @@ desktop.ini
 *.swp
 *.swo
 *~
+
+# CodeGraph local index
+.codegraph/

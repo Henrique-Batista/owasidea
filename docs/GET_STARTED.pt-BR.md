@@ -1,9 +1,11 @@
 # Começando com Owasidea (pt-BR)
 
-O Owasidea cria aplicações desktop a partir de componentes WebAssembly
-independentes. Cada plugin tem sua linguagem, build, contrato WIT, manifesto e
-conjunto de capabilities. O host é uma biblioteca Rust reutilizável; o shell
-desktop é Tauri 2; a UI fala com o host por HTTP e nunca linka Wasmtime.
+O Owasidea cria aplicações desktop e CLI/headless a partir de componentes
+WebAssembly independentes. Cada plugin tem sua linguagem, build, contrato WIT,
+manifesto e conjunto de capabilities. O host é uma biblioteca Rust reutilizável;
+o shell desktop é Tauri 2; a UI fala com o host por HTTP e nunca linka Wasmtime.
+Para o modelo de execução (rotas, KV, rede e sandbox), veja
+[`RUNTIME_MODEL.md`](RUNTIME_MODEL.md).
 
 O exemplo completo e funcional é [`examples/shipyard`](../examples/shipyard):
 Rust, Go, TypeScript, C#, C e C++, composição em build time, dois frameworks de
@@ -58,14 +60,13 @@ Workbench (chama todas as linguagens), Inventory (manifestos), Runtime (serviço
 Para empacotar:
 
 ```bash
-owasidea bundle
+owasidea bundle                 # desktop Tauri
+owasidea bundle --target cli    # diretório headless + run.sh
 ```
 
-O `owasidea bundle` faz build + assinatura + UI + Tauri e copia o artefato para
-`dist/`. A chave de demonstração fica em `keys/` (ignorada pelo git); crie-a uma
-vez com `owasidea keygen --out keys` (o exemplo não gera chave implicitamente).
-O shell Tauri usa `OWASIDEA_REQUIRE_SIGNATURES=true` e a chave pública em
-`trust/owasidea.pub`. Em produção, use uma chave de CI protegida.
+O `owasidea bundle` faz build + UI + Tauri e copia o artefato para `dist/`.
+Manifests são unsigned e verificados por SHA-256; a integridade do release vem
+do pipeline e da assinatura de código do instalador (não há chave de plugin).
 
 ## 3. Criar um app novo
 
@@ -99,6 +100,7 @@ owasidea --config examples/shipyard/wasm-app.toml build
 name = "meu-app"
 version = "0.1.0"
 identifier = "dev.example.meuapp"
+ui_plugin = "core"
 
 [host]
 addr = "127.0.0.1:8787"
@@ -107,7 +109,7 @@ addr = "127.0.0.1:8787"
 path = "plugins/core"
 language = "rust"
 type = "library"
-kv = "core:read-write"
+kv = ["core:read-write"]
 fs = ["reports:read-write"]
 
 [desktop]
@@ -121,8 +123,8 @@ Regras:
 - Permissões são deny-by-default e sem wildcards.
 - `poc:host/host-kv` exige `kv` no config.
 - `wasi:filesystem` exige `fs`.
-- `wasi:http/outgoing-handler` exige `http_outbound` com hosts exatos.
-- `wasi:sockets` exige `network_outbound` / `network_inbound`.
+- `wasi:http/outgoing-handler` exige `http_outbound` com `host:port` exatos.
+- `wasi:sockets` exige `network_outbound` / `network_inbound` com porta exata.
 - Serviço persistente: `type = "service"` com `start-service` e
   `service-status`.
 - Plugin HTTP: `type = "executable"` e export
@@ -176,8 +178,8 @@ O shell Tauri deve:
 1. Resolver `$RESOURCE/manifests` no app instalado.
 2. Definir `OWASIDEA_DATA_DIR` para o diretório de dados da plataforma.
 3. Rodar `owasidea_host::run(manifests, addr)` em background.
-4. Deixar o `owasidea bundle` gerar `bundle.resources` (manifestos, componentes,
-   chave de confiança e `runtime.json`) a partir de `wasm-app.toml`.
+4. Deixar o `owasidea bundle` gerar `bundle.resources` (manifestos,
+   componentes e `runtime.json`) a partir de `wasm-app.toml`.
 
 Depois:
 

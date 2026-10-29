@@ -33,12 +33,6 @@ pub const CATALOG: &[ErrorEntry] = &[
         docs: "docs/ERRORS.md#owasidea_e_manifest_invalid",
     },
     ErrorEntry {
-        code: "OWASIDEA_E_SIGNATURE_INVALID",
-        message: "Plugin manifest signature verification failed.",
-        hint: "Rebuild/sign the plugin with the configured key or disable signing only for local dev.",
-        docs: "docs/ERRORS.md#owasidea_e_signature_invalid",
-    },
-    ErrorEntry {
         code: "OWASIDEA_E_HTTP_CALL",
         message: "HTTP/network call to the host or a plugin failed.",
         hint: "Confirm the host is running, the address/port, and the request body/args; retry.",
@@ -67,6 +61,18 @@ pub const CATALOG: &[ErrorEntry] = &[
         message: "Manifest validation failed (checksum, capability or config mismatch).",
         hint: "Run `owasidea validate` and align manifests with wasm-app.toml and component WIT.",
         docs: "docs/ERRORS.md#owasidea_e_validate_failed",
+    },
+    ErrorEntry {
+        code: "OWASIDEA_E_DEPENDENCY_REENTRANT_CALL",
+        message: "A nested dependency call re-entered a plugin already active on the call stack.",
+        hint: "Break the recursive call path; declared dependency cycles are allowed, runtime A→B→A is not.",
+        docs: "docs/ERRORS.md#owasidea_e_dependency_reentrant_call",
+    },
+    ErrorEntry {
+        code: "OWASIDEA_E_DEPENDENCY_DEPTH_EXCEEDED",
+        message: "A nested dependency call exceeded the maximum depth of 16.",
+        hint: "Reduce dependency nesting or move shared logic into a library helper.",
+        docs: "docs/ERRORS.md#owasidea_e_dependency_depth_exceeded",
     },
     ErrorEntry {
         code: "OWASIDEA_E_UNKNOWN",

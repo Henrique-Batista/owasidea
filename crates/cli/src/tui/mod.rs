@@ -24,6 +24,7 @@ pub use state::{Action, App, Level, OutputLine};
 
 pub enum Event {
     Key(ratatui::crossterm::event::KeyEvent),
+    Mouse(ratatui::crossterm::event::MouseEvent),
     Tick,
     Snapshot(Result<api::Snapshot, String>),
     Logs {
@@ -146,6 +147,9 @@ pub struct Session {
     pub manifest_dir: PathBuf,
     /// Processes owned by the dashboard (host, Vite). Killed on exit.
     pub children: Vec<Child>,
+    /// Output captured from the initial `dev` build before the TUI started.
+    pub initial_output: Vec<OutputLine>,
+    pub initial_build_error: Option<String>,
 }
 
 /// Runs the dashboard until the user quits. Takes ownership of the terminal.
@@ -157,14 +161,19 @@ pub async fn run(session: Session, tx: Sender, rx: Receiver) -> Result<()> {
         session.ui_url.clone(),
         session.dev,
     );
+    for line in &session.initial_output {
+        app.push_line(line.clone());
+    }
+    app.build_error = session.initial_build_error.clone();
     let mut terminal = ratatui::init();
     // Clear without a cursor-position query: stale shell output would
     // otherwise survive in cells the first frame does not repaint.
     ratatui::crossterm::execute!(
         std::io::stdout(),
-        ratatui::crossterm::terminal::Clear(ratatui::crossterm::terminal::ClearType::All)
+        ratatui::crossterm::terminal::Clear(ratatui::crossterm::terminal::ClearType::All),
+        ratatui::crossterm::event::EnableMouseCapture
     )
-    .context("failed to clear terminal")?;
+    .context("failed to initialize terminal")?;
     let stop_input = Arc::new(AtomicBool::new(false));
     let input = spawn_input_thread(tx.clone(), stop_input.clone());
     let ticker = spawn_ticker(tx.clone());
@@ -182,6 +191,10 @@ pub async fn run(session: Session, tx: Sender, rx: Receiver) -> Result<()> {
     stop_input.store(true, Ordering::SeqCst);
     ticker.abort();
     let _ = input.join();
+    let _ = ratatui::crossterm::execute!(
+        std::io::stdout(),
+        ratatui::crossterm::event::DisableMouseCapture
+    );
     ratatui::restore();
 
     let mut children = session.children;
@@ -216,6 +229,16 @@ async fn event_loop(
                     runner.fetch_logs(app);
                 }
             }
+            Event::Mouse(mouse) => {
+                let before = app.selected;
+                let height = terminal.size().map(|size| size.height).unwrap_or(0);
+                if let Some(action) = app.handle_mouse(mouse, height) {
+                    runner.dispatch(app, action);
+                }
+                if app.selected != before {
+                    runner.fetch_logs(app);
+                }
+            }
             Event::Tick => runner.tick(app),
             Event::Snapshot(Ok(snapshot)) => app.apply_snapshot(snapshot),
             Event::Snapshot(Err(_)) => app.apply_offline(),
@@ -233,13 +256,7 @@ async fn event_loop(
                 ok,
                 text,
                 refresh_manifest,
-            } => {
-                app.busy = None;
-                app.set_status(if ok { Level::Info } else { Level::Error }, text);
-                if refresh_manifest {
-                    app.forget_manifest();
-                }
-            }
+            } => app.apply_done(ok, text, refresh_manifest),
             Event::CallResult(result) => app.apply_call_result(result),
         }
         if app.quit {
@@ -259,6 +276,11 @@ fn spawn_input_thread(tx: Sender, stop: Arc<AtomicBool>) -> std::thread::JoinHan
                 Ok(true) => match ct::read() {
                     Ok(ct::Event::Key(key)) if key.kind == KeyEventKind::Press => {
                         if tx.send(Event::Key(key)).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(ct::Event::Mouse(mouse)) => {
+                        if tx.send(Event::Mouse(mouse)).is_err() {
                             break;
                         }
                     }
@@ -347,7 +369,13 @@ impl Runner {
             }
             Action::ServiceStart(name) => self.service_action(app, name, true),
             Action::ServiceStop(name) => self.service_action(app, name, false),
-            Action::Rebuild { reload } => self.rebuild(app, reload),
+            Action::Rebuild { reload } => {
+                if app.dev {
+                    self.rebuild(app, reload);
+                } else {
+                    app.set_status(Level::Info, "rebuild is only available in `owasidea dev`");
+                }
+            }
             Action::Call {
                 plugin,
                 function,

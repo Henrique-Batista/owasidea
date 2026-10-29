@@ -37,7 +37,7 @@ addr = "127.0.0.1:8787"
 path = "plugins/my-core"
 language = "rust"
 type = "library"
-kv = "my-core:read-write"
+kv = ["my-core:read-write"]
 
 [desktop]
 path = "desktop"
@@ -63,8 +63,8 @@ owasidea validate
 ```
 
 `build` compiles plugins, installs missing npm dependencies, auto-detects
-wasi-sdk for C/C++, generates manifests from WIT, runs composition, signs when
-`[signing]` is configured, and packages UI-plugin assets. `validate` checks
+wasi-sdk for C/C++, generates manifests from WIT, runs composition, and packages
+UI-plugin assets. `validate` checks
 checksums and permission drift.
 Generated manifests and `.wasm` files should not be committed.
 
@@ -99,7 +99,7 @@ owasidea bundle
 
 `bundle` builds the UI and runs `cargo tauri build` in the desktop crate selected
 by `[desktop].path`. `bundle.resources` is generated from the config (manifests,
-components, trust key, `runtime.json`), so a new plugin needs no manual entry;
+components, `runtime.json`), so a new plugin needs no manual entry;
 see `examples/shipyard/desktop`.
 
 At runtime the shell should resolve `$RESOURCE/manifests` and set

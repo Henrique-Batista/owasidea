@@ -21,17 +21,18 @@ described in `CLI.md` (`dev` and `tui`).
 - [ABI.md](ABI.md) — manifest `schema_version`/`host_abi`/`min_host` fields.
 - [ABI_POLICY.md](ABI_POLICY.md) — semver, breaking changes, deprecation window.
 - [MIGRATION_0_X_TO_1_0.md](MIGRATION_0_X_TO_1_0.md) — upgrade a 0.x app to 1.0.
+- [MIGRATION_1_1_TO_1_2.md](MIGRATION_1_1_TO_1_2.md) — upgrade a 1.1 app to ABI 2, multi-KV, glue UI and exact network grants.
 
 ## Plugins and UI
 
 - [PLUGIN_AUTHORING.md](PLUGIN_AUTHORING.md) — language-specific build outputs and WIT.
+- [RUNTIME_MODEL.md](RUNTIME_MODEL.md) — UI/plugin routes, plugin-to-plugin, KV, network and when the sandbox runs.
 - [SOURCE_GENERATORS.md](SOURCE_GENERATORS.md) — `// owasidea:` source markers.
 - [UI_PLUGINS.md](UI_PLUGINS.md) — static webview bundles, iframe sandbox, bridge SDK.
 
 ## Security and operations
 
 - [SECURITY.md](SECURITY.md) — trust boundaries, enforced controls, residual risks.
-- [REGISTRY.md](REGISTRY.md) — signed HTTPS registry, install flow, lockfile.
 - [RELEASE.md](RELEASE.md) — release checklist, gates, profiles, CI secrets.
 - [CODE_SIGNING.md](CODE_SIGNING.md) — Windows Authenticode, macOS Developer ID/notarization.
 - [UPDATER.md](UPDATER.md) — Tauri updater, `latest.json`, channels, local testing.
@@ -48,6 +49,9 @@ described in `CLI.md` (`dev` and `tui`).
 - [plans/V1_RELEASE_REPORT.md](plans/V1_RELEASE_REPORT.md) — G5 release report: test matrix, benchmarks, SBOM hashes, residual risks, tag.
 - [plans/PERFORMANCE.md](plans/PERFORMANCE.md) — G3 startup/call/build/bundle measurements and limits.
 - [plans/AUDIT_V1.md](plans/AUDIT_V1.md) — v0–v1.0 audit and FIX gaps.
+- [plans/CORRECTIONS_1_1.md](plans/CORRECTIONS_1_1.md) — 1.1 DX/cleanup plan and status.
+- [plans/IMPLEMENTATION_1_2.md](plans/IMPLEMENTATION_1_2.md) — approved 1.2 implementation plan, ABI 2 and acceptance gates.
+- [plans/GATE0_FEASIBILITY.md](plans/GATE0_FEASIBILITY.md) — runtime spike evidence: async host import → separate Go store.
 - [plans/BLOCKERS.md](plans/BLOCKERS.md) — blocker log template and entries.
 
 ## Architecture decisions
@@ -57,8 +61,9 @@ described in `CLI.md` (`dev` and `tui`).
 - [adr/0003-runtime-host-discovery.md](adr/0003-runtime-host-discovery.md) — runtime descriptor and host discovery.
 - [adr/0004-ui-plugin-bridge.md](adr/0004-ui-plugin-bridge.md) — MessageChannel bridge, nonce, allowlist.
 - [adr/0005-streaming-long-calls.md](adr/0005-streaming-long-calls.md) — jobs, SSE and cancellation.
+- [adr/0006-plugin-composition-and-capabilities.md](adr/0006-plugin-composition-and-capabilities.md) — accepted decisions for glue UI, runtime plugin calls, cycles, multi-KV and sandbox posture.
 
-## Status of 1.0 claims
+## Status of 1.1 claims
 
 Keep these labels in sync with code and tests; do not upgrade a claim without
 evidence.

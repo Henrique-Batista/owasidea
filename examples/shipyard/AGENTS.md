@@ -9,20 +9,20 @@ Playwright tests passing.
 ```bash
 cd examples/shipyard
 owasidea doctor --install-wasi-sdk   # optional, C/C++
-owasidea build                       # compile, compose, generate + sign
+owasidea build                       # compile, compose, generate manifests
 owasidea smoke                       # temporary host + declarative API checks
 owasidea test                        # build + smoke + Playwright
 owasidea dev                         # build + host + Vite + watcher
-owasidea bundle                      # build + sign + UI + Tauri -> dist/
+owasidea bundle                      # build + UI + Tauri -> dist/
 ```
 
 All orchestration is in the `owasidea` CLI. The example intentionally has no
-shell scripts. Build configuration, signing, smoke assertions and the UI test
+shell scripts. Build configuration, smoke assertions and the UI test
 command live in `wasm-app.toml`.
 
 `owasidea build` compiles ordinary plugins first, then plugins with
 `compose_with`. It installs missing npm dependencies, auto-detects wasi-sdk and
-the reactor adapter, signs manifests when `[signing]` is configured, and copies
+the reactor adapter, and copies
 UI assets into `ui/public/plugins/`.
 
 Use `OWASIDEA_DATA_DIR` for manual runs. Use `CARGO_TARGET_DIR` on constrained
@@ -38,7 +38,6 @@ disks.
 - `plugins/*/node_modules/`, `ui/node_modules/`
 - `desktop/target/`
 - `dist/` (bundle artifacts)
-- `keys/` (demo signing key; never commit)
 
 ## Adding a plugin
 
@@ -47,7 +46,6 @@ disks.
 3. Add `[plugins.<name>]` in `wasm-app.toml` with path/language/type.
 4. Add KV/fs/http/network permissions only for WIT imports.
 5. Run `owasidea build`; run `owasidea test` for the full suite. Signing needs
-   `owasidea keygen --out keys` once (the example does not auto-generate keys).
 6. Packaging resources are generated from `wasm-app.toml`; no manual
    `desktop/tauri.conf.json` edit is needed for a new plugin.
 7. Add assertions under `[[smoke.calls]]`, `[[smoke.http]]` or
@@ -118,7 +116,7 @@ Cross-compiling the Windows installer from Linux is not supported by
 
 ## Acceptance checklist
 
-- [ ] `owasidea build` exits 0 and signs 11 manifests.
+- [ ] `owasidea build` exits 0 and writes 12 manifests.
 - [ ] `owasidea smoke` exits 0.
 - [ ] `owasidea test` runs smoke + Playwright 5/5.
 - [ ] `owasidea validate` says OK.
@@ -126,5 +124,5 @@ Cross-compiling the Windows installer from Linux is not supported by
 - [ ] `core-rust` saves/loads a report under `OWASIDEA_DATA_DIR`.
 - [ ] `watchtower-rust` start/status/stop works.
 - [ ] `/app/webhook-go/health` returns `ok: true`.
-- [ ] `.deb` contains `manifests/`, `trust/owasidea.pub`, and all component files.
-- [ ] Host starts with `OWASIDEA_REQUIRE_SIGNATURES=true` and the bundled key.
+- [ ] `.deb` contains `manifests/` and all component files.
+- [ ] Host starts with the bundled manifests and components.

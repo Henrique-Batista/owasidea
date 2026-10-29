@@ -144,22 +144,20 @@ reactor adapter.
 ```bash
 cd examples/shipyard
 owasidea doctor --install-wasi-sdk   # optional, C/C++ only
-owasidea keygen --out keys           # demo signing key (gitignored); once
-owasidea build                       # compiles, composes, generates + signs manifests
+owasidea build                       # compiles, composes, generates manifests
 owasidea smoke                       # temporary host + every API assertion
 owasidea test                        # build + smoke + Playwright UI tests
 owasidea dev                         # build + host + Vite + watcher
 ```
 
-`owasidea build` signs every manifest with the key under `keys/` because
-`[signing]` is configured. The example does **not** generate keys implicitly:
-run `owasidea keygen --out keys` once locally, or point `key`/`public_key` at a
-protected release key in CI. `keys/` is gitignored; never commit private keys.
+Manifests are unsigned and checked by SHA-256. Integrity of a release comes from
+the build pipeline and OS code signing (see `docs/CODE_SIGNING.md`), not from a
+per-plugin Ed25519 key.
 
 Open the URL printed by `owasidea dev` (Shipyard uses
 `http://127.0.0.1:5180` while the host is on `http://127.0.0.1:8790`). `dev` is a
-foreground process; press `Ctrl+C` to stop Vite and the host. The Workbench calls every language through
-the host API; Inventory shows generated manifests; Runtime drives the service
+foreground process; press `Ctrl+C` to stop Vite and the host. The Workbench calls `app-glue`, which dispatches every language through typed
+dependencies; Inventory shows generated manifests in dev mode; Runtime drives the service
 and the executable plugin; Isolated UI verifies and mounts the Svelte and React
 bundles.
 
@@ -171,6 +169,7 @@ owasidea bundle --bundles deb                # only .deb
 owasidea bundle --bundles deb,rpm,appimage   # explicit Linux targets
 owasidea bundle --bundles nsis,msi           # Windows
 owasidea bundle --profile staging --bundles deb   # overlay + dist/staging
+owasidea bundle --target cli                 # headless dist/cli/ + run.sh
 ```
 
 Profiles (`dev`, `staging`, `prod`) merge an optional `wasm-app.<profile>.toml`
@@ -190,12 +189,11 @@ The flag requires `bwrap`. See
 
 The example targets Linux `deb` and, through
 `desktop/tauri.windows.conf.json`, Windows NSIS. Change `bundle.targets` for
-rpm/AppImage or another platform. The Tauri shell sets
-`OWASIDEA_REQUIRE_SIGNATURES=true`, resolves the bundled `trust/owasidea.pub`,
-and rejects unsigned or tampered manifests at startup.
+rpm/AppImage or another platform. The host verifies every manifest and component
+checksum at startup; manifest signing is not used.
 
-The Linux `.deb` contains the Tauri binary, generated manifests, component
-`.wasm` files, and the trust key. Windows NSIS/MSI packages use the same
+The Linux `.deb` contains the Tauri binary, generated manifests and component
+`.wasm` files. Windows NSIS/MSI packages use the same
 resources. If a target fails after others were produced (for example AppImage
 without a working `linuxdeploy`), the successful artifacts are still copied to
 `dist/` and the command exits non-zero so CI can notice the partial failure.
@@ -230,6 +228,7 @@ cd my-app/ui && npm install && npm run build
 name = "my-app"
 version = "0.1.0"
 identifier = "dev.example.myapp"
+ui_plugin = "my-glue"
 
 [host]
 addr = "127.0.0.1:8787"
@@ -238,25 +237,22 @@ addr = "127.0.0.1:8787"
 path = "plugins/my-core"
 language = "rust"
 type = "library"
-kv = "my-core:read-write"
+kv = ["my-core:read-write"]
 
 [dev]
 watch = true
 hot_reload = true
 ui_addr = "127.0.0.1:5180"
-
-[signing]
-key = "keys/owasidea.key"
-public_key = "keys/owasidea.pub"
-require = true
 ```
+
+`[app].ui_plugin` names the only plugin the shipped UI may call in production.
+Dev tools keep access to every plugin. A plugin calls a local dependency through
+generated WIT bindings by declaring `dependencies = ["provider"]`; the same edge
+cannot also use `compose_with`.
 
 `ui_addr` fixes the Vite dev address so `owasidea dev`, docs and Playwright all
 use the same URL. If it is occupied, `dev` fails instead of silently choosing
-another port. `[signing]` makes build/bundle sign manifests; create the key once
-with `owasidea keygen --out keys` (or use a protected release key).
-`generate = true` still exists as a demo-only convenience but is not enabled in
-the example, so a missing key fails instead of minting a new trust root.
+another port. There is no `[signing]` plugin section.
 
 Paths in `wasm-app.toml` are relative to the config file. This means
 `owasidea --config examples/shipyard/wasm-app.toml build` works from any
@@ -352,8 +348,7 @@ owasidea dev
 5. Composes plugins that declare `compose_with` **after** ordinary plugins.
 6. Runs `wasm-tools component wit --json` to derive imports/exports.
 7. Writes a manifest with a SHA-256 checksum.
-8. Signs manifests when `[signing]` is configured.
-9. Copies verified UI-plugin assets into `ui/public/plugins/<name>/`.
+8. Copies verified UI-plugin assets into `ui/public/plugins/<name>/`.
 
 `test` builds, starts a temporary host, runs the declarative `[smoke]` checks,
 then executes `[test].ui` (Playwright in the example). `smoke` runs only the API
@@ -392,28 +387,33 @@ every configured headless plugin, and the UI plugin count.
 
 ### 4.6 Manifests and permissions
 
-The generated manifest is the security boundary. The host compares the actual
-component imports with it and fails startup on an undeclared interface.
+The generated manifest is the capability policy. The host compares the actual
+component imports with it and fails startup on an undeclared interface. The
+manifest itself is trusted from disk while its components are checked by
+SHA-256; see
+[`RUNTIME_MODEL.md`](RUNTIME_MODEL.md) for the full runtime rules.
 
 ```toml
 [plugins.my-core]
 path = "plugins/my-core"
 language = "rust"
 type = "library"
-kv = "my-core:read-write"              # host KV namespace + access
-fs = ["reports:read-write"]            # WASI preopen
-http_outbound = ["api.example.com"]    # exact host allowlist
-network_outbound = ["192.0.2.10"]      # exact IP/hostname allowlist
-network_inbound = ["127.0.0.1"]        # exact local bind IPs
+kv = ["my-core:read-write"]              # one or more KV namespace grants
+fs = ["reports:read-write"]              # WASI preopen
+http_outbound = ["api.example.com:443"]  # exact host:port allowlist
+network_outbound = ["192.0.2.10:443"]    # exact host/IP + port
+network_inbound = ["127.0.0.1:8080"]     # exact local bind IP + port
+capabilities = ["app-data"]              # optional named preset
 persistent = true
 ```
 
 Rules:
 
-- Wildcards are rejected for HTTP and network permissions.
-- FS preopens are created under `OWASIDEA_DATA_DIR` when that variable is set
-  (desktop bundles do this); otherwise they are relative to the process working
-  directory.
+- Wildcards are rejected for HTTP and network permissions. HTTP/network values
+  are exact `host:port` or `IP:port` pairs, never URLs
+  (`api.example.com:443`, not `https://api.example.com`). IPv6 uses brackets.
+- FS preopens are resolved under `OWASIDEA_DATA_DIR` when that variable is set
+  (desktop bundles do this); absolute paths bypass it. Prefer relative paths.
 - A component that imports `poc:host/host-kv` must have a matching `kv`
   permission or `build` fails.
 - Resource limits (`max_fuel`, `timeout_ms`, `max_memory_mb`, `max_instances`)
@@ -456,7 +456,7 @@ The dashboard:
 Shipping the index with the assets avoids a build-skew false negative: a
 desktop binary built before the latest `owasidea build` still verifies the
 bundle it actually contains. `GET /ui-plugins` exposes the same metadata from
-the signed manifests for other clients.
+the manifests for other clients.
 
 The dashboard and the UI plugin share no JavaScript state. By default an
 isolated plugin has **no host bridge** and cannot call
@@ -496,7 +496,7 @@ path = "plugins/pipeline-go"
 language = "go"
 type = "library"
 compose_with = ["core-rust"]
-kv = "shipyard-pipeline:read-write"
+kv = ["shipyard-pipeline:read-write"]
 fs = ["reports:read-write"]
 persistent = true
 ```
@@ -584,9 +584,9 @@ The Tauri config should include:
 
 Do not hand-maintain `bundle.resources`. `owasidea bundle` renders
 `tauri.generated.conf.json` from `wasm-app.toml` and fills it with the manifests
-directory, every headless component, the trust key (`trust/owasidea.pub`) and
-`owasidea.runtime.json`, so adding a plugin only requires the `[plugins.*]`
-entry. Explicit entries in the base config are preserved, and the UI is embedded
+directory, every headless component and `owasidea.runtime.json`, so adding a
+plugin only requires the `[plugins.*]` entry. Explicit entries in the base
+config are preserved, and the UI is embedded
 through `build.frontendDist` (the UI build output is only added as a resource
 when the shell has no frontend directory).
 
@@ -594,8 +594,7 @@ The desktop `main.rs` should:
 
 1. Resolve manifests from `$RESOURCE/manifests` when bundled, or `../manifests`
    during development.
-2. Set `OWASIDEA_DATA_DIR` to the platform app-data directory (creating it) and
-   resolve the trust key from `$RESOURCE/trust/owasidea.pub`.
+2. Set `OWASIDEA_DATA_DIR` to the platform app-data directory (creating it).
 3. Start `owasidea_host::run(manifests, addr)` on a background task.
 4. Let the webview talk to `http://127.0.0.1:8790`.
 
@@ -603,29 +602,26 @@ Then:
 
 ```bash
 owasidea build       # regenerate manifests + components
-owasidea sign <name> --manifest-dir manifests --key keys/owasidea.key
 owasidea bundle      # npm run build in ui/, cargo tauri build in desktop/
 ```
 
-With `[signing]` in `wasm-app.toml`, `owasidea build` and `owasidea bundle` sign
-every manifest automatically. Create the keypair explicitly
-(`owasidea keygen --out keys`) or point `key` at a CI secret; the example keeps
-`generate` off so release builds never invent a trust root.
+Manifests are unsigned. OS code signing for the installer is separate; see
+[`CODE_SIGNING.md`](CODE_SIGNING.md).
 
 `bundle` uses `[desktop] path` and `[desktop] ui`, prints the artifact location,
 and fails clearly if the Tauri config or UI is missing.
 
 Important packaging details:
 
-- Resources are generated from the config: manifests, component `.wasm` files,
-  the trust key and `runtime.json`. Do not bundle `node_modules`, source trees,
-  or UI-plugin build caches.
+- Resources are generated from the config: manifests, component `.wasm` files
+  and `runtime.json`. Do not bundle `node_modules`, source trees, or UI-plugin
+  build caches.
 - A plugin added to `wasm-app.toml` is packaged automatically; no manual
   `bundle.resources` edit is required.
 - Keep the host on loopback. The Tauri webview and the host share the machine;
   this is not a remote authentication boundary.
-- Production release builds require signed manifests unless explicitly disabled.
-  See `docs/SECURITY.md`.
+- Manifests are unsigned and checked by SHA-256. Release integrity relies on the
+  build pipeline and OS code signing of the installer. See `docs/SECURITY.md`.
 
 ### 8.1 Updates (Tauri updater)
 
@@ -662,21 +658,18 @@ cargo test
 owasidea --config examples/shipyard/wasm-app.toml validate
 owasidea --config examples/shipyard/wasm-app.toml smoke
 owasidea --config examples/shipyard/wasm-app.toml test
-owasidea verify dist/ --public-key keys/owasidea.pub
+owasidea verify dist/
 ```
 
-`owasidea bundle` stages the runtime payload (`manifests/`, `plugins/*.component.wasm`,
-`ui/public/`, `trust/owasidea.pub`) next to the installers, so
-`owasidea verify dist/` checks the exact manifests, component hashes,
-signatures and UI asset digests that ship. Pass the release key explicitly
-(`--public-key` or `OWASIDEA_PUBLIC_KEY`): the key staged inside `dist/` is not
-accepted as its own trust root (`TRUST_ROOT_UNPINNED`). It fails with
-`NO_MANIFESTS` when pointed at a directory that has no manifests, instead of
-silently passing.
+`owasidea bundle` stages the runtime payload (`manifests/`,
+`plugins/*.component.wasm`, `ui/public/`) next to the installers, so
+`owasidea verify dist/` checks the exact manifests, component hashes and UI
+asset digests that ship. It fails with `NO_MANIFESTS` when pointed at a
+directory that has no manifests, instead of silently passing.
 
 The Shipyard smoke test asserts:
 
-- 9 WASI plugins + 2 isolated UI plugins load.
+- 10 WASI plugins + 2 isolated UI plugins load.
 - Every language responds through `/call`.
 - The composed Go→Rust pipeline returns a scored verdict.
 - Host KV and the `reports/` preopen persist a report.
@@ -718,20 +711,16 @@ owasidea doctor [--json] [--install-wasi-sdk]
 owasidea plugin new <name> \
   --lang rust|go|typescript|javascript|csharp|c|cpp|yew|blazor|uno|svelte|react \
   --type library|executable|service|ui
-owasidea build [--no-sign]          compile, compose, generate + sign manifests
+owasidea build                      compile, compose, generate manifests
 owasidea test [--no-build] [--no-smoke] [--no-ui]
 owasidea smoke [--no-build]         declarative API checks
 owasidea validate                   checksums, capabilities, UI manifests
 owasidea run                        host only (current build)
 owasidea dev [--no-build]           build + host + UI + watcher + hot reload
 owasidea inspect <plugin> [--json]  manifest + WIT
-owasidea bundle [--no-build]        build + sign + Tauri package
+owasidea bundle [--no-build]        build + Tauri package
 owasidea latest [--check]           generate/validate dist/latest.json (updater)
 owasidea wit generate [path]        regenerate WIT from source annotations
-owasidea keygen --out <dir>         Ed25519 signing key
-owasidea sign <plugin> --key <key>  sign a release manifest
-owasidea registry search <q> --url <index>
-owasidea registry install <name> --version <v> --url <index> --public-key <key>
 ```
 
 Global flags: `--config`, `--manifest-dir`, `--http-addr`, `--json`.

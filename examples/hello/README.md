@@ -22,7 +22,8 @@ owasidea dev        # host + UI + watcher in the interactive dashboard (press ? 
 ```
 
 Requirements: `rustc`, `cargo-component`, `wasm-tools`, `node`/`npm`
-(`owasidea doctor` reports what is missing).
+(`owasidea doctor` reports what is missing). For the Playwright UI test, run
+`npm install` once at the repository root (or use `owasidea test --no-ui`).
 
 ## Test points
 

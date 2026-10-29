@@ -12,18 +12,31 @@ pub fn effective_permissions(m: &Value) -> Vec<String> {
             ));
         }
     }
-    if !m["permissions"]["kv"].is_null() {
-        let kv = &m["permissions"]["kv"];
-        perms.push(format!(
-            "kv:{}:{}",
-            kv["access"].as_str().unwrap_or(""),
-            kv["namespace"].as_str().unwrap_or("")
-        ));
+    if let Some(entries) = m["permissions"]["kv"].as_array() {
+        for kv in entries {
+            perms.push(format!(
+                "kv:{}:{}",
+                kv["access"].as_str().unwrap_or(""),
+                kv["namespace"].as_str().unwrap_or("")
+            ));
+        }
+    }
+    if m["permissions"]["http"]["outbound_any"]
+        .as_bool()
+        .unwrap_or(false)
+    {
+        perms.push("http:outbound-any".to_string());
     }
     if let Some(arr) = m["permissions"]["http"]["outbound"].as_array() {
         for h in arr {
             perms.push(format!("http:outbound:{}", h.as_str().unwrap_or("")));
         }
+    }
+    if m["permissions"]["network"]["outbound_any"]
+        .as_bool()
+        .unwrap_or(false)
+    {
+        perms.push("network:outbound-any".to_string());
     }
     if let Some(arr) = m["permissions"]["network"]["outbound"].as_array() {
         for h in arr {
@@ -89,14 +102,14 @@ mod tests {
             } else {
                 (k, "read-write")
             };
-            json!({"namespace": n, "access": a})
+            vec![json!({"namespace": n, "access": a})]
         });
         json!({
             "permissions": {
                 "filesystem": fs_perms,
                 "http": {"outbound": http, "inbound": false},
                 "network": {"outbound": net_out, "inbound": net_in},
-                "kv": kv_val
+                "kv": kv_val.unwrap_or_default()
             },
             "imports": {"host": host, "wasi": wasi}
         })
@@ -119,8 +132,22 @@ mod tests {
         assert!(p.contains(&"http:outbound:example.com".to_string()));
         assert!(p.contains(&"network:outbound:1.2.3.4".to_string()));
         assert!(p.contains(&"network:inbound:5.6.7.8".to_string()));
+        assert!(!p.contains(&"network:outbound-any".to_string()));
         assert!(p.contains(&"import:host:poc:host/host-kv".to_string()));
         assert!(p.contains(&"import:wasi:wasi:io".to_string()));
+    }
+
+    #[test]
+    fn network_outbound_preset_is_part_of_the_lock() {
+        let manifest = json!({
+            "permissions": {
+                "filesystem": [],
+                "http": {"outbound": [], "outbound_any": false},
+                "network": {"outbound": [], "outbound_any": true, "inbound": []}
+            },
+            "imports": {"host": [], "wasi": []}
+        });
+        assert!(effective_permissions(&manifest).contains(&"network:outbound-any".to_string()));
     }
 
     #[test]

@@ -22,7 +22,8 @@ executable HTTP plugin, and two isolated UI frameworks.
 | Executable `wasi:http/incoming-handler` plugin | `plugins/webhook-go` |
 | Isolated Svelte UI bundle | `plugins/board-svelte` |
 | Isolated React UI bundle | `plugins/map-react` |
-| Product dashboard calling every runtime through HTTP | `ui/` |
+| Glue plugin (`app-glue`) routing workbench calls and service lifecycle | `plugins/app-glue` |
+| Product dashboard calling the glue plugin only | `ui/` |
 | Tauri 2 desktop packaging (deb/NSIS) with bundled plugins | `desktop/` |
 | End-to-end smoke and browser tests | `owasidea smoke`, `owasidea test`, `tests/ui.spec.ts` |
 
@@ -34,6 +35,7 @@ Shipyard UI (vanilla TS + Vite, hashed UI-plugin iframes)
         ▼
 owasidea-host (Rust + Wasmtime 50)
         │
+        ├── app-glue          typed workbench dispatch + service-control
         ├── core-rust        score · verdict · save-report · load-report
         ├── audit-go         scan deps · host-log
         ├── changelog-ts     render markdown
@@ -61,15 +63,15 @@ npx playwright install
 
 cd examples/shipyard
 owasidea doctor --install-wasi-sdk   # optional, only needed for C/C++
-owasidea build                       # compile, compose, generate + sign manifests
+owasidea build                       # compile, compose, generate manifests
 owasidea test                        # build + API smoke + Playwright
 owasidea dev                         # build + host + Vite + watcher
 owasidea run                         # run the last build without watching
 ```
 
 `owasidea build` installs missing npm dependencies for the dashboard,
-TypeScript plugins and UI plugins, derives manifests from real WIT, signs them
-using `[signing]`, and copies UI assets. `owasidea dev` rebuilds first, then starts the host and Vite.
+TypeScript plugins and UI plugins, derives manifests from real WIT, and copies
+UI assets. `owasidea dev` rebuilds first, then starts the host and Vite.
 All orchestration lives in the framework; the example has no shell scripts.
 
 The app host listens on `127.0.0.1:8790`; `dev` uses
@@ -77,7 +79,7 @@ The app host listens on `127.0.0.1:8790`; `dev` uses
 process: open the UI URL in a browser and press `Ctrl+C` when finished. The
 dashboard has six routes:
 
-- **Workbench** — calls every plugin and renders the release report.
+- **Workbench** — calls the `app-glue` plugin, which dispatches every language, and renders the release report.
 - **Inventory** — lists plugins, exports, and generated manifests.
 - **Runtime** — service start/status/stop, webhook health/event, metrics, dev
   status.
@@ -96,7 +98,7 @@ owasidea bundle --bundles deb
 owasidea bundle --bundles deb,rpm,appimage
 ```
 
-`owasidea bundle` builds + signs first, then runs the UI build and Tauri. The
+`owasidea bundle` builds first, then runs the UI build and Tauri. The
 artifact is copied to `dist/` because `[desktop].output = "dist"`. Shipyard
 uses `"targets": "all"`; AppImage additionally requires a working
 `linuxdeploy`/FUSE environment. If AppImage fails after `.deb`/`.rpm` were made,
@@ -114,18 +116,15 @@ root and does not change the host. See `docs/APPIMAGE.md`.
 
 The bundle step:
 
-1. `owasidea build` produced `manifests`, component `.wasm` files, and signed
-   manifests with the local demo key under `keys/` (ignored by git; use a
-   protected CI key for real releases).
+1. `owasidea build` produced `manifests` and component `.wasm` files.
 2. `npm run build` in `ui/` produces `ui/dist`, including
    `plugins/board-svelte/` and `plugins/map-react/`.
 3. `cargo tauri build` in `desktop/` embeds the frontend and packages the
-   manifests, WASI component files, signing public key and runtime descriptor as
-   Tauri resources. `owasidea bundle` generates that list from
-   `wasm-app.toml`; it is not hand-maintained.
-4. At runtime the shell resolves `$RESOURCE/manifests`, sets
-   `OWASIDEA_REQUIRE_SIGNATURES=true`, trusts `$RESOURCE/trust/owasidea.pub`,
-   and sets `OWASIDEA_DATA_DIR` to the platform app-data directory.
+   manifests, WASI component files and runtime descriptor as Tauri resources.
+   `owasidea bundle` generates that list from `wasm-app.toml`; it is not
+   hand-maintained.
+4. At runtime the shell resolves `$RESOURCE/manifests` and sets
+   `OWASIDEA_DATA_DIR` to the platform app-data directory.
 
 The example uses `"targets": "all"` on Linux (`deb`, `rpm`, `AppImage`) and
 Windows via `desktop/tauri.windows.conf.json` (NSIS/MSI). Use
@@ -136,10 +135,7 @@ installer; adding a `[plugins.*]` entry is enough.
 ## Test
 
 ```bash
-# Once per checkout: demo signing key (keys/ is gitignored)
-owasidea keygen --out keys
-
-# API smoke only: 9 WASI plugins, 2 UI plugins, composition, KV/fs, service, HTTP
+# API smoke only: 10 WASI plugins, 2 UI plugins, glue, composition, KV/fs, service, HTTP
 owasidea smoke
 
 # Build + API smoke + Playwright UI tests
@@ -186,11 +182,6 @@ tests/                     Playwright end-to-end spec
 `wasm-app.toml` also owns the developer workflow:
 
 ```toml
-[signing]
-key = "keys/owasidea.key"
-public_key = "keys/owasidea.pub"
-require = true
-
 [test]
 ui = ["npx", "playwright", "test", "--config", "playwright.config.ts"]
 
@@ -202,7 +193,7 @@ min = 0
 max = 100
 ```
 
-`owasidea build` signs (create the key once with `owasidea keygen --out keys`),
+`owasidea build` compiles and generates manifests,
 `owasidea dev` rebuilds and watches, `owasidea smoke`
 executes the declarative API checks, `owasidea test` adds the UI command, and
 `owasidea bundle` packages Tauri and copies artifacts to `dist/`. No project
@@ -244,12 +235,11 @@ See [`docs/WINDOWS.md`](../../docs/WINDOWS.md).
   Vite `5180`. This lets both run at the same time.
 - UI plugins are presentational by default. They share no JavaScript state with
   the dashboard and receive no host bridge unless the plugin declares a `bridge`
-  allowlist (`board-svelte` opts into `changelog-ts.render`).
+  allowlist (`board-svelte` opts into `app-glue.call`).
 - A running host keeps the component bytes loaded at startup. After a rebuild,
   restart the host (or use dev hot reload) before re-running tests; otherwise
   `/call` returns `checksum mismatch`.
 - `pipeline-go` imports the Rust interface at build time, not at runtime. To add
   runtime plugin-to-plugin calls, the host would need an explicit broker; this
   example uses build-time composition and dashboard orchestration.
-- Production release builds require signatures (`OWASIDEA_REQUIRE_SIGNATURES`).
-  See `docs/SECURITY.md`.
+- Manifests are unsigned and checked by SHA-256. See `docs/SECURITY.md`.

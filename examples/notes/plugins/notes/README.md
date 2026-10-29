@@ -6,4 +6,4 @@ Rust library component that stores notes in the host key/value store.
 - `list-notes() -> string`: notes joined with `\n`.
 - `clear-notes() -> u32`: removes every note.
 
-Permission: `kv = "notes:read-write"` (declared in `wasm-app.toml`).
+Permission: `kv = ["notes:read-write"]` (declared in `wasm-app.toml`).

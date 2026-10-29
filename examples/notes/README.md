@@ -5,7 +5,7 @@ A library component that stores notes in the host key/value store. Shows the
 
 ```text
 notes/
-├── wasm-app.toml                 kv = "notes:read-write", smoke checks, UI test command
+├── wasm-app.toml                 kv = ["notes:read-write"], smoke checks, UI test command
 ├── plugins/notes/                Rust component; WIT imports poc:host/host-kv
 └── ui/                           Vite + TypeScript UI
 ```
@@ -36,3 +36,6 @@ owasidea dev                   # dashboard; `r` reloads the notes component
   State lives in the host store (`OWASIDEA_DATA_DIR`), not in the browser.
 - **Contract:** smoke checks call `add-note`/`list-notes` by their WIT names.
   Underscore aliases do not exist.
+
+Playwright UI tests need `npm install` once at the repository root; use
+`owasidea test --no-ui` to skip them.

@@ -743,6 +743,7 @@ pub(crate) struct HostJobExecutor {
     plugins: Arc<std::sync::RwLock<HashMap<String, Arc<PluginRuntime>>>>,
     plugin_metrics: Arc<plugin_metrics::PluginMetricsMap>,
     requests: Arc<AtomicU64>,
+    service_control: Arc<crate::ServiceControlContext>,
 }
 
 impl HostJobExecutor {
@@ -751,12 +752,14 @@ impl HostJobExecutor {
         plugins: Arc<std::sync::RwLock<HashMap<String, Arc<PluginRuntime>>>>,
         plugin_metrics: Arc<plugin_metrics::PluginMetricsMap>,
         requests: Arc<AtomicU64>,
+        service_control: Arc<crate::ServiceControlContext>,
     ) -> Self {
         Self {
             engine,
             plugins,
             plugin_metrics,
             requests,
+            service_control,
         }
     }
 }
@@ -809,6 +812,12 @@ impl JobExecutor for HostJobExecutor {
         let engine = self.engine.clone();
         let metrics = self.plugin_metrics.clone();
         let requests = self.requests.clone();
+        let plugins = self
+            .plugins
+            .read()
+            .map(|plugins| plugins.clone())
+            .unwrap_or_default();
+        let service_control = self.service_control.clone();
         Box::pin(async move {
             if job.is_cancelled() {
                 return Err("cancelled".to_string());
@@ -817,7 +826,17 @@ impl JobExecutor for HostJobExecutor {
             let runtime = runtime.ok_or_else(|| format!("unknown plugin {plugin}"))?;
             let request_id = requests.fetch_add(1, Ordering::Relaxed) + 1;
             let started = Instant::now();
-            match invoke_export(&engine, &runtime, &function, &args, request_id).await {
+            match invoke_export(
+                &engine,
+                &runtime,
+                &plugins,
+                &service_control,
+                &function,
+                &args,
+                request_id,
+            )
+            .await
+            {
                 Ok((body, fuel)) => {
                     plugin_metrics::record(
                         &metrics,
@@ -942,11 +961,13 @@ mod tests {
             requests: Arc::new(AtomicU64::new(0)),
             errors: Arc::new(AtomicU64::new(0)),
             plugin_metrics: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            service_control: crate::test_service_control(Engine::default()),
             dev_mode: false,
             dev_hot_reload: false,
             dev_watch_paths: Vec::new(),
             dev_last_reload: Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
             manifests_dir: std::path::PathBuf::from("."),
+            app_ui_plugin: None,
             jobs: JobManager::new(executor),
         }
     }

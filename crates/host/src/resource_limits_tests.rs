@@ -140,11 +140,11 @@ fn test_plugin(
         manifest,
         manifest_path: PathBuf::from("test.manifest.json"),
         component: Component::new(engine, wat).expect("compile WAT component"),
-        kv: Arc::new(std::sync::Mutex::new(
-            rusqlite::Connection::open_in_memory().expect("in-memory kv"),
-        )),
+        kv: HashMap::new(),
         logs: Arc::new(Mutex::new(LogBuffer::new(name))),
         http_pre: None,
+        dependencies: Vec::new(),
+        http_pinned: HashMap::new(),
     })
 }
 
@@ -160,11 +160,13 @@ fn test_state(engine: Engine, plugin: Arc<PluginRuntime>) -> AppState {
         requests: Arc::new(AtomicU64::new(0)),
         errors: Arc::new(AtomicU64::new(0)),
         plugin_metrics: Arc::new(std::sync::RwLock::new(HashMap::new())),
+        service_control: crate::test_service_control(Engine::default()),
         dev_mode: false,
         dev_hot_reload: false,
         dev_watch_paths: Vec::new(),
         dev_last_reload: Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
         manifests_dir: PathBuf::from("."),
+        app_ui_plugin: None,
         #[cfg(feature = "streaming")]
         jobs: jobs::test_manager(),
     }
@@ -244,7 +246,14 @@ async fn fuel_exhaustion_traps_cpu_bound_export() {
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "body: {body}");
     // The HTTP body only carries the outer trap context, so assert the root
     // cause on the same path the handler uses (instantiate + call_async).
-    let (mut store, instance) = instantiate(&engine, &plugin).await.expect("instantiate");
+    let (mut store, instance) = instantiate(
+        &engine,
+        &plugin,
+        &HashMap::from([(plugin.manifest.name.clone(), plugin.clone())]),
+        &crate::test_service_control(engine.clone()),
+    )
+    .await
+    .expect("instantiate");
     let func = instance
         .get_typed_func::<(), (u32,)>(&mut store, "spin")
         .expect("spin export");
@@ -385,4 +394,94 @@ async fn timeout_ms_cancels_yielding_guest_call() {
         elapsed < Duration::from_secs(1),
         "timeout_ms did not interrupt the guest call: {elapsed:?}"
     );
+}
+
+#[test]
+fn kv_namespace_grants_use_independent_persistent_databases() {
+    // Unique namespaces isolate this test under the configured data root.
+    let unique = tempfile::Builder::new().prefix("kv-").tempdir().unwrap();
+    let prefix = unique.path().file_name().unwrap().to_string_lossy();
+    let first = format!("{prefix}_first");
+    let second = format!("{prefix}_second");
+    let grants = [
+        KvPerm {
+            namespace: first.clone(),
+            access: "read-write".into(),
+        },
+        KvPerm {
+            namespace: second.clone(),
+            access: "read-write".into(),
+        },
+    ];
+    let root = data_root();
+
+    let opened = open_kv_dbs(&grants, None).expect("open granted databases");
+    assert_eq!(opened.len(), 2);
+    assert!(!Arc::ptr_eq(&opened[&first], &opened[&second]));
+    opened[&first]
+        .lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO kv (key, value) VALUES (?1, ?2)",
+            rusqlite::params!["shared-key", "first-value"],
+        )
+        .unwrap();
+    opened[&second]
+        .lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO kv (key, value) VALUES (?1, ?2)",
+            rusqlite::params!["shared-key", "second-value"],
+        )
+        .unwrap();
+
+    let reopened = open_kv_dbs(&grants, Some(&opened)).expect("reuse granted databases");
+    for namespace in [&first, &second] {
+        assert!(Arc::ptr_eq(&opened[namespace], &reopened[namespace]));
+    }
+    let first_value: String = reopened[&first]
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT value FROM kv WHERE key = ?1",
+            ["shared-key"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let second_value: String = reopened[&second]
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT value FROM kv WHERE key = ?1",
+            ["shared-key"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(first_value, "first-value");
+    assert_eq!(second_value, "second-value");
+
+    let remaining = open_kv_dbs(&grants[..1], Some(&reopened)).expect("remove second grant");
+    assert_eq!(remaining.len(), 1);
+    assert!(!remaining.contains_key(&second));
+    assert!(root.join(&second).join("kv.sqlite").is_file());
+
+    let disk_reopened = open_kv_dbs(&grants[1..], None).expect("reopen removed grant data");
+    let persisted_value: String = disk_reopened[&second]
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT value FROM kv WHERE key = ?1",
+            ["shared-key"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(persisted_value, "second-value");
+
+    drop(disk_reopened);
+    drop(remaining);
+    drop(reopened);
+    drop(opened);
+    for namespace in [&first, &second] {
+        std::fs::remove_dir_all(root.join(namespace)).expect("remove isolated KV test data");
+    }
 }

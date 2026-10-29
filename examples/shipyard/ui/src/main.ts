@@ -142,8 +142,8 @@ const pluginMeta: Record<string, { role: string; why: string; detail: string }> 
   },
   'board-svelte': {
     role: 'Svelte UI bundle',
-    why: 'A separate Vite/Svelte build. It runs only in the webview, in a sandboxed iframe, after its asset hashes are verified, and calls the allowlisted changelog-ts.render through the parent bridge.',
-    detail: 'webview only · js-wasm · bridge: changelog-ts.render',
+    why: 'A separate Vite/Svelte build. It runs only in the webview, in a sandboxed iframe, after its asset hashes are verified, and calls the allowlisted app-glue.call through the parent bridge.',
+    detail: 'webview only · js-wasm · bridge: app-glue.call',
   },
   'map-react': {
     role: 'React UI bundle',
@@ -231,11 +231,16 @@ function unwrap(value: unknown): unknown {
 }
 
 async function call(plugin: string, fn: string, args: unknown[]): Promise<unknown> {
-  const body = await api<{ result?: unknown; results?: unknown[] }>(
-    `/plugin/${encodeURIComponent(plugin)}/call`,
-    { method: 'POST', body: JSON.stringify({ function: fn, args }) },
-  );
-  return unwrap(body.result ?? body.results);
+  // The shipped UI reaches one glue plugin only. The glue dispatches the
+  // declared backend call and returns the backend value as JSON.
+  const body = await api<{ result?: unknown }>('/plugin/app-glue/call', {
+    method: 'POST',
+    body: JSON.stringify({
+      function: 'call',
+      args: [plugin, fn, JSON.stringify(args)],
+    }),
+  });
+  return JSON.parse(String(unwrap(body.result)));
 }
 
 async function loadPlugins(): Promise<WasiPlugin[]> {
@@ -429,11 +434,11 @@ async function runWorkbench(): Promise<void> {
     key: string, label: string, plugin: string, language: string, fn: string, args: unknown[],
   ): Promise<RunResult> => {
     const started = performance.now();
-    addTrace(`→ POST /plugin/${plugin}/call { function: "${fn}" }`);
+    addTrace(`→ POST /plugin/app-glue/call { call: "${plugin}.${fn}" }`);
     try {
       const value = await call(plugin, fn, args);
       const ms = Math.round(performance.now() - started);
-      addTrace(`← 200 ${plugin}.${fn} (${ms} ms)`);
+      addTrace(`← 200 app-glue.call ${plugin}.${fn} (${ms} ms)`);
       return {
         key, label, plugin, language, function: fn, value, ms,
         why: taskWhy[key] ?? 'WIT function called through the host.',
@@ -509,7 +514,7 @@ function renderRunResults(results: RunResult[]): void {
         <span class="status ${result.error ? 'negative' : 'positive'}">${result.error ? 'error' : 'ok'}</span>
       </div>
       <p class="result-why">${escapeHtml(result.why)}</p>
-      <div class="result-meta"><code>POST /plugin/${escapeHtml(result.plugin)}/call</code><span>${result.ms} ms</span><span>${escapeHtml(result.runtime)}</span></div>
+      <div class="result-meta"><code>app-glue.call → ${escapeHtml(result.plugin)}.${escapeHtml(result.function)}</code><span>${result.ms} ms</span><span>${escapeHtml(result.runtime)}</span></div>
       ${value}
     </article>`;
   }).join('');
@@ -606,13 +611,15 @@ async function renderRuntime(): Promise<void> {
     const serviceOutput = view.querySelector('#service-output') as HTMLElement;
     const service = async (action: 'start' | 'status' | 'stop') => {
       try {
-        const method = action === 'status' ? 'GET' : 'POST';
-        const response = await fetch(`${HOST}/plugin/watchtower-rust/service/${action}`, {
-          method,
-          headers: { 'content-type': 'application/json' },
-          ...(action === 'start' ? { body: JSON.stringify({ region_json: '' }) } : {}),
+        const body = await api<{ result?: unknown }>('/plugin/app-glue/call', {
+          method: 'POST',
+          body: JSON.stringify({
+            function: 'service',
+            args: ['watchtower-rust', action],
+          }),
         });
-        serviceOutput.textContent = `service ${action}\n${method} /plugin/watchtower-rust/service/${action}\n\n${JSON.stringify(await response.json(), null, 2)}`;
+        const value = JSON.parse(String(unwrap(body.result)));
+        serviceOutput.textContent = `service ${action}\napp-glue.service('watchtower-rust', '${action}')\n\n${JSON.stringify(value, null, 2)}`;
       } catch (error) {
         serviceOutput.textContent = String(error);
       }

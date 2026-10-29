@@ -1,7 +1,24 @@
 # ABI and deprecation policy
 
-Status: **active from 1.0**. Applies to the host runtime, generated plugin
-manifests, and the CLI surface that inspects them.
+Status: **active from 1.0; 1.2.0 breaking boundary approved**. Applies to the
+host runtime, generated plugin manifests, and the CLI surface that inspects them.
+
+### Approved exception — 1.2.0 / Host ABI 2
+
+The product owner approved an intentional breaking release at **Owasidea
+1.2.0**. It will set `HOST_ABI = "2"` and `schema_version = 2` for the new
+runtime dependency-call interface, glue-only app API, multi-KV WIT contract,
+and network permission shape. This is an explicit exception to the normal
+semver-major rule below, not a general change to that rule.
+
+- 1.1 hosts remain on ABI 1 and continue serving 1.1 apps.
+- 1.2 hosts reject ABI 1 manifests with an actionable migration error; no
+  silent mixed-ABI loading.
+- `owasidea migrate` must convert supported config forms without rewriting
+  files unless explicitly requested; KV database paths/data remain unchanged.
+- Release notes must call out the 1.2.0 break and link the migration guide.
+- The exception is complete only after ABI/schema tests verify mismatch
+  rejection and generated 1.2 manifests.
 
 This document is the contract for changing the host/plugin boundary. It answers
 three questions:
@@ -23,21 +40,21 @@ Companion documents: [`ABI.md`](ABI.md) (field reference),
 | --- | --- | --- | --- |
 | `version` | `Cargo.toml` workspace, `[app].version`, plugin manifest | maintainers / app author | Product semver. Informational for ABI checks. |
 | `HOST_VERSION` | `owasidea_host::HOST_VERSION` (`CARGO_PKG_VERSION`) | host release | Running host semver. Compared against `min_host`. |
-| `host_abi` | `owasidea_host::HOST_ABI`, manifest field | host ABI owner | Host interface family. `"1"` is the 1.0 family. |
-| `schema_version` | manifest field | manifest schema owner | Shape of the manifest JSON. Current: `1`. |
+| `host_abi` | `owasidea_host::HOST_ABI`, manifest field | host ABI owner | Host interface family. `"2"` is the 1.2 family. |
+| `schema_version` | manifest field | manifest schema owner | Shape of the manifest JSON. Current: `2`. |
 | `min_host` | manifest field | plugin author (generated) | Oldest host semver that may load the plugin. |
 | `abi` | manifest field | manifest generator | Guest contract label: `wasi-0.2`, `wasi-0.3`, or `webview-v1`. Informational; it documents which WASI/world the component was built against. |
 | `metadata.build_id` | manifest + runtime descriptor | build | Build identity for skew detection, not compatibility. |
 
-Only `schema_version`, `host_abi`, and `min_host` are enforced. The host rejects
-a manifest when:
+ABI 2 enforces `schema_version`, `host_abi`, and `min_host`. The 1.2 host rejects
+ABI 1 and legacy manifests. It rejects a manifest when:
 
-- `schema_version` is unknown (greater than the host's current version);
-- `host_abi` is present and differs from `HOST_ABI`;
+- `schema_version` is not `2`;
+- `host_abi` is missing or differs from `HOST_ABI`;
 - `min_host` is greater than `HOST_VERSION`.
 
-Legacy manifests (no `schema_version`, i.e. implicit `0`) are still accepted by
-host ABI 1 with defaults applied. See §6.
+ABI 1 hosts retain their 1.1 compatibility behavior. ABI 2 never applies legacy
+defaults and never rewrites a manifest.
 
 ## 2. Semver rules
 
@@ -70,9 +87,8 @@ but they are not the same number.
   added, a field is removed or renamed, a field's type or units change.
 - Adding an optional field with a default is a host minor and does **not** bump
   `schema_version`.
-- `schema_version` is monotonic: the host accepts its own version and older
-  supported versions only. Unknown newer versions are rejected with an error
-  naming the plugin and the version.
+- `schema_version` is monotonic. ABI 2 accepts only version 2 because this
+  release intentionally rejects the prior manifest shape.
 
 **`min_host`**
 
@@ -129,16 +145,16 @@ breaking.
 
   | Deprecated | Since | Replacement | Earliest removal |
   | --- | --- | --- | --- |
-  | Manifest without `schema_version` (implicit `0`) | 1.0 | `schema_version: 1` via `owasidea build` | Host ABI 2 |
+| Manifest without `schema_version` (implicit `0`) | 1.0 | `schema_version: 2` via `owasidea build` | 1.2.0 / Host ABI 2 |
 
 ## 5. Error vs warning policy
 
 The framework never hides an incompatibility, and never fails on something it
 can still run correctly.
 
-**Warnings** (advisory, exit code `0`):
+**Warnings** (advisory, exit code `0`, only on ABI 1 hosts):
 
-- manifest is a deprecated shape but loads correctly (legacy
+- manifest is a deprecated shape but loads correctly under host ABI 1 (legacy
   `schema_version`, missing `host_abi`/`min_host`);
 - any future deprecation that does not change runtime behaviour.
 
@@ -148,23 +164,21 @@ Warning shape, stable for log matching:
 warning: <plugin>: <CODE>: <what is deprecated>; <replacement> (see docs/ABI_POLICY.md).
 ```
 
-Codes currently emitted by `owasidea validate`:
+Warning codes emitted by ABI 1 hosts (historical):
 
 | Code | Meaning |
 | --- | --- |
 | `ABI_LEGACY_MANIFEST` | manifest has no integer `schema_version`, or explicit `0` |
 | `ABI_MISSING_HOST_FIELDS` | legacy manifest without `host_abi` and/or `min_host` |
 
-`owasidea validate` prints `Validation OK with N deprecation warning(s)` and
-still exits `0`. Warnings are printed on stdout, prefixed with `warning:`, so
-they survive `2>/dev/null` pipelines that only collect errors. Do not parse the
-prose; match the code.
+ABI 2 does not emit compatibility warnings for ABI 1 manifests: validation
+fails with migration guidance, matching host load behavior.
 
 **Errors** (exit code non-zero):
 
-- unknown/newer `schema_version`;
-- `host_abi` mismatch or missing `host_abi` on `schema_version: 1`;
-- missing or invalid `min_host` on `schema_version: 1`;
+- any `schema_version` other than `2`;
+- `host_abi` mismatch or missing `host_abi` on `schema_version: 2`;
+- missing or invalid `min_host` on `schema_version: 2`;
 - `min_host` greater than the running host;
 - checksum, capability, or bundle drift detected by `validate`/`verify`.
 
@@ -174,20 +188,20 @@ not silently upgrade, rewrite, or downgrade a manifest. `owasidea verify`
 reports the same failures with stable codes (`HOST_ABI_MISMATCH`,
 `HOST_ABI_MISSING`, `MIN_HOST`, `MIN_HOST_MISSING`, `SCHEMA_VERSION`).
 
-## 6. Compatibility 0.x → 1.0
+## 6. Historical compatibility 0.x → 1.0 (ABI 1 only)
 
 What 1.0 guarantees for a 0.x app:
 
-- **Manifests are still loadable.** A 0.x manifest without `schema_version` is
-  treated as `schema_version: 0` and accepted by host ABI 1. Missing
+- **Manifests were loadable by ABI 1.** A 0.x manifest without `schema_version`
+  was treated as `schema_version: 0` and accepted by host ABI 1. Missing
   `host_abi`/`min_host` get defaults. Nothing is rewritten on disk.
 - **`owasidea validate` warns** with `ABI_LEGACY_MANIFEST` /
   `ABI_MISSING_HOST_FIELDS` and still exits `0`.
-- **`owasidea build` regenerates** manifests with `schema_version: 1`,
+- **`owasidea build` regenerates** manifests with `schema_version: 2`,
   `host_abi`, and `min_host`. This is the supported upgrade path; do not patch
   manifests by hand.
-- **Removal is scheduled, not immediate.** Legacy manifests stop being accepted
-  only when a future host ABI 2 ships, following §4 (two minors + six months).
+- **Removal happened at ABI 2.** ABI 2 rejects these manifests; migrate and
+  rebuild with Owasidea 1.2. ABI 1 remains available to existing 1.1 apps.
 - **Config is stricter, not different.** `wasm-app.toml` keeps its v1 schema;
   unknown keys are rejected, so a typo that 0.x ignored now fails. See
   `docs/MIGRATION_0_X_TO_1_0.md`.
@@ -208,8 +222,9 @@ Explicit non-guarantees:
 2. The implementation adds: the new field/interface, the deprecation warning for
    the old one (if any), a test for both paths, and doc updates (`ABI.md`,
    this file, `CLI.md`, `API.md` as applicable).
-3. `owasidea validate` must warn (not fail) during the whole deprecation window.
+3. `owasidea validate` must warn (not fail) during a deprecation window, unless
+   the approved breaking-boundary policy explicitly rejects the old ABI.
 4. The changelog records the deprecation with the table in §4.
 5. Removal lands in a host major, with a migration section in the release notes.
 
-Anything that cannot follow this process is not ready to ship in 1.0.
+Anything that cannot follow this process is not ready to ship.

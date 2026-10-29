@@ -197,7 +197,7 @@ type = "executable"
         std::fs::write(&config, BASE).unwrap();
         std::fs::write(
             dir.join("wasm-app.staging.toml"),
-            "[host]\naddr = \"127.0.0.1:9100\"\n\n[plugins.webhook]\nhttp_outbound = [\"https://staging.example\"]\n",
+            "[host]\naddr = \"127.0.0.1:9100\"\n\n[plugins.webhook]\nhttp_outbound = [\"staging.example:443\"]\n",
         )
         .unwrap();
 
@@ -210,7 +210,7 @@ type = "executable"
         assert_eq!(plugins["webhook"].language, "go");
         assert_eq!(
             plugins["webhook"].http_outbound,
-            vec!["https://staging.example".to_string()]
+            vec!["staging.example:443".to_string()]
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

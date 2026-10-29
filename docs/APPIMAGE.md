@@ -120,19 +120,17 @@ jobs:
       - run: cargo install cargo-component wasm-tools tauri-cli --locked
       - run: cargo install --path crates/cli --force
       - run: owasidea doctor --install-wasi-sdk
-      - run: cd examples/shipyard && owasidea keygen --out keys
       - run: cd examples/shipyard && owasidea build
       - run: cd examples/shipyard && owasidea bundle --no-build --bundles appimage
-      - run: cd examples/shipyard && owasidea verify dist/ --public-key keys/owasidea.pub
+      - run: cd examples/shipyard && owasidea verify dist/
       - uses: actions/upload-artifact@v4
         with:
           name: shipyard-appimage
           path: examples/shipyard/dist/*.AppImage
 ```
 
-`bundle` stages the manifests, components, trust key and UI assets into
-`dist/`, so the verification step checks the payload that ships with the
-AppImage. The repository CI uses `--isolate-host-libs` on the runner, installs
+`bundle` stages the manifests, components and UI assets into `dist/`, so the
+verification step checks the payload that ships with the AppImage. The repository CI uses `--isolate-host-libs` on the runner, installs
 `bubblewrap`, and skips the AppImage job with a message when `bwrap` cannot
 create a user namespace (see `.github/workflows/ci.yml`).
 

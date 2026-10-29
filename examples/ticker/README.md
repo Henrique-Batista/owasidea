@@ -35,3 +35,6 @@ owasidea dev                   # `s` starts/stops the service from the dashboard
 - Repeating start keeps the service running.
 - Reload while running is refused with HTTP 409 (`docs/CLI.md`, `dev`).
 - Reload after stop succeeds.
+
+Playwright UI tests need `npm install` once at the repository root; use
+`owasidea test --no-ui` to skip them.

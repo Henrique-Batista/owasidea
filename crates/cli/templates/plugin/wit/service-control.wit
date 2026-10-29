@@ -1,0 +1,18 @@
+package poc:host@0.1.0;
+
+// Copy into the glue plugin's `poc:host` WIT dependency directory (alongside
+// host.wit if present) and add the dependency path in Cargo.toml /
+// componentize-go. The host checks that each target is a declared
+// service/hybrid dependency.
+interface service-control {
+    record service-state {
+        running: bool,
+        address: option<string>,
+        last-error: option<string>,
+        restarts: u32,
+    }
+
+    start: func(plugin: string) -> result<string, string>;
+    status: func(plugin: string) -> service-state;
+    stop: func(plugin: string) -> result<_, string>;
+}

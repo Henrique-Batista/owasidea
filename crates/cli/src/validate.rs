@@ -5,9 +5,8 @@
 //! - text (default): the historical line-per-check output;
 //! - `--json`: a stable object `{ok, plugins, errors, warnings}` for CI/agents.
 //!
-//! Every check is recorded once and rendered by one of the two views, so the
-//! JSON can never drift from what a human sees. Warnings (RL-07 deprecations)
-//! never fail validation; errors always exit non-zero.
+//! Every check is recorded once and rendered by one of the two views. ABI 1
+//! manifests fail validation and require an explicit migration.
 
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -20,7 +19,6 @@ use crate::config::{self, AppConfig, PluginSection};
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Level {
     Error,
-    Warning,
     /// Human-only context ("checksum ok", "UI manifest ok"). Never serialized.
     Note,
 }
@@ -28,8 +26,6 @@ enum Level {
 struct Entry {
     level: Level,
     message: String,
-    /// Text mode renders `warning: <name>: <message>` / `<name>: <message>`.
-    /// A missing manifest keeps the historical `<message>`-only line.
     prefix_name: bool,
 }
 
@@ -37,14 +33,6 @@ impl Entry {
     fn error(message: impl Into<String>) -> Self {
         Self {
             level: Level::Error,
-            message: message.into(),
-            prefix_name: true,
-        }
-    }
-
-    fn warning(message: impl Into<String>) -> Self {
-        Self {
-            level: Level::Warning,
             message: message.into(),
             prefix_name: true,
         }
@@ -76,10 +64,6 @@ impl PluginReport {
         self.entries.push(Entry::error(message));
     }
 
-    fn warning(&mut self, message: impl Into<String>) {
-        self.entries.push(Entry::warning(message));
-    }
-
     fn note(&mut self, message: impl Into<String>) {
         self.entries.push(Entry::note(message));
     }
@@ -91,13 +75,6 @@ impl PluginReport {
             .map(|e| e.message.as_str())
     }
 
-    fn warnings(&self) -> impl Iterator<Item = &str> {
-        self.entries
-            .iter()
-            .filter(|e| e.level == Level::Warning)
-            .map(|e| e.message.as_str())
-    }
-
     fn is_ok(&self) -> bool {
         !self.entries.iter().any(|e| e.level == Level::Error)
     }
@@ -106,16 +83,9 @@ impl PluginReport {
         self.errors().count()
     }
 
-    fn warning_count(&self) -> usize {
-        self.warnings().count()
-    }
-
     fn render_text(&self) {
         for entry in &self.entries {
-            let prefix = match entry.level {
-                Level::Warning => "warning: ",
-                Level::Error | Level::Note => "",
-            };
+            let prefix = "";
             if entry.prefix_name {
                 println!("{prefix}{}: {}", self.name, entry.message);
             } else {
@@ -129,7 +99,7 @@ impl PluginReport {
             "name": self.name,
             "ok": self.is_ok(),
             "errors": self.errors().collect::<Vec<_>>(),
-            "warnings": self.warnings().collect::<Vec<_>>(),
+            "warnings": [],
         })
     }
 }
@@ -165,13 +135,6 @@ impl Report {
                 .sum::<usize>()
     }
 
-    fn warning_count(&self) -> usize {
-        self.plugins
-            .iter()
-            .map(PluginReport::warning_count)
-            .sum::<usize>()
-    }
-
     fn is_ok(&self) -> bool {
         self.error_count() == 0
     }
@@ -184,20 +147,12 @@ impl Report {
         out
     }
 
-    fn warnings(&self) -> Vec<String> {
-        let mut out = Vec::new();
-        for plugin in &self.plugins {
-            out.extend(plugin.warnings().map(|w| format!("{}: {w}", plugin.name)));
-        }
-        out
-    }
-
     fn to_json(&self) -> Value {
         json!({
             "ok": self.is_ok(),
             "plugins": self.plugins.iter().map(PluginReport::to_json).collect::<Vec<_>>(),
             "errors": self.errors(),
-            "warnings": self.warnings(),
+            "warnings": [],
         })
     }
 
@@ -228,11 +183,19 @@ pub fn cmd_validate(config_path: &Path, manifest_dir: &Path, json_out: bool) -> 
 
     let manifest_dir = resolve(&root, manifest_dir);
     let plugins = cfg.plugins.clone().unwrap_or_default();
+    let app_glue = cfg.app.as_ref().and_then(|app| app.ui_plugin.as_deref());
     let mut report = Report::empty();
 
     for (name, plugin) in &plugins {
         let mut plugin_report = PluginReport::new(name);
-        check_plugin(&root, &manifest_dir, name, plugin, &mut plugin_report);
+        check_plugin(
+            &root,
+            &manifest_dir,
+            name,
+            plugin,
+            app_glue,
+            &mut plugin_report,
+        );
         report.plugins.push(plugin_report);
     }
 
@@ -240,10 +203,7 @@ pub fn cmd_validate(config_path: &Path, manifest_dir: &Path, json_out: bool) -> 
 }
 
 fn load_config(config_path: &Path) -> Result<AppConfig> {
-    let raw = std::fs::read_to_string(config_path)?;
-    let cfg: AppConfig = toml::from_str(&raw)?;
-    cfg.validate()?;
-    Ok(cfg)
+    config::read_app_config(config_path)
 }
 
 fn resolve(root: &Path, path: &Path) -> PathBuf {
@@ -268,15 +228,7 @@ fn finish(report: Report, json_out: bool) -> Result<()> {
     if errors > 0 {
         anyhow::bail!("validation failed with {errors} error(s)");
     }
-    let warnings = report.warning_count();
-    if warnings > 0 {
-        println!(
-            "Validation OK with {warnings} deprecation warning(s); see {}.",
-            abi::POLICY_DOC
-        );
-    } else {
-        println!("Validation OK.");
-    }
+    println!("Validation OK.");
     Ok(())
 }
 
@@ -285,6 +237,7 @@ fn check_plugin(
     manifest_dir: &Path,
     name: &str,
     plugin: &PluginSection,
+    app_glue: Option<&str>,
     report: &mut PluginReport,
 ) {
     let manifest_path = manifest_dir.join(format!("{name}.manifest.json"));
@@ -311,6 +264,7 @@ fn check_plugin(
     }
     check_checksum(root, plugin, name, &manifest, report);
     check_permissions(plugin, &manifest, report);
+    check_dependency_drift(plugin, &manifest, app_glue, report);
 }
 
 fn read_manifest(path: &Path) -> Result<Value> {
@@ -318,59 +272,33 @@ fn read_manifest(path: &Path) -> Result<Value> {
     Ok(serde_json::from_str(&raw)?)
 }
 
-/// CT-08 ABI fields plus RL-07 deprecation warnings.
-///
-/// Warnings are recorded before errors so the text view keeps the historical
-/// "warnings first" ordering.
+/// ABI 1 and legacy manifests require explicit migration and rebuild.
 fn check_abi(manifest: &Value, report: &mut PluginReport) {
-    // RL-07: deprecation warnings never fail validation. Legacy manifests
-    // keep working under host ABI 1; the warning names the policy doc.
-    for warning in abi::manifest_warnings(manifest) {
-        report.warning(warning);
-    }
-
     let schema_version = manifest["schema_version"].as_u64().unwrap_or(0);
-    if schema_version > abi::CURRENT_SCHEMA_VERSION {
-        report.error(format!("bad schema_version {schema_version}"));
-    }
-    if schema_version == abi::CURRENT_SCHEMA_VERSION {
-        match manifest["host_abi"].as_str() {
-            Some(host_abi) if host_abi == owasidea_host::HOST_ABI => {}
-            Some(host_abi) => report.error(format!(
-                "host_abi {host_abi} != {}",
-                owasidea_host::HOST_ABI
-            )),
-            None => report.error("host_abi required for schema_version 1"),
-        }
-        match manifest["min_host"].as_str() {
-            Some(min_host) => {
-                if min_host_is_too_new(min_host) {
-                    report.error(format!(
-                        "min_host {min_host} > host {}",
-                        owasidea_host::HOST_VERSION
-                    ));
-                }
-            }
-            None => report.error("min_host required for schema_version 1"),
-        }
+    if schema_version != abi::CURRENT_SCHEMA_VERSION {
+        report.error(format!(
+            "schema_version {schema_version} is not supported; expected 2. Run `owasidea migrate` and rebuild with Owasidea 1.2."
+        ));
         return;
     }
-
-    if let Some(host_abi) = manifest["host_abi"].as_str() {
-        if host_abi != owasidea_host::HOST_ABI {
-            report.error(format!(
-                "host_abi {host_abi} != {}",
-                owasidea_host::HOST_ABI
-            ));
-        }
+    match manifest["host_abi"].as_str() {
+        Some(host_abi) if host_abi == owasidea_host::HOST_ABI => {}
+        Some(host_abi) => report.error(format!(
+            "host_abi {host_abi} != {}",
+            owasidea_host::HOST_ABI
+        )),
+        None => report.error("host_abi required for schema_version 2"),
     }
-    if let Some(min_host) = manifest["min_host"].as_str() {
-        if min_host_is_too_new(min_host) {
-            report.error(format!(
-                "min_host {min_host} > host {}",
-                owasidea_host::HOST_VERSION
-            ));
+    match manifest["min_host"].as_str() {
+        Some(min_host) => {
+            if min_host_is_too_new(min_host) {
+                report.error(format!(
+                    "min_host {min_host} > host {}",
+                    owasidea_host::HOST_VERSION
+                ));
+            }
         }
+        None => report.error("min_host required for schema_version 2"),
     }
 }
 
@@ -422,24 +350,103 @@ fn check_permissions(plugin: &PluginSection, manifest: &Value, report: &mut Plug
         .as_array()
         .map(|entries| entries.len())
         .unwrap_or(0);
-    if manifest_fs != plugin.fs.len() {
+    let preset_fs = usize::from(plugin.capabilities.iter().any(|c| c == "app-data"));
+    if manifest_fs != plugin.fs.len() + preset_fs {
         report.error(format!(
             "fs permission mismatch (manifest {manifest_fs}, config {})",
-            plugin.fs.len()
+            plugin.fs.len() + preset_fs
         ));
     }
 
-    let manifest_kv_missing = manifest["permissions"]["kv"].is_null();
-    if plugin.kv.is_some() == manifest_kv_missing {
+    let manifest_kv: std::collections::BTreeSet<String> = manifest["permissions"]["kv"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|grant| {
+            format!(
+                "{}:{}",
+                grant["namespace"].as_str().unwrap_or(""),
+                grant["access"].as_str().unwrap_or("")
+            )
+        })
+        .collect();
+    let configured_kv: std::collections::BTreeSet<String> = plugin
+        .kv
+        .iter()
+        .map(|grant| {
+            let (namespace, access) = grant
+                .rsplit_once(':')
+                .unwrap_or((grant.as_str(), "read-write"));
+            format!("{namespace}:{access}")
+        })
+        .collect();
+    if manifest_kv != configured_kv {
         report.error("kv permission mismatch");
     }
+}
 
-    let manifest_outbound = manifest["permissions"]["http"]["outbound"]
+fn check_dependency_drift(
+    plugin: &PluginSection,
+    manifest: &Value,
+    app_glue: Option<&str>,
+    report: &mut PluginReport,
+) {
+    let manifest_glue = manifest["metadata"]["app_ui_plugin"].as_str();
+    if manifest_glue != app_glue {
+        report.error(format!(
+            "app.ui_plugin drift (manifest {:?}, config {:?})",
+            manifest_glue, app_glue
+        ));
+    }
+
+    let mut manifest_dependencies: Vec<&str> = manifest["imports"]["plugins"]
         .as_array()
-        .map(|entries| entries.len())
-        .unwrap_or(0);
-    if manifest_outbound != plugin.http_outbound.len() {
-        report.error("http outbound mismatch");
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let mut configured_dependencies: Vec<&str> =
+        plugin.dependencies.iter().map(String::as_str).collect();
+    manifest_dependencies.sort_unstable();
+    configured_dependencies.sort_unstable();
+    if manifest_dependencies != configured_dependencies {
+        report.error(format!(
+            "dependency drift (manifest {:?}, config {:?})",
+            manifest_dependencies, configured_dependencies
+        ));
+    }
+
+    let preset_outbound = plugin
+        .capabilities
+        .iter()
+        .any(|capability| capability == "network-outbound");
+    let manifest_any = manifest["permissions"]["network"]["outbound_any"]
+        .as_bool()
+        .unwrap_or(false);
+    if manifest_any != preset_outbound {
+        report.error("network-outbound preset drift");
+    }
+
+    let list_matches = |path: &str, configured: &[String]| {
+        let manifest_entries: std::collections::BTreeSet<String> = manifest
+            .pointer(path)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect();
+        let configured: std::collections::BTreeSet<String> = configured.iter().cloned().collect();
+        manifest_entries == configured
+    };
+    if !list_matches("/permissions/http/outbound", &plugin.http_outbound) {
+        report.error("http outbound drift");
+    }
+    if !list_matches("/permissions/network/outbound", &plugin.network_outbound) {
+        report.error("network outbound drift");
+    }
+    if !list_matches("/permissions/network/inbound", &plugin.network_inbound) {
+        report.error("network inbound drift");
     }
 }
 
@@ -475,33 +482,58 @@ mod tests {
     }
 
     #[test]
-    fn errors_and_warnings_are_aggregated_with_plugin_names() {
+    fn errors_are_aggregated_with_plugin_names() {
         let mut report = Report::empty();
         {
             let plugin = add_plugin(&mut report, "notes");
-            plugin.warning("ABI_LEGACY_MANIFEST: old");
             plugin.error("CHECKSUM MISMATCH");
         }
         assert!(!report.is_ok());
         assert_eq!(report.error_count(), 1);
-        assert_eq!(report.warning_count(), 1);
         let value = report.to_json();
         assert_eq!(value["ok"], false);
         assert_eq!(value["plugins"][0]["name"], "notes");
         assert_eq!(value["plugins"][0]["ok"], false);
         assert_eq!(value["errors"], json!(["notes: CHECKSUM MISMATCH"]));
-        assert_eq!(
-            value["warnings"],
-            json!(["notes: ABI_LEGACY_MANIFEST: old"])
-        );
+        assert_eq!(value["warnings"], json!([]));
     }
 
     #[test]
-    fn warnings_alone_keep_the_run_ok() {
-        let mut report = Report::empty();
-        add_plugin(&mut report, "notes").warning("ABI_LEGACY_MANIFEST: old");
-        assert!(report.is_ok());
-        assert_eq!(report.to_json()["ok"], true);
+    fn abi1_manifest_fails_with_migration_hint() {
+        let mut report = PluginReport::new("legacy");
+        check_abi(&json!({"schema_version": 1}), &mut report);
+        assert!(!report.is_ok());
+        assert!(report.errors().next().unwrap().contains("expected 2"));
+        assert!(report.errors().next().unwrap().contains("owasidea migrate"));
+    }
+
+    #[test]
+    fn dependency_and_glue_drift_is_reported() {
+        let plugin = PluginSection {
+            dependencies: vec!["provider".to_string()],
+            http_outbound: vec!["api.example.com:443".to_string()],
+            ..PluginSection::default()
+        };
+        let manifest = json!({
+            "metadata": {"app_ui_plugin": "glue"},
+            "imports": {"plugins": []},
+            "permissions": {
+                "http": {"outbound": ["evil.example.com:443"], "outbound_any": false},
+                "network": {"outbound": [], "outbound_any": false, "inbound": []}
+            }
+        });
+        let mut report = PluginReport::new("glue");
+        check_dependency_drift(&plugin, &manifest, Some("other"), &mut report);
+        let errors: Vec<_> = report.errors().collect();
+        assert!(errors
+            .iter()
+            .any(|error| error.contains("app.ui_plugin drift")));
+        assert!(errors
+            .iter()
+            .any(|error| error.contains("dependency drift")));
+        assert!(errors
+            .iter()
+            .any(|error| error.contains("http outbound drift")));
     }
 
     #[test]

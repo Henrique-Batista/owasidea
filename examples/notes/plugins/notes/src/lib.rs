@@ -5,7 +5,9 @@ use poc::host::host_kv;
 const KEY: &str = "notes";
 
 fn load() -> Vec<String> {
-    host_kv::get(KEY)
+    host_kv::open_kv("notes")
+        .ok()
+        .and_then(|kv| kv.get(KEY))
         .map(|raw| {
             raw.lines()
                 .filter(|line| !line.is_empty())
@@ -16,7 +18,9 @@ fn load() -> Vec<String> {
 }
 
 fn save(notes: &[String]) {
-    host_kv::set(KEY, &notes.join("\n"));
+    if let Ok(kv) = host_kv::open_kv("notes") {
+        let _ = kv.set(KEY, &notes.join("\n"));
+    }
 }
 
 struct Component;

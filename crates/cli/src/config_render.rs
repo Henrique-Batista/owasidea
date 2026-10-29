@@ -103,15 +103,19 @@ pub(crate) fn ui_dir(root: &Path, cfg: &AppConfig) -> anyhow::Result<PathBuf> {
     safe_resolve(root, &ui)
 }
 
-fn desktop_dir(root: &Path, cfg: &AppConfig) -> anyhow::Result<PathBuf> {
+pub(crate) fn desktop_dir(root: &Path, cfg: &AppConfig) -> anyhow::Result<PathBuf> {
     let path = cfg.desktop.as_ref().and_then(|d| d.path.clone());
     match path {
         Some(p) => safe_resolve(root, &p),
         None => {
-            if root.join("desktop/Cargo.toml").is_file() {
-                Ok(root.join("desktop"))
+            let default = root.join("desktop");
+            if default.join("Cargo.toml").is_file() {
+                Ok(default)
             } else {
-                Ok(root.join("crates/desktop"))
+                anyhow::bail!(
+                    "no desktop shell found under {}; set [desktop].path or use `owasidea bundle --target cli`",
+                    default.display()
+                )
             }
         }
     }
@@ -305,6 +309,7 @@ pub(crate) fn runtime_content(cfg: &AppConfig, build_id: Option<String>) -> serd
         "host": host_url(cfg),
         "app": app_name(cfg),
         "version": app_version(cfg),
+        "ui_plugin": cfg.app.as_ref().and_then(|app| app.ui_plugin.as_deref()),
         "build_id": build_id,
         "manifests_dir": "manifests",
     })
@@ -395,15 +400,6 @@ fn generated_bundle_resources(
                 add(component, format!("plugins/{name}/{name}.component.wasm"));
             }
         }
-    }
-
-    if let Some(key) = crate::dist_stage::resolve_public_key(
-        &root,
-        cfg.signing
-            .as_ref()
-            .and_then(|signing| signing.public_key.as_deref()),
-    ) {
-        add(key, "trust/owasidea.pub".to_string());
     }
 
     let runtime = ui_dir(&root, cfg)?.join(".owasidea").join("runtime.json");
@@ -942,6 +938,7 @@ mod tests {
                 name: Some(name.to_string()),
                 version: Some("2.0.0".to_string()),
                 identifier: Some(identifier.to_string()),
+                ui_plugin: None,
             }),
             host: Some(HostSection {
                 addr: Some(host.to_string()),
@@ -1068,10 +1065,6 @@ mod tests {
                 ui: Some("ui".to_string()),
                 output: Some("dist".to_string()),
             }),
-            signing: Some(crate::config::SigningSection {
-                public_key: Some("keys/owasidea.pub".to_string()),
-                ..Default::default()
-            }),
             plugins: Some(plugins),
             ..Default::default()
         };
@@ -1087,7 +1080,6 @@ mod tests {
         assert!(resources
             .get("../plugins/panel/panel.component.wasm")
             .is_none());
-        assert_eq!(resources["../keys/owasidea.pub"], "trust/owasidea.pub");
         assert_eq!(
             resources["../ui/.owasidea/runtime.json"],
             "owasidea.runtime.json"

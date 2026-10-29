@@ -1,7 +1,12 @@
 package shipyard:pipeline@0.1.0;
 
+interface api {
+    run: func(version: string, changes: list<string>, checks-passed: u32, checks-total: u32) -> string;
+}
+
 world pipeline {
     import shipyard:core/readiness@0.1.0;
 
     export run: func(version: string, changes: list<string>, checks-passed: u32, checks-total: u32) -> string;
+    export api;
 }

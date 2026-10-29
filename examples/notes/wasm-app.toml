@@ -2,6 +2,7 @@
 name = "notes"
 version = "0.1.0"
 identifier = "dev.owasidea.examples.notes"
+ui_plugin = "notes"
 
 [host]
 addr = "127.0.0.1:8802"
@@ -12,7 +13,7 @@ language = "rust"
 type = "library"
 # Host key/value store. Without this permission the component cannot import
 # `poc:host/host-kv`, and `owasidea build` rejects it.
-kv = "notes:read-write"
+kv = ["notes:read-write"]
 
 [dev]
 watch = true

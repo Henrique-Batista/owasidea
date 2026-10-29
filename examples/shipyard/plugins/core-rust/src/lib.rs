@@ -69,14 +69,17 @@ impl exports::shipyard::core::readiness::Guest for Core {
             safe_key(&key).ok_or_else(|| "report key is empty after sanitizing".to_string())?;
         let path = format!("reports/{key}.md");
         fs::write(&path, &content).map_err(|error| format!("write {path}: {error}"))?;
-        host_kv::set(&format!("report:{key}"), &content);
+        let kv = host_kv::open_kv("shipyard-core")?;
+        kv.set(&format!("report:{key}"), &content)?;
         host_log::log(&format!("saved report {path} ({} bytes)", content.len()));
         Ok(path)
     }
 
     fn load_report(key: String) -> Option<String> {
         let key = safe_key(&key)?;
-        let value = host_kv::get(&format!("report:{key}"));
+        let value = host_kv::open_kv("shipyard-core")
+            .ok()
+            .and_then(|kv| kv.get(&format!("report:{key}")));
         host_log::log(&format!("loaded report {key}: {}", value.is_some()));
         value
     }

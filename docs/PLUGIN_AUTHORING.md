@@ -1,5 +1,9 @@
 # Plugin Authoring Guide
 
+For the runtime side (which HTTP routes call a plugin, plugin-to-plugin calls,
+KV, network permissions and when the sandbox applies), read
+[`RUNTIME_MODEL.md`](RUNTIME_MODEL.md) first.
+
 ## Rust (cargo-component)
 
 Rust plugins generate their contract from source markers, so a plugin does not
@@ -155,9 +159,8 @@ again.
 - WASI sockets are denied unless `permissions.network.outbound` lists exact host
   names/IPs or `permissions.network.inbound` lists exact local bind IPs.
 - Never use wildcard HTTP/network permissions in a production manifest.
-- Sign release manifests after finalizing WIT, permissions, component, and UI
-  asset hashes. Production hosts must set `OWASIDEA_REQUIRE_SIGNATURES=true`
-  and `OWASIDEA_PUBLIC_KEY`.
+- Manifests are unsigned and checked by SHA-256. Protect the release directory
+  and sign the installer with OS code signing; see `docs/CODE_SIGNING.md`.
 
 ## Stateful services
 
@@ -226,19 +229,32 @@ path = "plugins/pipeline-go"
 language = "go"
 type = "library"
 compose_with = ["core-rust"]
-kv = "shipyard-pipeline:read-write"
+kv = ["shipyard-pipeline:read-write"]
 fs = ["reports:read-write"]
 persistent = true
 ```
+
+Runtime dependencies (ABI 2) are separate from build-time composition:
+
+```toml
+[plugins.app-glue]
+dependencies = ["catalog-go"]
+```
+
+The consumer imports the provider WIT package and compiles against generated
+bindings; the host dispatches the call. Consumer-side imports are validated for
+Rust and Go in 1.2; other languages can provide callable interfaces. The same
+edge cannot also use `compose_with`. Declarations may cycle; a runtime A→B→A call fails with
+`OWASIDEA_E_DEPENDENCY_REENTRANT_CALL`.
 
 `owasidea build` builds non-composed plugins first, then stages each dependency
 under a single-dot filename and runs `wasm-tools compose`. This is required
 because `wasm-tools` derives a package name from the definition path and rejects
 names such as `core-rust.component.wasm`.
 
-The composed manifest must have `imports.plugins: []`. If it still lists plugin
-imports, the host refuses to instantiate it with:
-`declares unresolved plugin imports; compose dependencies at build time`.
+The composed manifest has `imports.plugins: []` because the provider import is
+linked away. `dependencies` and `compose_with` are mutually exclusive for the
+same edge; config validation rejects declaring both.
 
 ## HTTP call names
 
@@ -258,15 +274,16 @@ curl -X POST localhost:8790/plugin/core-rust/call \
 
 | WIT import | Config |
 |---|---|
-| `poc:host/host-kv@0.1.0` | `kv = "<namespace>:read-write"` |
+| `poc:host/host-kv@0.1.0` | `kv = ["<namespace>:read-write"]` |
 | `poc:host/host-log@0.1.0` | no permission needed |
+| `poc:host/service-control@0.1.0` | target must be a declared `service`/`hybrid` dependency; copy `crates/cli/templates/plugin/wit/service-control.wit` into the `poc:host` deps directory (same directory as `host.wit` if present) |
 | `wasi:filesystem/types` + `preopens` | `fs = ["reports:read-write"]` |
-| `wasi:http/outgoing-handler` | `http_outbound = ["api.example.com"]` |
-| `wasi:sockets/tcp` or `udp` | `network_outbound` / `network_inbound` |
+| `wasi:http/outgoing-handler` | `http_outbound = ["api.example.com:443"]` |
+| `wasi:sockets/tcp` or `udp` | `network_outbound = ["api.example.com:443"]`, `network_inbound = ["127.0.0.1:8080"]` |
 
 If you add host KV to WIT but forget `kv` in config, `owasidea build` fails
-intentionally. If you add a permission without the corresponding WIT import,
-the manifest will advertise a capability the component never uses; remove it.
+intentionally. Other unused grants (fs/HTTP/network) are rejected when the host
+loads or reloads the manifest, not during the build; remove the unused grant.
 
 ## UI scaffolds (AX-02)
 

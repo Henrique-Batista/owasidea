@@ -1,65 +1,6 @@
-use anyhow::Context;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-/// Where a verification trust root came from.
-#[derive(Debug, PartialEq, Eq)]
-enum TrustKeyOutcome {
-    Key(Vec<u8>),
-    Missing,
-    /// A key staged inside the artifact tree was found but is not a pinned root.
-    Unpinned(PathBuf),
-}
-
-/// Resolve the Ed25519 public key used as the trust root.
-///
-/// A key copied into `dist/` by `bundle` cannot authenticate that same bundle:
-/// whoever can rewrite the artifacts can also rewrite the staged key. The
-/// trust root must be supplied out of band (`--public-key` or
-/// `OWASIDEA_PUBLIC_KEY`); `--allow-dist-trust` is an explicit opt-in for local
-/// smoke checks only.
-fn resolve_trust_key(
-    dist: &Path,
-    explicit: Option<&Path>,
-    allow_dist_trust: bool,
-) -> anyhow::Result<TrustKeyOutcome> {
-    use base64::Engine;
-    let decode = |path: &Path| -> anyhow::Result<Vec<u8>> {
-        let raw = std::fs::read_to_string(path)
-            .with_context(|| format!("read public key {}", path.display()))?;
-        base64::engine::general_purpose::STANDARD
-            .decode(raw.trim())
-            .with_context(|| format!("decode public key {}", path.display()))
-    };
-
-    if let Some(path) = explicit {
-        return Ok(TrustKeyOutcome::Key(decode(path)?));
-    }
-    if let Ok(value) = std::env::var("OWASIDEA_PUBLIC_KEY") {
-        let path = PathBuf::from(value.trim());
-        if !path.as_os_str().is_empty() {
-            return Ok(TrustKeyOutcome::Key(decode(&path)?));
-        }
-    }
-
-    let staged = [
-        dist.join("trust/owasidea.pub"),
-        dist.join("keys/owasidea.pub"),
-    ]
-    .into_iter()
-    .find(|path| path.is_file());
-    match staged {
-        Some(path) if allow_dist_trust => Ok(TrustKeyOutcome::Key(decode(&path)?)),
-        Some(path) => Ok(TrustKeyOutcome::Unpinned(path)),
-        None => Ok(TrustKeyOutcome::Missing),
-    }
-}
-
-pub fn cmd_verify(
-    dist: &Path,
-    public_key: Option<&Path>,
-    allow_dist_trust: bool,
-    json: bool,
-) -> anyhow::Result<()> {
+pub fn cmd_verify(dist: &Path, json: bool) -> anyhow::Result<()> {
     use serde::Serialize;
     use sha2::{Digest, Sha256};
 
@@ -128,41 +69,6 @@ pub fn cmd_verify(
         );
     }
 
-    // Trust root: pinned out of band, never defaulted to the key staged in
-    // the artifact tree being verified.
-    let public_key_bytes: Option<Vec<u8>> = match resolve_trust_key(
-        dist,
-        public_key,
-        allow_dist_trust,
-    ) {
-        Ok(TrustKeyOutcome::Key(bytes)) => Some(bytes),
-        Ok(TrustKeyOutcome::Missing) => {
-            push_err(
-                dist.display().to_string(),
-                "TRUST_ROOT_MISSING",
-                "no pinned public key; pass --public-key <file> or set OWASIDEA_PUBLIC_KEY"
-                    .to_string(),
-            );
-            None
-        }
-        Ok(TrustKeyOutcome::Unpinned(path)) => {
-            let message = format!(
-                "{} is staged inside dist and cannot be its own trust root; pass --public-key <file> or set OWASIDEA_PUBLIC_KEY (or --allow-dist-trust for local checks)",
-                path.display()
-            );
-            push_err(dist.display().to_string(), "TRUST_ROOT_UNPINNED", message);
-            None
-        }
-        Err(error) => {
-            push_err(
-                dist.display().to_string(),
-                "PUBLIC_KEY_INVALID",
-                error.to_string(),
-            );
-            None
-        }
-    };
-
     let ui_bases = [
         dist.join("ui/public"),
         dist.join("ui/dist"),
@@ -204,7 +110,7 @@ pub fn cmd_verify(
 
         // CT-08 ABI
         let sv = manifest["schema_version"].as_u64().unwrap_or(0);
-        if sv == 1 {
+        if sv == 2 {
             match manifest["host_abi"].as_str() {
                 Some(ha) if ha == owasidea_host::HOST_ABI => {}
                 Some(ha) => push_err(
@@ -215,7 +121,7 @@ pub fn cmd_verify(
                 None => push_err(
                     rel_file.clone(),
                     "HOST_ABI_MISSING",
-                    "host_abi required for schema_version 1".to_string(),
+                    "host_abi required for schema_version 2".to_string(),
                 ),
             }
             match manifest["min_host"].as_str() {
@@ -237,14 +143,17 @@ pub fn cmd_verify(
                 None => push_err(
                     rel_file.clone(),
                     "MIN_HOST_MISSING",
-                    "min_host required for schema_version 1".to_string(),
+                    "min_host required for schema_version 2".to_string(),
                 ),
             }
-        } else if sv > 1 {
+        } else {
             push_err(
                 rel_file.clone(),
                 "SCHEMA_VERSION",
-                format!("unsupported schema_version {}", sv),
+                format!(
+                    "unsupported schema_version {}; expected 2; run `owasidea migrate` and rebuild",
+                    sv
+                ),
             );
         }
 
@@ -339,12 +248,6 @@ pub fn cmd_verify(
                     "missing metadata.ui.sha256".to_string(),
                 );
             }
-            // signature
-            if let Some(public_key) = public_key_bytes.as_deref() {
-                if let Err(e) = verify_dist_signature(&manifest, &[], Some(public_key)) {
-                    push_err(rel_file.clone(), "SIGNATURE", e.to_string());
-                }
-            }
         } else {
             // component
             let comp_rel = manifest["component"].as_str().unwrap_or("").to_string();
@@ -378,11 +281,6 @@ pub fn cmd_verify(
                             "CHECKSUM_MISMATCH",
                             format!("expected {} got {}", expected, actual),
                         );
-                    }
-                    if let Some(public_key) = public_key_bytes.as_deref() {
-                        if let Err(e) = verify_dist_signature(&manifest, &bytes, Some(public_key)) {
-                            push_err(rel_file.clone(), "SIGNATURE", e.to_string());
-                        }
                     }
                 }
             }
@@ -502,56 +400,6 @@ pub fn cmd_verify(
     }
 }
 
-pub fn verify_dist_signature(
-    manifest: &serde_json::Value,
-    artifact: &[u8],
-    public_key: Option<&[u8]>,
-) -> anyhow::Result<()> {
-    let name = manifest
-        .get("name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("plugin");
-    let signature = manifest
-        .get("metadata")
-        .and_then(|v| v.as_object())
-        .and_then(|m| m.get("signature"))
-        .and_then(|v| v.as_str());
-    if signature.is_none() {
-        anyhow::bail!("plugin {} is unsigned", name);
-    }
-    let signature = signature.unwrap();
-    if manifest
-        .get("metadata")
-        .and_then(|v| v.as_object())
-        .and_then(|m| m.get("signature_format"))
-        .and_then(|v| v.as_str())
-        != Some("owasidea-manifest-v1")
-    {
-        anyhow::bail!("unsupported signature format for {}", name);
-    }
-    let pk =
-        public_key.ok_or_else(|| anyhow::anyhow!("pinned public key required for {}", name))?;
-    use base64::Engine;
-    let sig_bytes = base64::engine::general_purpose::STANDARD
-        .decode(signature)
-        .context("decode signature")?;
-    // reuse host signed_manifest_payload logic
-    let mut value = manifest.clone();
-    if let Some(metadata) = value.get_mut("metadata").and_then(|v| v.as_object_mut()) {
-        metadata.remove("signature");
-    }
-    let manifest_json = serde_json::to_vec(&value)?;
-    let mut payload = b"owasidea-plugin-signature-v1\0".to_vec();
-    payload.extend_from_slice(&manifest_json);
-    payload.push(0);
-    payload.extend_from_slice(artifact);
-    use ring::signature::{UnparsedPublicKey, ED25519};
-    UnparsedPublicKey::new(&ED25519, pk)
-        .verify(&payload, &sig_bytes)
-        .map_err(|_| anyhow::anyhow!("signature verification failed for {}", name))?;
-    Ok(())
-}
-
 pub fn digest_ui_file_list(files: &std::collections::BTreeMap<String, String>) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -562,79 +410,4 @@ pub fn digest_ui_file_list(files: &std::collections::BTreeMap<String, String>) -
         hasher.update(b"\n");
     }
     format!("{:x}", hasher.finalize())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::test_support::ENV_LOCK;
-
-    fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "owasidea-verify-{name}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("trust")).unwrap();
-        // base64 of b"k"
-        std::fs::write(dir.join("trust/owasidea.pub"), b"aw==\n").unwrap();
-        dir
-    }
-
-    #[test]
-    fn dist_trust_key_is_rejected_without_pinned_root() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        std::env::remove_var("OWASIDEA_PUBLIC_KEY");
-        let dist = temp_dir("unpinned");
-
-        let outcome = resolve_trust_key(&dist, None, false).unwrap();
-        assert!(matches!(outcome, TrustKeyOutcome::Unpinned(_)));
-
-        let _ = std::fs::remove_dir_all(&dist);
-    }
-
-    #[test]
-    fn dist_trust_key_requires_explicit_opt_in() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        std::env::remove_var("OWASIDEA_PUBLIC_KEY");
-        let dist = temp_dir("opt-in");
-
-        let outcome = resolve_trust_key(&dist, None, true).unwrap();
-        assert_eq!(outcome, TrustKeyOutcome::Key(b"k".to_vec()));
-
-        let _ = std::fs::remove_dir_all(&dist);
-    }
-
-    #[test]
-    fn explicit_public_key_outside_dist_is_the_trust_root() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        std::env::remove_var("OWASIDEA_PUBLIC_KEY");
-        let dist = temp_dir("explicit");
-        let key = dist.join("release.pub");
-        std::fs::write(&key, b"aw==\n").unwrap();
-
-        let outcome = resolve_trust_key(&dist, Some(&key), false).unwrap();
-        assert_eq!(outcome, TrustKeyOutcome::Key(b"k".to_vec()));
-
-        let _ = std::fs::remove_dir_all(&dist);
-    }
-
-    #[test]
-    fn missing_trust_root_is_reported() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        std::env::remove_var("OWASIDEA_PUBLIC_KEY");
-        let dist =
-            std::env::temp_dir().join(format!("owasidea-verify-missing-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dist);
-        std::fs::create_dir_all(&dist).unwrap();
-
-        let outcome = resolve_trust_key(&dist, None, false).unwrap();
-        assert_eq!(outcome, TrustKeyOutcome::Missing);
-
-        let _ = std::fs::remove_dir_all(&dist);
-    }
 }

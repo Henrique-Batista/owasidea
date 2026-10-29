@@ -229,14 +229,6 @@ jobs:
       - name: Put owasidea on PATH
         run: echo "$PWD/target/debug" >> "$GITHUB_PATH"
 
-      # G1: the example never generates signing keys implicitly. CI creates an
-      # ephemeral demo key (gitignored) and pins it for `verify`.
-      - name: Generate example signing key
-        working-directory: examples/shipyard
-        run: |
-          set -euo pipefail
-          test -f keys/owasidea.key || owasidea keygen --out keys
-
       - name: Install optional plugin toolchains (C#/C/C++)
         run: |
           dotnet workload install wasi-experimental \
@@ -268,7 +260,7 @@ jobs:
 
       - name: Verify dist (manifests, components, signatures, UI index)
         working-directory: examples/shipyard
-        run: owasidea verify dist/ --json --public-key keys/owasidea.pub
+        run: owasidea verify dist/ --json
 
       - name: Upload Linux packages
         uses: actions/upload-artifact@v4
@@ -411,12 +403,6 @@ jobs:
       - name: Put owasidea on PATH
         run: echo "$PWD/target/debug" >> "$GITHUB_PATH"
 
-      - name: Generate example signing key
-        working-directory: examples/shipyard
-        run: |
-          set -euo pipefail
-          test -f keys/owasidea.key || owasidea keygen --out keys
-
       - name: Install optional plugin toolchains (C#/C/C++)
         if: steps.appimage.outputs.available == 'true'
         run: |
@@ -437,7 +423,7 @@ jobs:
       - name: Verify dist (manifests, components, signatures, UI index)
         if: steps.appimage.outputs.available == 'true'
         working-directory: examples/shipyard
-        run: owasidea verify dist/ --json --public-key keys/owasidea.pub
+        run: owasidea verify dist/ --json
 
       - name: Upload AppImage
         if: steps.appimage.outputs.available == 'true'
@@ -591,13 +577,6 @@ jobs:
         continue-on-error: true
         run: owasidea doctor --json
 
-      - name: Generate example signing key
-        shell: bash
-        working-directory: examples/shipyard
-        run: |
-          set -euo pipefail
-          test -f keys/owasidea.key || owasidea keygen --out keys
-
       - name: Shipyard build (Rust/Go/TS; C#/C/C++ optional/continue-on-error)
         working-directory: examples/shipyard
         continue-on-error: true
@@ -744,12 +723,6 @@ jobs:
         run: |
           sudo dotnet workload install wasi-experimental
           owasidea doctor --install-wasi-sdk
-
-      - name: Generate example signing key
-        working-directory: examples/shipyard
-        run: |
-          set -euo pipefail
-          test -f keys/owasidea.key || owasidea keygen --out keys
 
       - name: Plan code signing (macOS, optional)
         id: signing

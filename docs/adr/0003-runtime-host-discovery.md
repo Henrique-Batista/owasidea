@@ -8,13 +8,13 @@
 
 The dashboard currently learns the host origin at **build time**: Vite `define`
 injects `__OWASIDEA_HOST__` from `OWASIDEA_HOST` (`ui/vite.config.ts`), and the
-Tauri bundle's CSP (`crates/desktop/tauri.conf.json`,
+Tauri bundle's CSP (`examples/shipyard/desktop/tauri.conf.json`,
 `connect-src ... http://127.0.0.1:8787`) is hand-written. Two consequences:
 
 1. Changing `[host].addr` (or `HOST_ADDR` at runtime) requires rebuilding the UI
    and editing CSP by hand, or the packaged app cannot reach the host
    (`warn_csp_mismatch` in `crates/cli/src/main.rs`).
-2. The desktop shell reads `HOST_ADDR` at runtime (`crates/desktop/src/main.rs`)
+2. The desktop shell reads `HOST_ADDR` at runtime (`examples/shipyard/desktop/src/main.rs`)
    and starts the embedded host on that address, but the webview still believes
    the build-time origin. With a non-default `[host].addr` the app is silently
    offline.
@@ -48,7 +48,7 @@ registry `~/.cargo/registry/src/.../tauri-2.12.5`).
   as the primary injection point.
 - Custom protocol: `tauri::Builder::register_uri_scheme_protocol` /
   `register_asynchronous_uri_scheme_protocol` (`src/app.rs` ~2267/~2301) plus the
-  `custom-protocol` feature (`crates/desktop/Cargo.toml`). Viable but heavier.
+  `custom-protocol` feature (`examples/shipyard/desktop/Cargo.toml`). Viable but heavier.
 - Environment variables: Tauri does not auto-inject arbitrary env into the
   webview; the current code passes `OWASIDEA_HOST` only to Vite at build time
   (`crates/cli/src/main.rs` ~2083/~2998). Runtime env must be read in Rust and
@@ -101,7 +101,7 @@ Concretely:
 2. Host address transport to the installed binary: `owasidea.runtime.json` in the
    resource directory is the authoritative source; `HOST_ADDR` remains a runtime
    override for dev/debug. The binary never depends on a compile-time env var.
-3. The desktop shell (`crates/desktop/src/main.rs`) resolves metadata in this
+3. The desktop shell (`examples/shipyard/desktop/src/main.rs`) resolves metadata in this
    order: `OWASIDEA_RUNTIME` file if present, otherwise
    `app.path().resource_dir().join("owasidea.runtime.json")`, with env overrides
    applied on top. It then starts the embedded host using the resolved host
@@ -218,6 +218,6 @@ Concretely:
   (`initialization_script`, `eval`, `initialization_script_for_all_frames`);
   `src/webview/mod.rs`; `src/app.rs` (`register_uri_scheme_protocol`);
   `src/path/desktop.rs` (`resource_dir`).
-- Repo: `crates/desktop/src/main.rs`, `crates/desktop/tauri.conf.json`,
+- Repo: `examples/shipyard/desktop/src/main.rs`, `examples/shipyard/desktop/tauri.conf.json`,
   `ui/vite.config.ts`, `crates/cli/src/main.rs` (`warn_csp_mismatch`,
   `copy_runtime_resources`, bundle `OWASIDEA_HOST`), `examples/shipyard/ui/src/main.ts`.

@@ -2,17 +2,17 @@
 
 > **One framework. Many languages. Zero friction.**
 
-Owasidea lets teams build desktop applications where **Rust, Go, C, C++, C# and
-TypeScript/JavaScript components coexist** in a single app — each written in the
-language and framework its developers already know. No one blocks another. No one
-rewrites. Everyone ships.
+Owasidea lets teams build desktop and headless/CLI applications where **Rust,
+Go, C, C++, C# and TypeScript/JavaScript components coexist** in a single app —
+each written in the language and framework its developers already know. No one
+blocks another. No one rewrites. Everyone ships.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │  Your App (Tauri)                                           │
 │  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐            │
 │  │  Rust lib   │ │  Go service │ │  C# module  │  ...       │
-│  │  (notes)    │ │  (chat-go)  │ │  (tester)   │            │
+│  │ (core-rust) │ │ (webhook-go)│ │(policy-csharp)│           │
 │  └──────┬──────┘ └──────┬──────┘ └──────┬──────┘            │
 │         │               │               │                    │
 │         └───────┬───────┴───────┬───────┘                    │
@@ -34,6 +34,8 @@ rewrites. Everyone ships.
   derives the manifest from the real component.
 - **Capability enforcement** — plugins only get what they declare.
 - **Compose at build time** — wire components together with `wasm-tools compose`.
+- **Typed runtime dependencies** — plugins call declared local providers through
+  generated WIT bindings; the host enforces the graph and rejects re-entry.
 - **One CLI** — `owasidea init/build/dev/run/inspect/validate/bundle`.
 - **Interactive & headless** — beautiful prompts for humans, `--json` for agents.
 
@@ -91,10 +93,11 @@ host).
 ```bash
 cargo install --path crates/cli
 cd examples/shipyard
-owasidea build           # compile, compose, generate + sign manifests
+owasidea build           # compile, compose, generate manifests
 owasidea test            # API smoke + Playwright UI tests
 owasidea dev             # host + UI + watcher
 owasidea bundle          # Tauri package with plugins bundled
+owasidea bundle --target cli   # headless directory with host + plugins
 ```
 
 See [Get Started](docs/GET_STARTED.md) for the full walkthrough and
@@ -116,23 +119,13 @@ framework and the fixtures to run after a framework change:
 scripts/test-examples.sh   # build + smoke + UI tests for every example
 ```
 
-## 🧩 More plugin examples
+## 🧩 Plugin examples
 
-The repository root also keeps smaller focused examples:
-
-| Plugin | Language | Type | What it does |
-|--------|----------|------|--------------|
-| `notes` | Rust | library | KV cache + greet/complete |
-| `chat-go` | Go | executable | HTTP inbound/outbound |
-| `example` | Rust | library | greet/compute/remember |
-| `attr-go` | Go | library | source-generated WIT |
-| `attr-ts` | TypeScript | library | source-generated WIT |
-| `tester` (C#) | C# | library | componentize-dotnet |
-| `heartbeat` | Rust | service | persistent lifecycle example |
-
-WASI plugins expose WIT contracts. Libraries use `/plugin/{name}/call`, services
-use `/plugin/{name}/service/*`, and executable HTTP components use `/app/{name}`.
-Cross-language composition is validated (Go client → Rust notes).
+The reference apps and their plugins live under [`examples/`](examples/README.md)
+and [`examples/shipyard`](examples/shipyard). WASI plugins expose WIT contracts:
+libraries use `/plugin/{name}/call`, services use `/plugin/{name}/service/*`, and
+executable HTTP components use `/app/{name}`. Cross-language composition is
+validated by Shipyard's Go→Rust pipeline.
 
 ## 🛠 Commands
 
@@ -140,20 +133,22 @@ Cross-language composition is validated (Go client → Rust notes).
 owasidea doctor          # check toolchain
 owasidea init <dir>      # scaffold app (interactive)
 owasidea plugin new ...  # scaffold plugin (interactive)
-owasidea build           # build + compose + sign + generate manifests
+owasidea build           # build + compose + generate manifests
 owasidea test            # build + API smoke + UI tests
 owasidea smoke           # build + API smoke only
 owasidea validate        # verify checksums & capabilities
+owasidea migrate         # report 1.1 → 1.2 config changes (--write applies)
 owasidea run             # run host (default 127.0.0.1:8787)
 owasidea dev             # build + host + UI dev server + interactive dashboard (--no-tui for logs)
 owasidea tui             # dashboard for a running host (owasidea run)
 owasidea inspect <name>  # show manifest
-owasidea bundle          # build + sign + Tauri package
+owasidea bundle          # build + Tauri package
+owasidea bundle --target cli   # headless directory + launcher
 ```
 
 ## 📚 Documentation
 
-- [`docs/README.md`](docs/README.md) — documentation index and status of 1.0 claims
+- [`docs/README.md`](docs/README.md) — documentation index and status of 1.1 claims
 - [`docs/GET_STARTED.md`](docs/GET_STARTED.md) — full human walkthrough, zero to Tauri
 - [`docs/GET_STARTED.pt-BR.md`](docs/GET_STARTED.pt-BR.md) — guia em português
 - [`docs/AI_AGENTS.md`](docs/AI_AGENTS.md) — deterministic agent playbook
@@ -175,10 +170,10 @@ owasidea bundle          # build + sign + Tauri package
 - [`docs/API.md`](docs/API.md) — HTTP API
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — architecture
 - [`docs/PLUGIN_AUTHORING.md`](docs/PLUGIN_AUTHORING.md) — writing plugins
+- [`docs/RUNTIME_MODEL.md`](docs/RUNTIME_MODEL.md) — UI/plugin routes, plugin-to-plugin, KV and network
 - [`docs/SOURCE_GENERATORS.md`](docs/SOURCE_GENERATORS.md) — source generators
 - [`docs/SECURITY.md`](docs/SECURITY.md) — security model
 - [`docs/UI_PLUGINS.md`](docs/UI_PLUGINS.md) — Yew/Blazor/Uno webview UI bundles
-- [`docs/REGISTRY.md`](docs/REGISTRY.md) — signed HTTPS registry format and install flow
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — roadmap
 - [`docs/plans/ROADMAP_STATUS.md`](docs/plans/ROADMAP_STATUS.md) — 1.0 item tracker and gate status
 - [`docs/plans/PERFORMANCE.md`](docs/plans/PERFORMANCE.md) — G3 startup/call/build/bundle measurements

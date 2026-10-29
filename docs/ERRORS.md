@@ -21,12 +21,6 @@ A generated or loaded plugin manifest is invalid.
 
 - hint: Re-run `owasidea build` to regenerate manifests from WIT and inspect the reported field.
 
-## OWASIDEA_E_SIGNATURE_INVALID
-
-Plugin manifest signature verification failed.
-
-- hint: Rebuild/sign the plugin with the configured key or disable signing only for local dev.
-
 ## OWASIDEA_E_HTTP_CALL
 
 HTTP/network call to the host or a plugin failed.
@@ -50,6 +44,19 @@ Plugin ABI/runtime is incompatible with this host.
 Plugin build failed.
 
 - hint: Read the compiler/build tool output above; fix the source and retry `owasidea build`.
+
+## OWASIDEA_E_DEPENDENCY_REENTRANT_CALL
+
+A nested dependency call re-entered a plugin already active on the request's
+call stack.
+
+- hint: Declared dependency cycles are allowed, but runtime A→B→A is not. Break the recursive path.
+
+## OWASIDEA_E_DEPENDENCY_DEPTH_EXCEEDED
+
+A nested dependency call exceeded the 1.2 limit of 16 active plugins.
+
+- hint: Flatten the dependency chain or move shared logic into a library helper.
 
 ## OWASIDEA_E_VALIDATE_FAILED
 

@@ -1,0 +1,12 @@
+package poc:host@0.1.0;
+interface service-control {
+    record service-state {
+        running: bool,
+        address: option<string>,
+        last-error: option<string>,
+        restarts: u32,
+    }
+    start: func(plugin: string) -> result<string, string>;
+    status: func(plugin: string) -> service-state;
+    stop: func(plugin: string) -> result<_, string>;
+}

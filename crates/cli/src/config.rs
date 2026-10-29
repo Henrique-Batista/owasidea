@@ -6,7 +6,6 @@ pub struct AppConfig {
     pub app: Option<AppSection>,
     pub host: Option<HostSection>,
     pub desktop: Option<DesktopSection>,
-    pub signing: Option<SigningSection>,
     pub test: Option<TestSection>,
     pub smoke: Option<SmokeSection>,
     pub plugins: Option<std::collections::BTreeMap<String, PluginSection>>,
@@ -43,10 +42,6 @@ impl AppConfig {
             validate_nonempty_opt("desktop.ui", desktop.ui.as_deref())?;
             validate_nonempty_opt("desktop.output", desktop.output.as_deref())?;
         }
-        if let Some(signing) = &self.signing {
-            validate_nonempty_opt("signing.key", signing.key.as_deref())?;
-            validate_nonempty_opt("signing.public_key", signing.public_key.as_deref())?;
-        }
         if let Some(plugins) = &self.plugins {
             for (name, plugin) in plugins {
                 if plugin.path.trim().is_empty() {
@@ -55,6 +50,51 @@ impl AppConfig {
                 for (i, fs) in plugin.fs.iter().enumerate() {
                     if fs.trim().is_empty() {
                         anyhow::bail!("plugins.{}.fs[{}] must not be empty", name, i);
+                    }
+                }
+                for dependency in &plugin.dependencies {
+                    if !plugins.contains_key(dependency) {
+                        anyhow::bail!(
+                            "plugins.{name}.dependencies names unknown plugin {dependency:?}"
+                        );
+                    }
+                    if plugin.compose_with.contains(dependency) {
+                        anyhow::bail!(
+                            "plugins.{name} declares {dependency:?} in both dependencies and compose_with"
+                        );
+                    }
+                }
+                let mut kv_namespaces = std::collections::BTreeSet::new();
+                for grant in &plugin.kv {
+                    let (namespace, access) = grant
+                        .rsplit_once(':')
+                        .unwrap_or((grant.as_str(), "read-write"));
+                    if namespace.trim().is_empty()
+                        || !namespace
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                        || !matches!(access, "read" | "read-write")
+                    {
+                        anyhow::bail!("plugins.{name}.kv has invalid grant {grant:?}");
+                    }
+                    if !kv_namespaces.insert(namespace) {
+                        anyhow::bail!("plugins.{name}.kv repeats namespace {namespace:?}");
+                    }
+                }
+                for (i, host) in plugin.http_outbound.iter().enumerate() {
+                    validate_host_port(&format!("plugins.{name}.http_outbound[{i}]"), host)?;
+                }
+                for (i, host) in plugin.network_outbound.iter().enumerate() {
+                    validate_host_port(&format!("plugins.{name}.network_outbound[{i}]"), host)?;
+                }
+                for (i, address) in plugin.network_inbound.iter().enumerate() {
+                    validate_ip_port(&format!("plugins.{name}.network_inbound[{i}]"), address)?;
+                }
+                for capability in &plugin.capabilities {
+                    if !matches!(capability.as_str(), "network-outbound" | "app-data") {
+                        anyhow::bail!(
+                            "plugins.{name}.capabilities has unknown preset {capability:?}"
+                        );
                     }
                 }
                 if let Some(source) = plugin.wit_source.as_deref() {
@@ -68,6 +108,17 @@ impl AppConfig {
                 }
             }
         }
+        if let Some(ui_plugin) = self.app.as_ref().and_then(|app| app.ui_plugin.as_deref()) {
+            let plugin = self
+                .plugins
+                .as_ref()
+                .and_then(|plugins| plugins.get(ui_plugin))
+                .ok_or_else(|| anyhow::anyhow!("app.ui_plugin {ui_plugin:?} is not configured"))?;
+            if plugin.runtime.as_deref() == Some("js-wasm") || plugin.kind != "library" {
+                anyhow::bail!("app.ui_plugin must name a headless library plugin");
+            }
+        }
+
         if let Some(dev) = &self.dev {
             if let Some(addr) = &dev.ui_addr {
                 validate_socket_addr("dev.ui_addr", addr)?;
@@ -131,6 +182,8 @@ pub struct AppSection {
     pub name: Option<String>,
     pub version: Option<String>,
     pub identifier: Option<String>,
+    #[serde(default)]
+    pub ui_plugin: Option<String>,
 }
 
 #[derive(serde::Deserialize, Debug, Default, Clone, schemars::JsonSchema)]
@@ -178,19 +231,6 @@ pub struct UpdaterSection {
     /// Release notes file, relative to the app root.
     #[serde(default)]
     pub notes_file: Option<String>,
-}
-
-#[derive(serde::Deserialize, Debug, Default, Clone, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct SigningSection {
-    #[serde(default)]
-    pub key: Option<String>,
-    #[serde(default)]
-    pub public_key: Option<String>,
-    #[serde(default)]
-    pub generate: bool,
-    #[serde(default)]
-    pub require: Option<bool>,
 }
 
 #[derive(serde::Deserialize, Debug, Default, Clone, schemars::JsonSchema)]
@@ -260,7 +300,11 @@ pub struct PluginSection {
     #[serde(default)]
     pub fs: Vec<String>,
     #[serde(default)]
-    pub kv: Option<String>,
+    pub kv: Vec<String>,
+    #[serde(default)]
+    pub dependencies: Vec<String>,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
     #[serde(default)]
     pub http_outbound: Vec<String>,
     #[serde(default)]
@@ -302,6 +346,48 @@ fn validate_socket_addr(field: &str, addr: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub(crate) fn validate_host_port(field: &str, value: &str) -> anyhow::Result<()> {
+    let (host, port) = if let Ok(address) = value.parse::<std::net::SocketAddr>() {
+        (address.ip().to_string(), address.port())
+    } else {
+        let (host, port) = value
+            .rsplit_once(':')
+            .ok_or_else(|| anyhow::anyhow!("{field} must be exact host:port: {value:?}"))?;
+        if host.contains(':') || host.starts_with('[') || host.ends_with(']') {
+            anyhow::bail!("{field} has invalid IPv6 host: {value:?}");
+        }
+        (host.to_string(), port.parse::<u16>().unwrap_or(0))
+    };
+    if port == 0 || host.is_empty() || host == "*" || host.contains('/') {
+        anyhow::bail!("{field} must be exact host:port with nonzero port: {value:?}");
+    }
+    if host.parse::<std::net::IpAddr>().is_err()
+        && (host.len() > 253
+            || host.split('.').any(|label| {
+                label.is_empty()
+                    || label.len() > 63
+                    || label.starts_with('-')
+                    || label.ends_with('-')
+                    || !label
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            }))
+    {
+        anyhow::bail!("{field} has invalid hostname: {value:?}");
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_ip_port(field: &str, value: &str) -> anyhow::Result<()> {
+    let address = value.parse::<std::net::SocketAddr>().map_err(|error| {
+        anyhow::anyhow!("{field} must be an IP:port address {value:?}: {error}")
+    })?;
+    if address.port() == 0 {
+        anyhow::bail!("{field} port must be nonzero: {value:?}");
+    }
+    Ok(())
+}
+
 fn validate_nonempty_opt(field: &str, value: Option<&str>) -> anyhow::Result<()> {
     if let Some(v) = value {
         if v.trim().is_empty() {
@@ -320,7 +406,9 @@ pub fn read_host_addr(config: &Path) -> Option<String> {
 
 pub fn read_app_config(config_path: &Path) -> anyhow::Result<AppConfig> {
     let raw = std::fs::read_to_string(config_path)?;
-    let cfg: AppConfig = toml::from_str(&raw)?;
+    let cfg: AppConfig = toml::from_str(&raw).map_err(|error| {
+        anyhow::anyhow!("{error}; if this is a 1.1 config, run `owasidea migrate`")
+    })?;
     cfg.validate()?;
     Ok(cfg)
 }
@@ -349,9 +437,48 @@ mod tests {
 
     #[test]
     fn current_config_loads() {
-        let config = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../wasm-app.toml");
-        let cfg = read_app_config(&config).expect("current config should load");
-        assert!(cfg.plugins.unwrap_or_default().contains_key("notes"));
+        let config =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/hello/wasm-app.toml");
+        let cfg = read_app_config(&config).expect("example config should load");
+        assert!(cfg.plugins.unwrap_or_default().contains_key("greeter"));
+    }
+
+    #[test]
+    fn validates_dependencies_kv_and_exact_network_grants() {
+        let valid = r#"
+[plugins.provider]
+path = "provider"
+language = "rust"
+
+[plugins.consumer]
+path = "consumer"
+language = "rust"
+dependencies = ["provider"]
+kv = ["state:read", "cache:read-write"]
+http_outbound = ["api.example.com:443"]
+network_outbound = ["[2001:db8::1]:443"]
+network_inbound = ["127.0.0.1:8080"]
+"#;
+        toml::from_str::<AppConfig>(valid)
+            .unwrap()
+            .validate()
+            .unwrap();
+
+        let unknown_dependency = valid.replace("[\"provider\"]", "[\"missing\"]");
+        assert!(toml::from_str::<AppConfig>(&unknown_dependency)
+            .unwrap()
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("unknown plugin"));
+
+        let wildcard = valid.replace("api.example.com:443", "*:443");
+        assert!(toml::from_str::<AppConfig>(&wildcard)
+            .unwrap()
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("exact host:port"));
     }
 
     #[test]
