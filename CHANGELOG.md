@@ -11,6 +11,26 @@ below; see [`docs/UPDATER.md`](docs/UPDATER.md).
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-10-29
+
+### Changed
+
+- HTTP exposure is deny-by-default. `/plugin/{name}/...` and `/app/{name}`
+  return `403` unless the plugin sets `expose = true`. The configured
+  `ui_plugin` glue remains reachable without the flag. Plugin-to-plugin
+  `dependencies` calls are unaffected.
+- `GET /plugins` hides unexposed plugins in production.
+- Generated manifests carry `http_exposed` and `min_host: 1.4.0`. Legacy
+  manifests without the field keep the pre-1.4 exposed behavior; rebuild to
+  apply default-deny.
+- `owasidea dev`, `owasidea smoke`, `owasidea test` and
+  `OWASIDEA_DEV_MODE=1` keep the full developer surface.
+
+### Added
+
+- `expose = true` per plugin in `wasm-app.toml`.
+- `docs/MIGRATION_1_3_TO_1_4.md` with the opt-in checklist.
+
 ## [1.3.1] - 2026-10-29
 
 ### Added

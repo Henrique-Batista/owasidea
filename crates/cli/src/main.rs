@@ -2148,6 +2148,7 @@ fn generate_manifest(
     network_outbound: &[String],
     network_inbound: &[String],
     persistent: bool,
+    expose: bool,
     build_id: &str,
     app_ui_plugin: Option<&str>,
 ) -> anyhow::Result<()> {
@@ -2360,6 +2361,7 @@ fn generate_manifest(
         "abi": abi,
         "runtime": "wasi-component",
         "type": kind,
+        "http_exposed": expose,
         "component": std::path::Path::new(component).file_name().unwrap_or_default().to_string_lossy(),
         "exports": exports,
         "imports": {"wasi": wasi, "host": host, "plugins": dependencies},
@@ -2970,6 +2972,7 @@ fn cmd_build(
             &p.network_outbound,
             &p.network_inbound,
             p.persistent,
+            p.expose,
             &build_id,
             app_ui_plugin,
         )?;
@@ -3179,6 +3182,7 @@ fn build_ui_plugin(
         "min_host": owasidea_host::HOST_VERSION,
         "runtime": "js-wasm",
         "type": "ui",
+        "http_exposed": false,
         "component": "",
         "exports": [],
         "imports": {"wasi": [], "host": [], "plugins": []},

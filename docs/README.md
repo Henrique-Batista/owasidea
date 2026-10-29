@@ -23,6 +23,7 @@ described in `CLI.md` (`dev` and `tui`).
 - [ABI_POLICY.md](ABI_POLICY.md) — semver, breaking changes, deprecation window.
 - [MIGRATION_0_X_TO_1_0.md](MIGRATION_0_X_TO_1_0.md) — upgrade a 0.x app to 1.0.
 - [MIGRATION_1_1_TO_1_2.md](MIGRATION_1_1_TO_1_2.md) — upgrade a 1.1 app to ABI 2, multi-KV, glue UI and exact network grants.
+- [MIGRATION_1_3_TO_1_4.md](MIGRATION_1_3_TO_1_4.md) — opt plugins into HTTP exposure; deny-by-default in 1.4.
 
 ## Plugins and UI
 
