@@ -385,7 +385,13 @@ fn generated_bundle_resources(
 
     let manifests = root.join("manifests");
     if manifests.is_dir() {
-        add(manifests, "manifests/".to_string());
+        let runtime = root.join(".owasidea").join("runtime-manifests");
+        let count = crate::dist_stage::write_runtime_manifests(&manifests, &runtime)?;
+        if count > 0 {
+            add(runtime, "manifests/".to_string());
+        } else {
+            add(manifests, "manifests/".to_string());
+        }
     }
 
     if let Some(plugins) = &cfg.plugins {
@@ -395,7 +401,9 @@ fn generated_bundle_resources(
                 continue;
             }
             let dir = safe_resolve(&root, &plugin.path)?;
-            let component = dir.join(format!("{name}.component.wasm"));
+            let legacy = dir.join(format!("{name}.component.wasm"));
+            let stored = crate::layout::Layout::new(&root).component(name);
+            let component = if stored.is_file() { stored } else { legacy };
             if component.is_file() {
                 add(component, format!("plugins/{name}/{name}.component.wasm"));
             }

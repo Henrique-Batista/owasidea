@@ -175,13 +175,18 @@ wit_source = "auto"       # auto (default) | wit | attributes
 
 Build configured plugins, resolve declared runtime dependencies, compose
 clients declared with `compose_with`, regenerate ABI 2 manifests from the real
-WIT, and copy UI assets.
+WIT, and copy UI assets. Generated contracts, resolved dependency packages and
+final components live under `.owasidea/` at the app root; see
+[`BUILD_LAYOUT.md`](BUILD_LAYOUT.md).
 
 Behavior:
 
 0. Each plugin contract is resolved from `wit_source` first. Attribute
    contracts are regenerated as artifacts; a `wit/` directory beside an
    attribute plugin fails instead of being ignored or overwritten.
+   Provider packages publish to `.owasidea/deps/`; each consumer gets
+   `.owasidea/build/<consumer>/wit/` with its declared dependencies. The
+   toolchain reads that view, so `wit/deps/<provider>` is not needed.
 1. Ordinary plugins build before composed plugins.
 2. Missing npm dependencies for the dashboard, TypeScript plugins and UI plugins are installed
    automatically.

@@ -74,7 +74,7 @@ Expected build facts:
 
 - 12 plugin manifests: 10 WASI + 2 UI.
 - `examples/shipyard/manifests/pipeline-go.manifest.json` has `composition.strategy = "build-time"` and no `imports.plugins`.
-- `examples/shipyard/plugins/*/*.component.wasm` exist for the 10 headless plugins.
+- `examples/shipyard/.owasidea/build/*/*.component.wasm` exist for the 10 headless plugins.
 - `examples/shipyard/ui/public/plugins/{board-svelte,map-react}/` contain `index.html`, `assets/*`, and are hashed into their manifests.
 
 If you need the CLI without installing it:

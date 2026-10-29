@@ -11,6 +11,8 @@
     <PublishTrimmed>true</PublishTrimmed>
     <InvariantGlobalization>true</InvariantGlobalization>
     <SelfContained>true</SelfContained>
+    <OwasideaWitDir Condition="'$(OwasideaWitDir)' == '' and Exists('wit')">wit</OwasideaWitDir>
+    <OwasideaWitDir Condition="'$(OwasideaWitDir)' == ''">.owasidea/wit</OwasideaWitDir>
   </PropertyGroup>
 
   <ItemGroup>
@@ -21,6 +23,6 @@
 
   <ItemGroup>
     <Wit Remove="*.wit;wit/*.wit" />
-    <Wit Include="wit" World="policy" />
+    <Wit Include="$(OwasideaWitDir)" World="policy" />
   </ItemGroup>
 </Project>

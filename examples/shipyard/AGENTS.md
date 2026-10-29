@@ -31,7 +31,7 @@ disks.
 ## Files that are generated — never edit
 
 - `manifests/*.manifest.json`
-- `plugins/*/*.component.wasm`
+- `.owasidea/` (components, dependency views, caches)
 - `plugins/*/*.client.wasm`
 - `plugins/*/target/`, `bin/`, `obj/`, `gen/`, `dist/`
 - `ui/dist/`, `ui/public/plugins/`, `ui/.owasidea/`
@@ -69,7 +69,9 @@ package comes from `wit/deps/core/core.wit`.
 
 ## Language output names
 
-The CLI expects `plugins/<name>/<name>.component.wasm`:
+The CLI adopts each toolchain's output into
+`.owasidea/build/<name>/<name>.component.wasm`. New Makefiles/scripts can write
+there directly with `OUT` / `OWASIDEA_OUT`; legacy plugin-local output is moved.
 
 - Rust: copy `target/wasm32-wasip1/release/<crate>.wasm`.
 - Go: copy `main.wasm`. An SDK-world module (webhook-go) is built with

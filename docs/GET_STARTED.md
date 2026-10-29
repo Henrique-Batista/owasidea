@@ -37,9 +37,13 @@ Four files matter for every headless plugin:
 | File / concept | Role |
 |---|---|
 | `wit/<name>.wit` | The contract: exports, imports, types, and whether a function is async. |
-| Component `.wasm` | The compiled WASI Component Model artifact. |
+| `.owasidea/build/<name>/<name>.component.wasm` | The compiled WASI Component Model artifact. |
 | `wasm-app.toml` | Source/build config: path, language, type, permissions, composition. |
 | `manifests/<name>.manifest.json` | Generated from the real WIT. Never hand-edit. |
+| `.owasidea/` | Generated store: resolved deps, per-consumer WIT views, components, caches. |
+
+Dependency WIT is resolved into `.owasidea/deps/` and
+`.owasidea/build/<consumer>/wit/`; see [`BUILD_LAYOUT.md`](BUILD_LAYOUT.md).
 
 Rust, Go, TypeScript, C#, C and C++ plugins do not need the `wit/` file:
 `owasidea build` renders the contract from source markers into `.owasidea/wit`

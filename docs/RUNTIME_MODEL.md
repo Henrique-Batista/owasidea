@@ -89,6 +89,11 @@ declared provider in a separate store. Undeclared imports fail build and host lo
 Only `library` providers are callable in 1.2; resources/streams/callbacks are
 not supported across the boundary.
 
+`owasidea build` publishes provider packages to `.owasidea/deps/` and builds a
+per-consumer WIT view under `.owasidea/build/<consumer>/wit/`; see
+[`BUILD_LAYOUT.md`](BUILD_LAYOUT.md). Do not hand-copy provider WIT into
+`plugins/<consumer>/wit/deps/`.
+
 Dependency declarations may form cycles; a runtime call that re-enters a plugin
 already on the call stack fails with
 `OWASIDEA_E_DEPENDENCY_REENTRANT_CALL`. Maximum nesting depth is 16. The plugin

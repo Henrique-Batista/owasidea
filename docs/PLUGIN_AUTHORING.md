@@ -61,8 +61,10 @@ against markers).
    (`make`), which runs `wit-bindgen` and `clang`/`clang++`. Set `WASI_SDK_PATH`
    and `WASI_PREVIEW1_ADAPTER` for your installed toolchain; templates contain no
    developer-specific absolute paths.
-4. Build output must be `<plugin-name>.component.wasm`; `owasidea build` derives
-   the manifest from it.
+4. `owasidea build` adopts the component into
+   `.owasidea/build/<plugin-name>/<plugin-name>.component.wasm` and derives the
+   manifest from it. New Makefiles should write to `$(OUT)` (the CLI sets it);
+   older Makefiles that emit `<plugin-name>.component.wasm` keep working.
 
 On Windows, use wasi-sdk for Windows and a `make` from MSYS2, or override the
 build command:
@@ -193,9 +195,13 @@ files and output naming:
 | `watchtower-rust` | Rust | persistent service lifecycle |
 | `webhook-go` | Go | executable `wasi:http/incoming-handler` |
 
-Build output must be `plugins/<name>/<name>.component.wasm`. If your Makefile
-uses the WIT world name (`fingerprint.component.wasm`), the CLI will stop with
-`component not found after build`; set an explicit plugin output name.
+Final components live in
+`.owasidea/build/<name>/<name>.component.wasm` (see
+[`BUILD_LAYOUT.md`](BUILD_LAYOUT.md)). A Makefile may emit
+`plugins/<name>/<name>.component.wasm`; the CLI moves it into the project
+store. If your Makefile uses the WIT world name
+(`fingerprint.component.wasm`), write to `$(OUT)` or the CLI will stop with
+`component not found after build`.
 
 ## Build-time composition
 
@@ -247,6 +253,13 @@ Rust, Go, TypeScript, C#, C and C++ (see
 [`plans/DEPENDENCY_CONSUMPTION.md`](plans/DEPENDENCY_CONSUMPTION.md)). The same
 edge cannot also use `compose_with`. Declarations may cycle; a runtime A→B→A call fails with
 `OWASIDEA_E_DEPENDENCY_REENTRANT_CALL`.
+
+`owasidea build` resolves dependency WIT automatically: providers publish to
+`.owasidea/deps/`, and each consumer gets
+`.owasidea/build/<consumer>/wit/` with the packages it declared. Do not copy
+provider WIT into `plugins/<consumer>/wit/deps/`; a hand-copied package is
+replaced by the canonical one in the view. See
+[`BUILD_LAYOUT.md`](BUILD_LAYOUT.md).
 
 `owasidea build` builds non-composed plugins first, then stages each dependency
 under a single-dot filename and runs `wasm-tools compose`. This is required

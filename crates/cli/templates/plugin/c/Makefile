@@ -1,5 +1,7 @@
 WASI_SDK ?= $(WASI_SDK_PATH)
 ADAPTER ?= $(WASI_PREVIEW1_ADAPTER)
+WIT_DIR ?= .owasidea/wit
+OUT ?= {{name}}.component.wasm
 ifeq ($(OS),Windows_NT)
 EXE := .exe
 else
@@ -14,8 +16,8 @@ endif
 CC = $(WASI_SDK)/bin/{{compiler}}$(EXE)
 
 all:
-	wit-bindgen {{lang}} .owasidea/wit/{{name}}.wit --out-dir src
+	wit-bindgen {{lang}} $(WIT_DIR) --out-dir src
 	$(CC) --target=wasm32-wasip1 {{stdflag}} -O2 -c {{source}} -o src/{{ident}}.o
 	$(CC) --target=wasm32-wasip1 {{stdflag}} -O2 -c src/impl.{{ext}} -o src/impl.o
 	$(CC) --target=wasm32-wasip1 {{stdflag}} -O2 src/{{ident}}_component_type.o src/{{ident}}.o src/impl.o -o {{name}}.wasm -mexec-model=reactor
-	wasm-tools component new {{name}}.wasm --adapt $(ADAPTER) -o {{name}}.component.wasm
+	wasm-tools component new {{name}}.wasm --adapt $(ADAPTER) -o $(OUT)

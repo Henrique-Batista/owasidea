@@ -9,6 +9,8 @@ CC = $(WASI_SDK)/bin/clang$(EXE)
 CFLAGS = --target=wasm32-wasip1 --sysroot=$(WASI_SDK)/share/wasi-sysroot -O2
 PLUGIN = fingerprint-c
 NAME = fingerprint
+WIT_DIR ?= wit
+OUT ?= $(PLUGIN).component.wasm
 
 ifeq ($(strip $(WASI_SDK)),)
 $(error Set WASI_SDK_PATH to a wasi-sdk install)
@@ -20,11 +22,11 @@ endif
 .PHONY: all clean bindings
 
 all:
-	wit-bindgen c wit/$(NAME).wit --out-dir gen
+	wit-bindgen c $(WIT_DIR) --out-dir gen
 	$(CC) $(CFLAGS) -Igen -c gen/$(NAME).c -o gen/$(NAME).o
 	$(CC) $(CFLAGS) -Igen -c src/impl.c -o gen/impl.o
 	$(CC) $(CFLAGS) gen/$(NAME)_component_type.o gen/$(NAME).o gen/impl.o -o $(NAME).core.wasm -mexec-model=reactor
-	wasm-tools component new $(NAME).core.wasm --adapt wasi_snapshot_preview1=$(ADAPTER) -o $(PLUGIN).component.wasm
+	wasm-tools component new $(NAME).core.wasm --adapt wasi_snapshot_preview1=$(ADAPTER) -o $(OUT)
 
 clean:
-	rm -rf gen $(NAME).core.wasm $(PLUGIN).component.wasm
+	rm -rf gen $(NAME).core.wasm $(OUT)

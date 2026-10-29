@@ -1,11 +1,11 @@
-# AGENTS.md — Owasidea 1.1
+# AGENTS.md — Owasidea 1.3
 
 Owasidea is a polyglot application framework: one Rust/Wasmtime host loads
 independent WASI components (Rust, Go, TypeScript, C#, C, C++) and serves a
 desktop (Tauri 2) or headless/CLI app. Plugins are untrusted; the generated
 manifest is the capability boundary.
 
-This is the **1.0 product**, not the old feasibility POC. The reference POC at
+This is the **1.x product**, not the old feasibility POC. The reference POC at
 `/home/pablitux/Projetos/extism-poc` is historical; do not copy its artifacts.
 
 ## Read first
@@ -62,6 +62,7 @@ examples/
 plugins/      focused plugin examples used by the root demo
 ui/           vanilla TypeScript + Vite dashboard
 manifests/    generated, never edit
+.owasidea/    generated build store: deps, components, caches (never edit)
 templates/    `plugin new` / `init` templates
 docs/         guides, reference, ADRs, plans
 tools/tui-lab/  TUI framework prototypes (not part of the workspace)

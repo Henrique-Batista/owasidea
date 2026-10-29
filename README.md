@@ -100,6 +100,9 @@ owasidea bundle          # Tauri package with plugins bundled
 owasidea bundle --target cli   # headless directory with host + plugins
 ```
 
+Generated contracts, dependency packages and final components live under
+`.owasidea/`; see [Build layout](docs/BUILD_LAYOUT.md).
+
 See [Get Started](docs/GET_STARTED.md) for the full walkthrough and
 [AI Agent Playbook](docs/AI_AGENTS.md) for deterministic automation steps.
 

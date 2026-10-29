@@ -1449,7 +1449,7 @@ fn build_reuses_prebuilt_go_component_without_wit() {
         "build must warn about the prebuilt component: {stdout}"
     );
 
-    let built = plugin.join("webhook-go.component.wasm");
+    let built = root.join(".owasidea/build/webhook-go/webhook-go.component.wasm");
     assert!(
         built.is_file(),
         "component not produced: {}",

@@ -1,0 +1,16 @@
+.owasidea/
+manifests/*.manifest.json
+manifests/permissions.*.json
+plugins/*/target/
+plugins/*/src/bindings.rs
+plugins/*/bin/
+plugins/*/obj/
+plugins/*/gen/
+ui/dist/
+ui/node_modules/
+ui/public/plugins/
+ui/public/ui-plugins.json
+ui/.owasidea/
+data/
+test-results/
+dist/
