@@ -94,6 +94,15 @@ struct Manifest {
     composition: Composition,
     #[serde(default)]
     metadata: serde_json::Value,
+    /// `None` means a pre-1.4 manifest; keep the historical exposed behavior.
+    #[serde(default)]
+    http_exposed: Option<bool>,
+}
+
+impl Manifest {
+    fn is_http_exposed(&self) -> bool {
+        self.http_exposed.unwrap_or(true)
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -1781,13 +1790,14 @@ async fn overview(State(state): State<AppState>) -> Json<OverviewRes> {
 async fn list_plugins(State(state): State<AppState>) -> Json<Vec<PluginInfo>> {
     let mut out = Vec::new();
     for (name, p) in state.plugins.read().unwrap().iter() {
-        if !state.dev_mode
-            && state
-                .app_ui_plugin
-                .as_deref()
-                .is_some_and(|glue| glue != name)
-        {
-            continue;
+        if !state.dev_mode {
+            if let Some(glue) = state.app_ui_plugin.as_deref() {
+                if glue != name {
+                    continue;
+                }
+            } else if !p.manifest.is_http_exposed() {
+                continue;
+            }
         }
         out.push(PluginInfo {
             name: name.clone(),
@@ -3953,6 +3963,36 @@ async fn count_requests(
     resp
 }
 
+/// Deny HTTP routes for plugins that did not opt in with `expose = true`.
+/// `dependencies` calls are host-mediated and never pass through this guard;
+/// `owasidea dev` and the smoke/test host set `dev_mode` explicitly.
+async fn plugin_exposure_guard(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+    next: middleware::Next,
+) -> Response {
+    if !state.dev_mode {
+        let mut segments = request.uri().path().trim_start_matches('/').split('/');
+        let surface = segments.next();
+        let name = segments.next().unwrap_or_default();
+        if matches!(surface, Some("plugin" | "app")) && !name.is_empty() {
+            let glue = state.app_ui_plugin.as_deref();
+            if glue != Some(name) {
+                if let Some(plugin) = state.plugin(name) {
+                    if !plugin.manifest.is_http_exposed() {
+                        return (
+                            StatusCode::FORBIDDEN,
+                            "plugin is not exposed over HTTP; set expose = true in wasm-app.toml",
+                        )
+                            .into_response();
+                    }
+                }
+            }
+        }
+    }
+    next.run(request).await
+}
+
 async fn app_surface_guard(
     State(state): State<AppState>,
     request: axum::extract::Request,
@@ -3963,24 +4003,18 @@ async fn app_surface_guard(
             let mut segments = request.uri().path().trim_start_matches('/').split('/');
             let surface = segments.next();
             let name = segments.next().unwrap_or_default();
-            // Executable dependencies remain reachable at /app so the glue can
-            // expose HTTP-shaped dependencies without browser-to-plugin
-            // fan-out; every other app route is glue-only.
-            let executable_dependency = surface == Some("app")
-                && state
-                    .plugin(glue)
-                    .is_some_and(|runtime| runtime.dependencies.iter().any(|dep| dep == name))
-                && state
-                    .plugin(name)
-                    .is_some_and(|runtime| runtime.http_pre.is_some());
+            // The glue is the browser entrypoint; other plugins must opt in.
+            let exposed = state
+                .plugin(name)
+                .is_some_and(|plugin| plugin.manifest.is_http_exposed());
             if matches!(surface, Some("plugin" | "app"))
                 && !name.is_empty()
                 && name != glue
-                && !executable_dependency
+                && !exposed
             {
                 return (
                     StatusCode::FORBIDDEN,
-                    "app routes expose only the configured glue plugin",
+                    "app routes expose only the configured glue plugin and plugins with expose = true",
                 )
                     .into_response();
             }
@@ -4058,6 +4092,10 @@ fn build_router_inner(state: AppState, tailcat_routes: bool) -> Result<Router> {
         .layer(cors_layer()?)
         .layer(middleware::from_fn_with_state(
             state.clone(),
+            plugin_exposure_guard,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
             app_surface_guard,
         ))
         .layer(middleware::from_fn_with_state(
@@ -4076,6 +4114,14 @@ mod tests {
         let raw = r#"{"name":"x","version":"0.1.0","language":"rust","abi":"wasi-0.2","runtime":"wasi-component","type":"library","component":"x.wasm","exports":[],"imports":{"wasi":[],"host":[],"plugins":[]},"permissions":{},"state":{},"composition":{},"metadata":{}}"#;
         let m: Manifest = serde_json::from_str(raw).unwrap();
         assert_eq!(m.name, "x");
+        assert!(m.is_http_exposed(), "legacy manifests keep the old surface");
+
+        let raw = raw.replace(
+            "\"type\":\"library\"",
+            "\"type\":\"library\",\"http_exposed\":false",
+        );
+        let m: Manifest = serde_json::from_str(&raw).unwrap();
+        assert!(!m.is_http_exposed());
     }
 
     #[test]
@@ -4567,6 +4613,83 @@ mod tests {
             StatusCode::NOT_FOUND,
             "dev keeps full access"
         );
+    }
+
+    #[tokio::test]
+    async fn exposure_guard_requires_explicit_expose() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        fn runtime(exposed: Option<bool>) -> Arc<PluginRuntime> {
+            let mut config = wasmtime::Config::new();
+            config.wasm_component_model(true).consume_fuel(true);
+            let engine = Engine::new(&config).unwrap();
+            let manifest: Manifest = serde_json::from_value(serde_json::json!({
+                "name": "provider", "version": "0.1.0", "language": "rust",
+                "abi": "wasi-0.2", "schema_version": 2, "host_abi": HOST_ABI,
+                "min_host": HOST_VERSION, "runtime": "wasi-component",
+                "type": "library", "component": "provider.wasm",
+                "http_exposed": exposed,
+                "exports": [], "imports": {"wasi": [], "host": [], "plugins": []},
+                "permissions": {}, "state": {}, "composition": {}, "metadata": {}
+            }))
+            .unwrap();
+            Arc::new(PluginRuntime {
+                manifest,
+                manifest_path: PathBuf::from("provider.manifest.json"),
+                component: Component::new(&engine, PROVIDER_WAT).unwrap(),
+                kv: HashMap::new(),
+                logs: Arc::new(Mutex::new(LogBuffer::new("provider"))),
+                instance_slots: Arc::new(tokio::sync::Semaphore::new(1)),
+                http_pre: None,
+                dependencies: Vec::new(),
+                http_pinned: HashMap::new(),
+            })
+        }
+
+        fn state(exposed: Option<bool>, dev: bool) -> AppState {
+            let mut state = test_app_state(std::sync::RwLock::new(HashMap::new()));
+            state.dev_mode = dev;
+            state
+                .plugins
+                .write()
+                .unwrap()
+                .insert("provider".to_string(), runtime(exposed));
+            state
+        }
+
+        let request = |uri: &str| Request::builder().uri(uri).body(Body::empty()).unwrap();
+
+        let denied = build_router(state(Some(false), false))
+            .unwrap()
+            .oneshot(request("/plugin/provider/manifest"))
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+
+        let allowed = build_router(state(Some(true), false))
+            .unwrap()
+            .oneshot(request("/plugin/provider/manifest"))
+            .await
+            .unwrap();
+        assert_eq!(allowed.status(), StatusCode::OK);
+
+        let mut glue_state = state(Some(false), false);
+        glue_state.app_ui_plugin = Some("provider".to_string());
+        let glue = build_router(glue_state)
+            .unwrap()
+            .oneshot(request("/plugin/provider/manifest"))
+            .await
+            .unwrap();
+        assert_eq!(glue.status(), StatusCode::OK, "the glue is implicit");
+
+        let dev = build_router(state(Some(false), true))
+            .unwrap()
+            .oneshot(request("/plugin/provider/manifest"))
+            .await
+            .unwrap();
+        assert_eq!(dev.status(), StatusCode::OK);
     }
 
     #[cfg(not(feature = "streaming"))]

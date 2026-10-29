@@ -313,6 +313,11 @@ pub struct PluginSection {
     pub network_inbound: Vec<String>,
     #[serde(default)]
     pub persistent: bool,
+    /// Expose this plugin's HTTP surface (`/plugin/<name>/*` and
+    /// `/app/<name>`). Defaults to `false`; the configured `ui_plugin` is
+    /// always reachable so the webview can call it.
+    #[serde(default)]
+    pub expose: bool,
     #[serde(default)]
     pub runtime: Option<String>,
     /// Where the component contract comes from: `auto` (default), `wit`
@@ -640,5 +645,17 @@ network_inbound = ["127.0.0.1:8080"]
             let plugins = cfg.plugins.clone().unwrap_or_default();
             assert!(!plugins.is_empty());
         }
+    }
+
+    #[test]
+    fn expose_defaults_to_false_and_parses_true() {
+        let cfg: AppConfig = toml::from_str(
+            "[plugins.a]\npath = \"a\"\nlanguage = \"rust\"\n\
+             [plugins.b]\npath = \"b\"\nlanguage = \"rust\"\nexpose = true\n",
+        )
+        .unwrap();
+        let plugins = cfg.plugins.unwrap();
+        assert!(!plugins["a"].expose);
+        assert!(plugins["b"].expose);
     }
 }

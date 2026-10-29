@@ -117,6 +117,17 @@ path = "desktop"
 ui = "ui"
 ```
 
+Exposição HTTP é **negada por padrão**. O `ui_plugin` é sempre acessível; para
+chamar `/plugin/<name>/*` ou `/app/<name>` em `owasidea run` ou no bundle, adicione:
+
+```toml
+[plugins.core]
+expose = true
+```
+
+`owasidea dev`, `smoke` e `test` expõem todos os plugins
+(`OWASIDEA_DEV_MODE=1`). Chamadas entre plugins via `dependencies` não usam HTTP.
+
 Regras:
 
 - Manifestos são gerados do WIT real. Nunca edite `manifests/*.json`.

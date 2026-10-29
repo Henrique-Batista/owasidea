@@ -836,7 +836,7 @@ line/column. All supported fields:
 | `[[smoke.calls]]` | `plugin`, `function`, `args`, `expect_contains`, `expect_equals`, `min`, `max` | mixed | smoke calls |
 | `[[smoke.http]]` | `path`, `method`, `body`, `expect_status`, `expect_contains` | mixed | smoke HTTP |
 | `[[smoke.services]]` | `plugin` | string | smoke services |
-| `[plugins.<name>]` | `path`, `language`, `type`, `version`, `fs`, `kv`, `dependencies`, `capabilities`, `http_outbound`, `network_outbound`, `network_inbound`, `persistent`, `runtime`, `ui_entry`, `ui_build`, `build`, `compose_with`, `bridge` | mixed | plugin config |
+| `[plugins.<name>]` | `path`, `language`, `type`, `version`, `fs`, `kv`, `dependencies`, `capabilities`, `http_outbound`, `network_outbound`, `network_inbound`, `persistent`, `expose`, `runtime`, `ui_entry`, `ui_build`, `build`, `compose_with`, `bridge` | mixed | plugin config; `expose = true` opens `/plugin/<name>/*` and `/app/<name>` |
 | `[dev]` | `watch`, `hot_reload`, `ui_addr` | bool/string | dev mode |
 
 ### Validation rules (RF-01)

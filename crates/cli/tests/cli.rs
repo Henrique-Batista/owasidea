@@ -1432,7 +1432,7 @@ fn build_reuses_prebuilt_go_component_without_wit() {
     assert!(write_minimal_component(&plugin.join("main.wasm")));
     std::fs::write(
         root.join("wasm-app.toml"),
-        "[app]\nversion = \"0.1.0\"\n\n[plugins.webhook-go]\npath = \"plugins/webhook-go\"\nlanguage = \"go\"\ntype = \"executable\"\n",
+        "[app]\nversion = \"0.1.0\"\n\n[plugins.webhook-go]\npath = \"plugins/webhook-go\"\nlanguage = \"go\"\ntype = \"executable\"\nexpose = true\n",
     )
     .unwrap();
 
@@ -1467,6 +1467,7 @@ fn build_reuses_prebuilt_go_component_without_wit() {
     assert_eq!(manifest["language"], "go");
     assert_eq!(manifest["runtime"], "wasi-component");
     assert_eq!(manifest["type"], "executable");
+    assert_eq!(manifest["http_exposed"], true);
     std::fs::remove_dir_all(&root).unwrap();
 }
 

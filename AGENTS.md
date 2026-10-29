@@ -44,6 +44,8 @@ This is the **1.x product**, not the old feasibility POC. The reference POC at
 - Plugins are bundled at build time. No plugin download at runtime.
 - Capabilities are deny-by-default: filesystem, sockets, HTTP, KV and host
   interfaces must be declared and are enforced by the host.
+- HTTP exposure is also deny-by-default: `/plugin/{name}/*` and `/app/{name}`
+  require `expose = true` in `wasm-app.toml`; the `ui_plugin` glue is implicit.
 - The UI uses the host HTTP API, never links Wasmtime directly.
 - Do not add QuickJS/Javy/Node to the host.
 - Do not add a remote registry. Plugins are source repositories + build

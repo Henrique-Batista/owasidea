@@ -12,6 +12,14 @@
 - **Import integrity:** Wasmtime component imports are checked against the
   generated manifest before instantiation. Undeclared or stale WASI/host
   interfaces fail startup/reload.
+- **HTTP exposure:** Deny-by-default. A plugin's `/plugin/{name}/...` and
+  `/app/{name}` routes return `403` unless it sets `expose = true`. The
+  configured `ui_plugin` glue is reachable without the flag. Plugin-to-plugin
+  `dependencies` calls are host-mediated and do not use HTTP. `owasidea dev`
+  and the smoke/test harness set `OWASIDEA_DEV_MODE=1` to expose the developer
+  surface; `owasidea run` and bundles enforce the flag. Legacy manifests without
+  `http_exposed` keep the pre-1.4 behavior; rebuild with 1.4 to apply the
+  default-deny policy.
 - **WASI filesystem:** No inherited directories. Only manifest-declared,
   canonicalized preopens are mounted, with explicit read-only/read-write access.
 - **WASI sockets:** Network defaults to deny. Exact outbound `host:port` pairs

@@ -27,9 +27,17 @@ per call; use `/plugin/{name}/reload` (or restart the host) after a rebuild.
 There is **no global `/call` route**. The generic route is
 `/plugin/{name}/call` with `{ "function": "kebab-name", "args": [...] }`.
 Top-level exports are resolved by name; interface exports are resolved only
-through `manifest.exports`. There is no per-export ACL: if the component exports
-it, a client that can reach the loopback host can call it. The dashboard only
-renders forms for manifest exports, which is a UI convenience, not
+through `manifest.exports`. HTTP exposure is opt-in per plugin:
+
+```toml
+[plugins.notes]
+expose = true
+```
+
+The default is `false`: `/plugin/{name}/*` and `/app/{name}` return `403`
+unless the plugin sets `expose = true`. There is no per-export ACL: once a
+plugin is exposed, every export in its manifest is reachable. The dashboard
+only renders forms for manifest exports, which is a UI convenience, not
 authorization. The host API has no authentication; keep it on loopback.
 
 `/app/{name}` is only registered for executable/hybrid plugins with
@@ -45,16 +53,15 @@ Apps set one glue plugin:
 ui_plugin = "app-glue"
 ```
 
-The shipped app UI calls that plugin through the host API. In production,
-call/manifest/log/reload and `/app` routes for other plugins are rejected
-(`403`), and `GET /plugins` lists only the glue plugin. Service lifecycle routes
-are glue-only too; the glue uses the typed `service-control` WIT import. An
-executable dependency may remain reachable at `/app/{name}` when the glue
-declares that plugin in `dependencies`. `owasidea dev` and
-`OWASIDEA_DEV_MODE=1` keep the developer routes for every plugin; `owasidea tui`
-only sees them when attached to a dev host. This is an API
-surface rule, not authentication against other processes owned by the same OS
-user; keep the host loopback-only.
+The shipped app UI calls that plugin through the host API. The glue is always
+reachable without setting `expose = true`. In production, other plugins are
+rejected (`403`) unless they opt in with `expose = true`; `GET /plugins` lists
+only the glue and exposed plugins. Service lifecycle routes follow the same
+rule; the glue normally uses the typed `service-control` WIT import instead.
+`owasidea dev`, the smoke/test harness and `OWASIDEA_DEV_MODE=1` keep the
+developer surface for every plugin; `owasidea tui` only sees them when attached
+to a dev host. This is an API surface rule, not authentication against other
+processes owned by the same OS user; keep the host loopback-only.
 
 A UI plugin in an iframe is still **not** allowed to call the host directly. It
 uses the opt-in parent bridge:

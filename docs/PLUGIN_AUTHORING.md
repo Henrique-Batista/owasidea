@@ -279,6 +279,24 @@ The composed manifest has `imports.plugins: []` because the provider import is
 linked away. `dependencies` and `compose_with` are mutually exclusive for the
 same edge; config validation rejects declaring both.
 
+## HTTP exposure
+
+HTTP routes are deny-by-default. A plugin that should be called from
+`owasidea run`, a bundle or another process opts in:
+
+```toml
+[plugins.notes]
+expose = true
+```
+
+This enables `/plugin/notes/...` and, for executable/hybrid plugins,
+`/app/notes`. The configured `[app].ui_plugin` glue is always reachable so the
+webview keeps working. Dependencies calls are host-mediated and do not need
+`expose`. `owasidea dev` and the smoke/test harness expose every plugin
+(`OWASIDEA_DEV_MODE=1`), so the flag is enforced by `owasidea run` and bundles.
+Legacy manifests without `http_exposed` are treated as exposed; rebuild with
+1.4 to apply the new default.
+
 ## HTTP call names
 
 The generic dispatcher uses exact WIT names. Kebab-case stays kebab-case:

@@ -85,6 +85,8 @@ compose_with = ["core-rust"]
 path = "plugins/webhook-go"
 language = "go"
 type = "executable"
+# The Shipyard UI calls /app/webhook-go directly.
+expose = true
 
 [plugins.watchtower-rust]
 path = "plugins/watchtower-rust"

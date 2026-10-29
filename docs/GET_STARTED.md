@@ -249,10 +249,12 @@ hot_reload = true
 ui_addr = "127.0.0.1:5180"
 ```
 
-`[app].ui_plugin` names the only plugin the shipped UI may call in production.
-Dev tools keep access to every plugin. A plugin calls a local dependency through
-generated WIT bindings by declaring `dependencies = ["provider"]`; the same edge
-cannot also use `compose_with`.
+`[app].ui_plugin` names the plugin the shipped UI calls in production; it is
+always reachable without `expose = true`. Every other plugin is
+deny-by-default: set `expose = true` to open `/plugin/<name>/*` or
+`/app/<name>`. Dev tools keep access to every plugin. A plugin calls a local
+dependency through generated WIT bindings by declaring
+`dependencies = ["provider"]`; the same edge cannot also use `compose_with`.
 
 `ui_addr` fixes the Vite dev address so `owasidea dev`, docs and Playwright all
 use the same URL. If it is occupied, `dev` fails instead of silently choosing

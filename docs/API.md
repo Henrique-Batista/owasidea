@@ -69,16 +69,15 @@ Discovery for a frontend:
 3. `POST /plugin/{name}/call` for library calls, or call `/app/{name}` for an
    executable plugin.
 
-When `[app].ui_plugin` is configured, a production host exposes only that glue
-plugin on app-facing calls/manifests/logs/reload and `/app/{name}`; other names
-return `403`, and `GET /plugins` lists only the glue plugin. Service lifecycle
-routes are also glue-only; the glue uses the typed `service-control` WIT import.
-An executable dependency declared by the glue may still be called at
-`/app/{name}`. `owasidea dev`, the
-smoke/test harness and `OWASIDEA_DEV_MODE=1` keep the developer surface for all
-plugins. `owasidea tui` is only a client: against a production `owasidea run`
-host it sees the restricted surface, so use it with a dev host. CORS is not
-authentication: keep the host on loopback.
+HTTP exposure is deny-by-default. Add `expose = true` to a plugin to make its
+`/plugin/{name}/...` routes or `/app/{name}` reachable from `owasidea run` and
+bundles. When `[app].ui_plugin` is configured, that glue plugin is always
+reachable; other plugins need `expose = true` and `GET /plugins` lists only the
+glue plus exposed plugins. `owasidea dev`, the smoke/test harness and
+`OWASIDEA_DEV_MODE=1` keep the developer surface for all plugins. `owasidea tui`
+is only a client: against a production `owasidea run` host it sees the
+restricted surface, so use it with a dev host. CORS is not authentication: keep
+the host on loopback.
 
 Isolated UI plugins (`js-wasm`) run in an iframe with
 `sandbox="allow-scripts allow-forms"` (opaque origin), so a direct `fetch` to
