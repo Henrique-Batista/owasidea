@@ -74,7 +74,7 @@ test('isolated UI still verifies when WebCrypto is unavailable', async ({ page }
   await expect(page.locator('iframe[title="board-svelte isolated UI"]')).toBeVisible();
 });
 
-test('board-svelte calls changelog-ts.render via bridge', async ({ page }) => {
+test('board-svelte calls changelog-ts.render through app-glue via bridge', async ({ page }) => {
   await page.goto('/#/ui');
   await page.locator('button.open-ui[data-ui="board-svelte"]').click();
   const frame = page.frameLocator('iframe[title="board-svelte isolated UI"]');
@@ -85,7 +85,7 @@ test('board-svelte calls changelog-ts.render via bridge', async ({ page }) => {
 
 test('inventory exposes manifests and logs explain their source', async ({ page }) => {
   await page.goto('/#/inventory');
-  await expect(page.locator('.plugin-card')).toHaveCount(9);
+  await expect(page.locator('.plugin-card')).toHaveCount(10);
   await expect(page.locator('body')).toContainText('Go dependency audit');
   await page.locator('button.inspect[data-plugin="core-rust"]').click();
   await expect(page.locator('#manifest-json')).toContainText('shipyard:core/readiness');

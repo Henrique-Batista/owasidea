@@ -10,5 +10,6 @@
   is `start-service`, optional `service-status`, and host drop on stop.
 - Permission UX: manifests remain the source of truth. UI shows generated
   effective permissions; no runtime file picker or capability escalation UI.
-- Remote registry: static HTTPS index, immutable versioned packages, Ed25519
-  publisher trust pinned out-of-band. CI publishing; no hosted account service.
+- Remote registry: **removed in 1.1.** Plugins are source repositories and
+  build artifacts; there is no hosted index, publisher account, or marketplace.
+  (The 1.0 registry experiment is superseded by this decision.)

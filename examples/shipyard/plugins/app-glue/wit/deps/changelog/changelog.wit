@@ -1,0 +1,2 @@
+package shipyard:changelog@0.1.0;
+interface api { render: func(version: string, changes: list<string>) -> string; }

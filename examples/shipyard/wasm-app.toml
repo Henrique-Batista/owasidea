@@ -2,6 +2,7 @@
 name = "shipyard"
 version = "0.1.0"
 identifier = "dev.owasidea.shipyard"
+ui_plugin = "app-glue"
 
 [host]
 addr = "127.0.0.1:8790"
@@ -10,15 +11,6 @@ addr = "127.0.0.1:8790"
 path = "desktop"
 ui = "ui"
 output = "dist"
-
-[signing]
-key = "keys/owasidea.key"
-public_key = "keys/owasidea.pub"
-require = true
-
-# Demo/release key: create it once with `owasidea keygen --out keys` (or point
-# `key`/`public_key` at a protected release key). Keys are never generated
-# implicitly, so a release build fails instead of trusting a fresh key.
 
 # Tauri updater (RL-02). See docs/UPDATER.md. The private signing key stays in
 # the environment (TAURI_SIGNING_PRIVATE_KEY); never commit it.
@@ -31,11 +23,27 @@ require = true
 [test]
 ui = ["npx", "playwright", "test", "--config", "playwright.config.ts"]
 
+[plugins.app-glue]
+path = "plugins/app-glue"
+language = "rust"
+type = "library"
+dependencies = [
+  "core-rust",
+  "audit-go",
+  "changelog-ts",
+  "policy-csharp",
+  "fingerprint-c",
+  "metrics-cpp",
+  "pipeline-go",
+  "watchtower-rust",
+  "webhook-go",
+]
+
 [plugins.core-rust]
 path = "plugins/core-rust"
 language = "rust"
 type = "library"
-kv = "shipyard-core:read-write"
+kv = ["shipyard-core:read-write"]
 fs = ["reports:read-write"]
 persistent = true
 
@@ -68,7 +76,7 @@ type = "library"
 path = "plugins/pipeline-go"
 language = "go"
 type = "library"
-kv = "shipyard-pipeline:read-write"
+kv = ["shipyard-pipeline:read-write"]
 fs = ["reports:read-write"]
 persistent = true
 compose_with = ["core-rust"]
@@ -90,7 +98,7 @@ type = "ui"
 runtime = "js-wasm"
 ui_entry = "index.html"
 ui_build = ["npm", "run", "build"]
-bridge = ["changelog-ts.render"]
+bridge = ["app-glue.call"]
 
 [plugins.map-react]
 path = "plugins/map-react"
@@ -104,6 +112,24 @@ ui_build = ["npm", "run", "build"]
 watch = true
 hot_reload = true
 ui_addr = "127.0.0.1:5180"
+
+[[smoke.calls]]
+plugin = "app-glue"
+function = "call"
+args = ["core-rust", "score", "[[\"feat: add\"],9,10]"]
+expect_contains = "40"
+
+[[smoke.calls]]
+plugin = "app-glue"
+function = "service"
+args = ["watchtower-rust", "start"]
+expect_contains = "watchtower"
+
+[[smoke.calls]]
+plugin = "app-glue"
+function = "service"
+args = ["watchtower-rust", "stop"]
+expect_contains = "stopped"
 
 [[smoke.calls]]
 plugin = "core-rust"

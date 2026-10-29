@@ -1,0 +1,15 @@
+package shipyard:glue@0.1.0;
+
+world glue {
+    import shipyard:core/readiness@0.1.0;
+    import shipyard:audit/api@0.1.0;
+    import shipyard:changelog/api@0.1.0;
+    import shipyard:policy/api@0.1.0;
+    import shipyard:fingerprint/api@0.1.0;
+    import shipyard:metrics/api@0.1.0;
+    import shipyard:pipeline/api@0.1.0;
+    import poc:host/service-control@0.1.0;
+
+    export call: func(plugin: string, function: string, args-json: string) -> result<string, string>;
+    export service: func(plugin: string, action: string) -> result<string, string>;
+}

@@ -10,6 +10,7 @@ import (
 	witRuntime "go.bytecodealliance.org/pkg/wit/runtime"
 	"runtime"
 	"unsafe"
+	"wit_component/export_shipyard_pipeline_api"
 	"wit_component/export_wit_world"
 )
 
@@ -42,6 +43,34 @@ func wasm_export_wit_world_run(arg0 uintptr, arg1 uint32, arg2 uintptr, arg3 uin
 
 //go:wasmexport cabi_post_run
 func wasm_export_post_return_wit_world_run(result uintptr) {
+	syncExportPinner.Unpin()
+}
+
+//go:wasmexport shipyard:pipeline/api@0.1.0#run
+func wasm_export_shipyard_pipeline_api_run(arg0 uintptr, arg1 uint32, arg2 uintptr, arg3 uint32, arg4 int32, arg5 int32) uintptr {
+
+	pinner := &syncExportPinner
+	value := unsafe.String((*uint8)(unsafe.Pointer(arg0)), arg1)
+	result := make([]string, 0, arg3)
+	for index := 0; index < int(arg3); index++ {
+		base := unsafe.Add(unsafe.Pointer(arg2), index*(2*4))
+		value0 := unsafe.String((*uint8)(unsafe.Pointer(uintptr(*(*uint32)(unsafe.Add(unsafe.Pointer(base), 0))))), *(*uint32)(unsafe.Add(unsafe.Pointer(base), 4)))
+
+		result = append(result, value0)
+	}
+
+	witRuntime.Unpin()
+	result1 := export_shipyard_pipeline_api.Run(value, result, uint32(arg4), uint32(arg5))
+	utf8 := unsafe.Pointer(unsafe.StringData(result1))
+	pinner.Pin(utf8)
+	*(*uint32)(unsafe.Add(unsafe.Pointer(exportReturnArea), 4)) = uint32(uint32(len(result1)))
+	*(*uint32)(unsafe.Add(unsafe.Pointer(exportReturnArea), 0)) = uint32(uintptr(uintptr(utf8)))
+	return exportReturnArea
+
+}
+
+//go:wasmexport cabi_post_shipyard:pipeline/api@0.1.0#run
+func wasm_export_post_return_shipyard_pipeline_api_run(result uintptr) {
 	syncExportPinner.Unpin()
 }
 

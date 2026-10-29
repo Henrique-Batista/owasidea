@@ -53,8 +53,14 @@
         bridge = await m.connect();
         (window as any).__owasideaBridge = bridge;
       }
-      const result = await bridge.call('changelog-ts', 'render', ['v1.0.0', ['feat: add']]);
-      bridgeResult = String(result ?? '');
+      const result: any = await bridge.call('app-glue', 'call', [
+        'changelog-ts',
+        'render',
+        JSON.stringify(['v1.0.0', ['feat: add']]),
+      ]);
+      const value = result && typeof result === 'object' && 'ok' in result ? result.ok : result;
+      const text = typeof value === 'string' ? JSON.parse(value) : value;
+      bridgeResult = String(text ?? '');
     } catch (e: any) {
       bridgeError = e && e.code ? `${e.code}: ${e.message}` : String(e);
     } finally {

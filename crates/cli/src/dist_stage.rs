@@ -1,44 +1,38 @@
 //! Stage the runtime payload into the bundle output directory.
 //!
 //! `owasidea bundle` writes installer artifacts (`.deb`, `.rpm`, `.AppImage`,
-//! ...). Verification, however, needs the manifests, the component bytes, the
-//! trust key and the UI assets in the same tree, otherwise `owasidea verify
-//! dist/` has nothing to check and reports a misleading success.
+//! ...). Verification, however, needs the manifests, the component bytes and
+//! the UI assets in the same tree, otherwise `owasidea verify dist/` has
+//! nothing to check and reports a misleading success.
 //!
 //! This module copies that payload next to the artifacts so a release directory
 //! is self-describing and verifiable (FIX-05).
 
 use anyhow::Context;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct StageReport {
     pub manifests: usize,
     pub components: usize,
     pub ui: bool,
-    pub trust_key: bool,
 }
 
 impl StageReport {
     pub fn summary(&self) -> String {
         format!(
-            "{} manifest(s), {} component(s), UI {}, trust key {}",
+            "{} manifest(s), {} component(s), UI {}",
             self.manifests,
             self.components,
-            if self.ui { "staged" } else { "absent" },
-            if self.trust_key { "staged" } else { "absent" }
+            if self.ui { "staged" } else { "absent" }
         )
     }
 }
 
-/// Copy `manifests/`, `plugins/*/<name>.component.wasm`, `ui/public/` and the
-/// public key into `output`. Existing staged copies are replaced so a removed
-/// plugin does not leave a stale manifest behind.
-pub fn stage_dist(
-    root: &Path,
-    output: &Path,
-    public_key: Option<&Path>,
-) -> anyhow::Result<StageReport> {
+/// Copy `manifests/`, `plugins/*/<name>.component.wasm` and `ui/public/` into
+/// `output`. Existing staged copies are replaced so a removed plugin does not
+/// leave a stale manifest behind.
+pub fn stage_dist(root: &Path, output: &Path) -> anyhow::Result<StageReport> {
     let manifests_src = root.join("manifests");
     if !manifests_src.is_dir() {
         // `bundle --no-build` may run before the first build. Keep the previous
@@ -105,14 +99,6 @@ pub fn stage_dist(
         report.ui = true;
     }
 
-    if let Some(public_key) = public_key.filter(|path| path.is_file()) {
-        let trust = output.join("trust");
-        std::fs::create_dir_all(&trust)?;
-        std::fs::copy(public_key, trust.join("owasidea.pub"))
-            .with_context(|| format!("copy trust key {}", public_key.display()))?;
-        report.trust_key = true;
-    }
-
     Ok(report)
 }
 
@@ -129,27 +115,16 @@ fn clear_staged(output: &Path) {
     for path in [
         output.join("manifests"),
         output.join("plugins"),
-        output.join("trust"),
         output.join("ui").join("public"),
     ] {
         let _ = std::fs::remove_dir_all(path);
     }
 }
 
-/// Resolve the public key used by `bundle` for the staged trust store.
-pub fn resolve_public_key(root: &Path, configured: Option<&str>) -> Option<PathBuf> {
-    let configured = configured
-        .map(|path| crate::app_path(root, Path::new(path)))
-        .filter(|path| path.is_file());
-    configured.or_else(|| {
-        let fallback = root.join("keys").join("owasidea.pub");
-        fallback.is_file().then_some(fallback)
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn temp_root(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
@@ -179,8 +154,7 @@ mod tests {
 
         let dist = root.join("dist");
         std::fs::create_dir_all(&dist).unwrap();
-        let public_key = resolve_public_key(&root, None);
-        let report = stage_dist(&root, &dist, public_key.as_deref()).unwrap();
+        let report = stage_dist(&root, &dist).unwrap();
 
         assert_eq!(
             report,
@@ -188,13 +162,11 @@ mod tests {
                 manifests: 1,
                 components: 1,
                 ui: true,
-                trust_key: true,
             }
         );
         assert!(dist.join("manifests/demo.manifest.json").is_file());
         assert!(dist.join("plugins/demo/demo.component.wasm").is_file());
         assert!(dist.join("ui/public/ui-plugins.json").is_file());
-        assert!(dist.join("trust/owasidea.pub").is_file());
     }
 
     #[test]
@@ -208,7 +180,7 @@ mod tests {
         std::fs::create_dir_all(dist.join("plugins/stale")).unwrap();
         std::fs::write(dist.join("plugins/stale/stale.component.wasm"), b"old").unwrap();
 
-        stage_dist(&root, &dist, None).unwrap();
+        stage_dist(&root, &dist).unwrap();
 
         assert!(!dist.join("plugins/stale").exists());
         assert!(dist.join("plugins/demo/demo.component.wasm").is_file());
@@ -220,7 +192,7 @@ mod tests {
         let dist = root.join("dist");
         std::fs::create_dir_all(dist.join("manifests")).unwrap();
         std::fs::write(dist.join("manifests/old.manifest.json"), b"{}").unwrap();
-        let report = stage_dist(&root, &dist, None).unwrap();
+        let report = stage_dist(&root, &dist).unwrap();
         assert_eq!(report, StageReport::default());
         assert!(!dist.join("manifests").exists());
     }

@@ -1,9 +1,10 @@
 # Owasidea
 
-> Owasidea is a polyglot desktop app framework. Rust, Go, TypeScript, C#, C, and
-> C++ plugins compile to WASI Component Model modules described by WIT. A Rust
-> Wasmtime host enforces manifests and capabilities; a Tauri 2 shell provides
-> the desktop app; webview UI plugins are isolated static bundles.
+> Owasidea is a polyglot desktop and CLI/headless app framework. Rust, Go,
+> TypeScript, C#, C, and C++ plugins compile to WASI Component Model modules
+> described by WIT. A Rust Wasmtime host enforces manifests and capabilities; a
+> Tauri 2 shell provides the desktop app; webview UI plugins are isolated static
+> bundles.
 
 ## Start here
 
@@ -21,6 +22,7 @@
 - [ABI fields](docs/ABI.md): manifest schema_version, host_abi, min_host.
 - [Errors](docs/ERRORS.md): stable OWASIDEA_E_* codes and `owasidea explain`.
 - [Migration 0.x to 1.0](docs/MIGRATION_0_X_TO_1_0.md): config, manifest, bridge, updater, ABI and CLI steps.
+- [Migration 1.1 to 1.2](docs/MIGRATION_1_1_TO_1_2.md): ABI 2, multi-KV, glue UI, dependencies and exact network grants.
 - [Changelog](CHANGELOG.md): what shipped in each release.
 - [Clean build environments](docs/CLEAN_BUILD.md): bubblewrap isolation for AppImage, plus Arch devtools/Debian debootstrap chroots without Docker.
 - [Reference app](examples/shipyard/README.md): real six-language app with isolated Svelte/React UI and Tauri packaging.
@@ -28,9 +30,9 @@
 - [CLI](docs/CLI.md): commands and flags.
 - [HTTP API](docs/API.md): endpoints and JSON call contract.
 - [Plugin authoring](docs/PLUGIN_AUTHORING.md): language-specific build outputs.
+- [Runtime model](docs/RUNTIME_MODEL.md): UI/plugin routes, plugin-to-plugin, KV, network, sandbox timing.
 - [UI plugins](docs/UI_PLUGINS.md): static bundles, sandboxing, bridge SDK.
 - [Security](docs/SECURITY.md): trust boundaries and production policy.
-- [Registry](docs/REGISTRY.md): signed HTTPS index, install, lockfile.
 - [Roadmap](docs/ROADMAP.md): shipped milestones and remaining backlog.
 - [1.0 plan](docs/plans/ROADMAP_IMPLEMENTATION_PLAN.md): phases, gates and budgets.
 - [1.0 status](docs/plans/ROADMAP_STATUS.md): item and gate tracker.
@@ -44,7 +46,8 @@
 - Streaming jobs (RL-06) are experimental and require `--features streaming`.
 - WebView2 is **not validated**; unsupported engines must fail closed with
   `BRIDGE_DISABLED` and keep the iframe isolated.
-- Performance budgets are defined but not yet measured (G3).
+- Performance budgets are measured on Linux with a warm Wasmtime cache (G3);
+  cold-start distributions and Windows/macOS are not generalized.
 
 ## Reference commands
 
@@ -55,6 +58,7 @@ owasidea build
 owasidea test
 owasidea dev
 owasidea bundle
+owasidea bundle --target cli
 ```
 
 ## Invariants

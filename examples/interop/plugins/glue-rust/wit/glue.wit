@@ -1,0 +1,11 @@
+package interop:glue@0.1.0;
+
+world glue {
+    import interop:provider/catalog@0.1.0;
+    import poc:host/host-kv@0.1.0;
+
+    export call-provider: func(value: string) -> string;
+    export remember: func(key: string, value: string) -> result<string, string>;
+    export recall: func(key: string) -> option<string>;
+    export cache-read-only: func() -> bool;
+}

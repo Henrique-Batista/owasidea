@@ -9,7 +9,8 @@ starting points, or as fixtures when you change the framework.
 | [`hello`](hello/README.md) | the smallest app: one Rust library, a plain TypeScript UI, and a contract generated from attributes | `greeter` (library) | 2 smoke calls, 3 UI tests |
 | [`notes`](notes/README.md) | host key/value store and the `kv` capability | `notes` (library, `kv`) | 4 smoke calls, 4 UI tests |
 | [`ticker`](ticker/README.md) | stateful service lifecycle and the 409 reload rule | `ticker` (service) | service smoke, 4 UI tests |
-| [`shipyard`](shipyard/README.md) | the reference app: 11 plugins in 6 languages, Tauri packaging | see README | the full suite |
+| [`interop`](interop/README.md) | Rust glue calls a Go provider through generated WIT bindings; two KV namespaces and a declared dependency cycle | `glue-rust`, `provider-go` | 4 smoke calls |
+| [`shipyard`](shipyard/README.md) | the reference app: 12 plugins in 6 languages, glue UI, Tauri packaging | see README | the full suite |
 
 ## Run an example
 
@@ -42,4 +43,5 @@ port (5201, 5202, 5203, 5180), so they can run side by side.
 - Playwright browsers: `npx playwright install chromium`.
 
 Shipyard also needs Go with `componentize-go`, .NET, and wasi-sdk for its C/C++
-plugins. The three small examples need only the Rust toolchain.
+plugins. `interop` needs Go with `componentize-go`; `hello`, `notes` and `ticker`
+need only the Rust toolchain.

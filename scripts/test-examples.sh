@@ -16,7 +16,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-EXAMPLES=(hello notes ticker)
+EXAMPLES=(hello notes ticker interop)
 
 if [ -n "${OWASIDEA_BIN:-}" ]; then
   BIN="$OWASIDEA_BIN"

@@ -2,7 +2,7 @@
 //! holds no state of its own.
 
 use super::api::PluginRow;
-use super::state::{App, Level, Tab};
+use super::state::{App, Level, Tab, KEY_HINTS};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
@@ -365,29 +365,42 @@ fn draw_call(frame: &mut Frame, area: Rect, app: &App, block: Block) {
 }
 
 fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
-    let block = Block::bordered().border_style(Style::default().fg(DIM));
-    let status = match (&app.busy, &app.status) {
-        (Some(busy), _) => Line::from(Span::styled(format!("⟳ {busy}"), Style::default().fg(WARN))),
-        (None, Some((level, text))) => Line::from(Span::styled(
-            text.clone(),
-            Style::default().fg(match level {
-                Level::Info => OK,
-                Level::Error => BAD,
-            }),
-        )),
-        (None, None) => Line::from(Span::styled(
-            if app.tab == Tab::Call && app.call.editing {
-                "editing args — Enter runs the export, Esc stops editing"
-            } else {
-                "ready"
-            },
-            Style::default().fg(DIM),
-        )),
+    let block = Block::bordered().border_style(if app.build_error.is_some() {
+        Style::default().fg(BAD)
+    } else {
+        Style::default().fg(DIM)
+    });
+    let status = if let Some(error) = &app.build_error {
+        Line::from(Span::styled(
+            format!("BUILD FAILED  {error}"),
+            Style::default().fg(BAD).add_modifier(Modifier::BOLD),
+        ))
+    } else {
+        match (&app.busy, &app.status) {
+            (Some(busy), _) => {
+                Line::from(Span::styled(format!("⟳ {busy}"), Style::default().fg(WARN)))
+            }
+            (None, Some((level, text))) => Line::from(Span::styled(
+                text.clone(),
+                Style::default().fg(match level {
+                    Level::Info => OK,
+                    Level::Error => BAD,
+                }),
+            )),
+            (None, None) => Line::from(Span::styled(
+                if app.tab == Tab::Call && app.call.editing {
+                    "editing args — Enter runs the export, Esc stops editing"
+                } else {
+                    "ready"
+                },
+                Style::default().fg(DIM),
+            )),
+        }
     };
     let keys = if app.tab == Tab::Call && app.call.editing {
         ""
     } else {
-        "↑↓ plugin · Tab view · r reload · s service · R rebuild · o open UI · ? help · q quit"
+        KEY_HINTS
     };
     let text = Text::from(vec![
         status,
@@ -407,7 +420,10 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         ("o", "open UI (or host) in the browser"),
         ("Call view: ← / →", "choose export"),
         ("Call view: Enter", "edit args; Enter runs; Esc stops"),
-        ("?", "toggle this help"),
+        (
+            "? / click",
+            "toggle this help; mouse clicks tabs, plugins and footer buttons",
+        ),
         ("q / Ctrl+C", "quit (stops dev children)"),
     ];
     let mut lines: Vec<Line> = rows

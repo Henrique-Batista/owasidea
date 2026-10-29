@@ -11,18 +11,77 @@ below; see [`docs/UPDATER.md`](docs/UPDATER.md).
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-10-28
+
+### Breaking
+
+- **Host ABI 2 / manifest `schema_version: 2`.** ABI 1 manifests are rejected
+  with migration guidance; existing 1.1 apps stay on the 1.1 host. See
+  [`docs/MIGRATION_1_1_TO_1_2.md`](docs/MIGRATION_1_1_TO_1_2.md) and the
+  approved exception in [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md).
+- `kv` is a list of namespace grants: `kv = ["state:read-write"]`.
+- HTTP/socket allowlists are exact `host:port` / `IP:port` pairs. Plaintext
+  HTTP is loopback-only.
+
+### Added
+
+- Host-mediated typed runtime dependencies between library plugins using
+  generated WIT bindings; cycles are allowed and runtime re-entry fails with
+  `OWASIDEA_E_DEPENDENCY_REENTRANT_CALL`.
+- Typed `poc:host/service-control` for declared service dependencies:
+  `start`, typed `status`, and `stop` by dropping the host instance.
+- Multi-namespace KV resource handles with per-grant read/write enforcement and
+  explicit guest errors.
+- `[app].ui_plugin` glue-only production app surface; dev tools keep full access.
+  Shipyard now routes workbench and service actions through `app-glue`.
+- `owasidea migrate [--write]` for supported 1.1 config forms.
+- Permission presets `network-outbound` and `app-data`, expanded into
+  inspectable effective permissions.
+- `examples/interop`: Rust glue → Go provider, two KV namespaces and a declared
+  dependency cycle.
+
+### Fixed
+
+- HTTP outbound checks host, effective port and scheme on every request; exact
+  allowlist hostnames are pinned at load with TLS SNI/certificate validation,
+  and denied writes or unknown KV namespaces return guest errors instead of
+  silent success.
+
+## [1.1.0] - 2026-10-28
+
 ### Added
 
 - `docs/README.md` is the documentation index (guides, reference, operations,
-  plans, ADRs) with an explicit status table for 1.0 claims: bridge and typed
+  plans, ADRs) with an explicit status table for 1.1 claims: bridge and typed
   client implemented, jobs experimental, WebView2 not validated/fail-closed,
-  performance budgets not yet measured (G4).
+  performance budgets measured on Linux with warm cache (G3).
 - `docs/OPTIONAL_TOOLCHAINS.md` documents jco, componentize-dotnet/.NET 10,
   trunk, wasi-sdk, C/C++ and Tauri packaging: versions, per-OS install commands,
   `doctor --fix` / `tools.lock` semantics and limitations (FIX-06).
 - `tools.lock` now lists install commands for `cargo-component`, `wasm-tools`,
   `go`, `node` and `npm`, so `owasidea doctor --fix` covers the required
   toolchain (FIX-06).
+- `owasidea bundle --target cli` produces a headless directory with the host
+  binary, manifests, components and `run.sh`/`run.bat`.
+- TUI mouse support: clickable tabs, plugin list and footer buttons.
+- `owasidea dev` captures the initial build output into the dashboard and keeps
+  a persistent `BUILD FAILED` banner until a rebuild succeeds.
+
+### Removed
+
+- Remote plugin registry (`owasidea registry search|install|update|outdated`,
+  `plugins.lock`, `docs/REGISTRY.md`, registry tests). Plugins are source
+  repositories and build artifacts; there is no hosted index or marketplace.
+- Dead `crates/macros` duplicate of `crates/owasidea`.
+- Stray `main`/`directories` fields from the root `package.json`.
+- Plugin manifest signing (`owasidea keygen/sign`, `[signing]`,
+  `OWASIDEA_REQUIRE_SIGNATURES`, `OWASIDEA_PUBLIC_KEY`, trust-key staging).
+  Manifests are unsigned and checked by SHA-256; release integrity comes from
+  the build pipeline and OS code signing. `owasidea verify` no longer takes
+  `--public-key`/`--allow-dist-trust`.
+- Root demo app (`plugins/`, `manifests/`, `data/`, `wasm-app.toml`,
+  `crates/desktop`) and the typed POC routes (`dial-tcp`, `start-server`,
+  `bind-udp`, `tls-probe`, `dial-echo`, `echo-udp`, `parse-address`).
 
 ### Fixed
 
@@ -30,12 +89,9 @@ below; see [`docs/UPDATER.md`](docs/UPDATER.md).
   alongside `ui/main.ts`, so `vite build` on a freshly scaffolded app resolves
   `./bridge.ts` instead of failing with "Could not resolve" (G0). Unknown
   presets are rejected, and the `minimal` preset still writes no `ui/`.
-- Typed POC routes (`dial-tcp`, `start-server`, `bind-udp`, `tls-probe`,
-  `dial-echo`, `echo-udp`, `parse-address`) run under the manifest
-  `timeout_ms` (default 10 s), answer `504` instead of hanging, and release the
-  `max_instances` slot. `/app/{name}` now filters guest response headers to an
-  allowlist, drops `set-cookie`/`access-control-*`, adds `nosniff` and CSP
-  `sandbox`, and serves HTML/JS/CSS as `text/plain`. The optional tailcat routes
+- `/app/{name}` filters guest response headers to an allowlist, drops
+  `set-cookie`/`access-control-*`, adds `nosniff` and CSP `sandbox`, and serves
+  HTML/JS/CSS as `text/plain`. The optional tailcat routes
   are registered only when the plugin is loaded or
   `OWASIDEA_ENABLE_TAILCAT=1` is set. `owasidea build` propagates
   `render_targets` failures instead of reporting a stale runtime descriptor as a
@@ -46,25 +102,14 @@ below; see [`docs/UPDATER.md`](docs/UPDATER.md).
   port without re-sending `init` after any navigation or reload. In-flight calls
   are cancelled once, replay ids are evicted instead of cleared, and the bridge
   timeout honours the manifest (10 s default, 30 s cap) (G1).
-- `crates/desktop` now creates and sets `OWASIDEA_DATA_DIR` to the platform
-  app-data directory, and resolves the bundled trust key, before starting the
-  host (G0).
-- `bundle.resources` is generated from `wasm-app.toml` (manifests, headless
-  components, trust key, `runtime.json`) instead of being hand-maintained in
-  `tauri.conf.json` (G0).
-- `owasidea verify` requires a pinned trust root (`--public-key` or
-  `OWASIDEA_PUBLIC_KEY`) and rejects a key staged inside `dist/` with
-  `TRUST_ROOT_UNPINNED`; `--allow-dist-trust` is opt-in (G1).
-- `examples/shipyard` no longer sets `[signing].generate = true`; create the
-  demo key with `owasidea keygen --out keys` (G1).
 - Windows CI signing steps (plan, PFX import, NSIS bundle, Authenticode) run
   only on push/tag builds, never on `pull_request` (G1).
 - `owasidea validate --json` now emits a stable `{ok, plugins, errors,
   warnings}` document (per-plugin status, ABI warnings included) and still exits
   non-zero on drift; text output is unchanged without `--json` (FIX-02).
-- `owasidea bundle` stages `manifests/`, components, `ui/public/` and the trust
-  key into the output directory, and `owasidea verify dist/` fails with
-  `NO_MANIFESTS` instead of silently passing on an artifact-only directory (FIX-05).
+- `owasidea bundle` stages `manifests/`, components and `ui/public/` into the
+  output directory, and `owasidea verify dist/` fails with `NO_MANIFESTS`
+  instead of silently passing on an artifact-only directory (FIX-05).
 - CI builds and verifies `deb` + `rpm`, uploads `linux-packages`, and runs the
   AppImage job with `--isolate-host-libs`, verification, upload and a safe skip
   when `bwrap` is unavailable (FIX-05).

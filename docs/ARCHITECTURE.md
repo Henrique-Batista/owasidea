@@ -5,14 +5,14 @@
 - `crates/host` — reusable Rust library: manifest loading, capability broker,
   Wasmtime runtime, HTTP API, and SSE logs. Independent of Tauri.
 - `crates/cli` — `owasidea` binary (clap), reuses host and owns build,
-  composition, validation, dev-watch, signing, and registry flows.
-- `crates/desktop` — generic Tauri 2 shell for the repository root app.
-- `crates/macros` — Rust source-generator attributes.
+  composition, validation, dev-watch, and bundle flows.
+- `crates/owasidea` — Rust attribute markers used by the source-generated WIT
+  flow (`#[owasidea::world]`, `#[owasidea::export]`).
 - `examples/shipyard` — full reference app with its own plugins, UI, Tauri shell,
   manifests, scripts, and tests.
-- `manifests/*.manifest.json` — generated, never hand-edit.
-- `scripts/gen-manifest.py` — legacy helper used by the root demo scripts.
-  `owasidea build` performs the same derivation in Rust.
+- per-app `manifests/*.manifest.json` — generated, never hand-edit.
+- `owasidea build` derives manifests from the real component WIT in Rust; the
+  old Python generator was removed in 1.1.
 
 ## Runtime
 
@@ -34,14 +34,16 @@ shell. Paths are relative to the config file's directory.
 
 `owasidea build`:
 
-1. Compiles ordinary plugins with their native toolchains.
-2. Installs missing npm dependencies and auto-detects wasi-sdk/adapter.
-3. Compiles `compose_with` clients and links provider components with
+1. Resolves every plugin contract first, so runtime dependency cycles do not
+   impose a build order.
+2. Compiles ordinary plugins with their native toolchains.
+3. Installs missing npm dependencies and auto-detects wasi-sdk/adapter.
+4. Compiles `compose_with` clients and links provider components with
    `wasm-tools compose`.
-4. Derives imports/exports from `wasm-tools component wit --json`.
-5. Writes manifests with checksums, permission objects, resource limits, and
-   state metadata.
-6. Signs manifests when `[signing]` is configured.
+5. Validates that every non-host import resolves to a declared dependency.
+6. Derives imports/exports from `wasm-tools component wit --json` and writes ABI
+   2 manifests with checksums, permission objects (including expanded presets),
+   resource limits, and state metadata.
 7. Copies and hashes UI-plugin static bundles into `ui/public/plugins/`.
 
 The same config drives the developer workflow: `[smoke]` contains declarative
@@ -53,10 +55,11 @@ the app directory.
 
 The host verifies actual component imports against manifest declarations before
 instantiation. WASI filesystem access is limited to canonicalized declared
-preopens; sockets default-deny and require explicit outbound hosts/IPs or local
-inbound bind IPs. `wasi:http` outbound uses exact host allowlists. Environment is
+preopens; sockets default-deny and require explicit outbound `host:port` or
+local inbound `IP:port` grants. `wasi:http` outbound uses exact `host:port`
+allowlists and checks scheme on every request. Environment is
 not inherited; only the tailcat integration receives its explicitly selected
-variables. Ed25519 signatures bind the manifest and component. See
+variables. Manifests are unsigned; SHA-256 binds the component bytes. See
 `docs/SECURITY.md` for production policy and remaining OS-level limits.
 
 Mutable host state is rooted at `OWASIDEA_DATA_DIR` when set, otherwise `./data`.
@@ -68,13 +71,12 @@ variable to the platform app-data directory before starting the host.
 
 The Tauri shell embeds the host and serves the built frontend from
 `frontendDist`. `owasidea bundle` renders `bundle.resources` from
-`wasm-app.toml` — the manifests directory, every headless component, the trust
-key and the runtime descriptor — so the layout is generated, not hand-listed:
+`wasm-app.toml` — the manifests directory, every headless component and the
+runtime descriptor — so the layout is generated, not hand-listed:
 
 ```
 $RESOURCE/manifests/<name>.manifest.json
 $RESOURCE/plugins/<name>/<name>.component.wasm
-$RESOURCE/trust/owasidea.pub
 $RESOURCE/owasidea.runtime.json
 ```
 
@@ -83,8 +85,8 @@ both name the same destination. The UI is embedded through `frontendDist`
 (staged as a resource only when the shell has no frontend directory). Tauri
 platform configs (`tauri.windows.conf.json`) select NSIS and `.ico` while the
 base config owns targets and icons. At startup the shell resolves
-`$RESOURCE/manifests`, creates and sets `OWASIDEA_DATA_DIR`, resolves the
-bundled trust key, and runs `owasidea_host::run`. The webview talks to the host
+`$RESOURCE/manifests`, creates and sets `OWASIDEA_DATA_DIR`, and runs
+`owasidea_host::run`. The webview talks to the host
 over loopback HTTP; it never links Wasmtime or receives native plugin
 capabilities.
 

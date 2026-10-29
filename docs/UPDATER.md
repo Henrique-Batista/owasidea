@@ -28,11 +28,8 @@ It writes:
 - `~/.tauri/owasidea-updater.key` — **private** key. Never commit it. In CI it
   lives in the `TAURI_SIGNING_PRIVATE_KEY` secret (content, not path).
 - `~/.tauri/owasidea-updater.key.pub` — public key. Safe to commit; point
-  `[updater].pubkey` at it (for example `trust/owasidea-updater.pub`; `keys/`
+  `[updater].pubkey` at it (for example `keys/owasidea-updater.pub`; `keys/`
   is gitignored because it holds private keys).
-
-The plugin signing key (`[signing]` / `keys/owasidea.key`) is **different**: it
-signs plugin manifests. Do not reuse it for updates.
 
 `latest.json` itself is not signed. The updater verifies the signature of the
 downloaded artifact against the configured public key; the manifest only
@@ -243,7 +240,7 @@ or to the generated Tauri config.
 
 ## 7. Runtime behaviour
 
-`crates/desktop/src/updater.rs` (and the Shipyard shell) registers the plugin and
+The Shipyard shell (`examples/shipyard/desktop/src/updater.rs`) registers the plugin and
 exposes:
 
 - `updater_check` — builds the updater from the generated config plus the

@@ -1,7 +1,0 @@
-package poc:composed-go@0.1.0;
-
-world composed-go {
-    import poc:notes/api@0.1.0;
-
-    export run: func(name: string) -> string;
-}

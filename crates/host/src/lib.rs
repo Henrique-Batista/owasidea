@@ -6,7 +6,7 @@ use axum::{
     middleware,
     response::{
         sse::{Event, KeepAlive, Sse},
-        Response,
+        IntoResponse, Response,
     },
     routing::{get, post},
     Json, Router,
@@ -24,13 +24,16 @@ use std::{
 use tokio::{sync::Mutex, task::JoinHandle};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::Instrument;
-use wasmtime::component::{Component, Linker, ResourceTable, Type, Val};
+use wasmtime::component::{
+    types::ComponentItem, Component, Linker, Resource, ResourceTable, ResourceType, Type, Val,
+};
 use wasmtime::{Engine, Store};
 use wasmtime_wasi::{
     sockets::SocketAddrUse, FsPerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView,
 };
 use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpCtxView, WasiHttpView};
 
+mod http_client;
 mod otel;
 mod plugin_metrics;
 
@@ -47,7 +50,7 @@ mod resource_limits_tests;
 // Host ABI version (CT-08)
 // ---------------------------------------------------------------------------
 
-pub const HOST_ABI: &str = "1";
+pub const HOST_ABI: &str = "2";
 pub const HOST_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Default timeout for one library call when the manifest does not set
@@ -138,19 +141,21 @@ struct Permissions {
     #[serde(default)]
     network: NetworkPerm,
     #[serde(default)]
-    kv: Option<KvPerm>,
+    kv: Vec<KvPerm>,
     #[serde(default)]
     resources: Resources,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 struct NetworkPerm {
-    /// Outbound hostnames or IP addresses. Hostnames are resolved at instance
-    /// creation and sockets are restricted to the resulting addresses.
+    /// Exact outbound `host:port` pairs. Hostnames are resolved when the store
+    /// is created and sockets are restricted to the resulting address + port.
     #[serde(default)]
     outbound: Vec<String>,
-    /// Local IP addresses the component may bind/listen on. Use explicit
-    /// wildcard addresses only when external reachability is intended.
+    /// `network-outbound` preset: every outbound destination and port.
+    #[serde(default)]
+    outbound_any: bool,
+    /// Local `IP:port` pairs the component may bind/listen on.
     #[serde(default)]
     inbound: Vec<String>,
 }
@@ -172,8 +177,12 @@ fn default_schema_version() -> u32 {
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 struct HttpPerm {
+    /// Exact outbound `host:port` pairs.
     #[serde(default)]
     outbound: Vec<String>,
+    /// `network-outbound` preset: every destination and port.
+    #[serde(default)]
+    outbound_any: bool,
     #[serde(default)]
     inbound: bool,
 }
@@ -182,6 +191,11 @@ struct HttpPerm {
 struct KvPerm {
     namespace: String,
     access: String,
+}
+
+struct KvResource {
+    connection: Arc<std::sync::Mutex<rusqlite::Connection>>,
+    can_write: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -225,10 +239,15 @@ struct PluginRuntime {
     /// compilation dominates call latency for Go/JS/C# components, so it must
     /// not happen on every /call.
     component: Component,
-    kv: Arc<std::sync::Mutex<rusqlite::Connection>>,
+    /// Only configured KV namespaces are opened and linked.
+    kv: HashMap<String, Arc<std::sync::Mutex<rusqlite::Connection>>>,
     logs: Arc<Mutex<LogBuffer>>,
     instance_slots: Arc<tokio::sync::Semaphore>,
     http_pre: Option<wasmtime_wasi_http::p2::bindings::ProxyPre<HostState>>,
+    /// Declared local plugin dependencies from `imports.plugins`.
+    dependencies: Vec<String>,
+    /// Exact HTTP allowlist hostnames resolved once at load/reload time.
+    http_pinned: HashMap<String, Vec<IpAddr>>,
 }
 
 const MAX_LOG_ENTRIES: usize = 1_000;
@@ -339,11 +358,15 @@ struct AppState {
     requests: Arc<std::sync::atomic::AtomicU64>,
     errors: Arc<std::sync::atomic::AtomicU64>,
     plugin_metrics: Arc<plugin_metrics::PluginMetricsMap>,
+    service_control: Arc<ServiceControlContext>,
     dev_mode: bool,
     dev_hot_reload: bool,
     dev_watch_paths: Vec<String>,
     dev_last_reload: Arc<std::sync::RwLock<std::collections::BTreeMap<String, ReloadStatus>>>,
     manifests_dir: PathBuf,
+    /// The configured glue plugin. Production app routes expose only this
+    /// plugin; development keeps access to every configured plugin.
+    app_ui_plugin: Option<String>,
     #[cfg(feature = "streaming")]
     jobs: jobs::JobManager,
 }
@@ -367,6 +390,69 @@ impl AppState {
     fn plugin(&self, name: &str) -> Option<std::sync::Arc<PluginRuntime>> {
         self.plugins.read().ok()?.get(name).cloned()
     }
+
+    /// Clone the plugin handles before building a linker or dispatching a
+    /// dependency call; no lock is held while guest code runs.
+    fn plugins_snapshot(&self) -> HashMap<String, Arc<PluginRuntime>> {
+        self.plugins
+            .read()
+            .map(|plugins| plugins.clone())
+            .unwrap_or_default()
+    }
+}
+
+/// Shared runtime state used by the typed `service-control` host interface.
+/// It deliberately mirrors the corresponding `AppState` fields without storing
+/// `AppState` itself (which would create an Arc cycle through the plugin map).
+struct ServiceControlContext {
+    engine: Engine,
+    plugins: Arc<std::sync::RwLock<HashMap<String, Arc<PluginRuntime>>>>,
+    services: Arc<Mutex<HashMap<String, ServiceSession>>>,
+    service_health: Arc<Mutex<HashMap<String, ServiceHealth>>>,
+    requests: Arc<std::sync::atomic::AtomicU64>,
+    plugin_metrics: Arc<plugin_metrics::PluginMetricsMap>,
+    /// Services with a start in progress; prevents two concurrent starts from
+    /// waiting on the same instance permit.
+    starting: Arc<std::sync::Mutex<HashSet<String>>>,
+}
+
+impl ServiceControlContext {
+    fn plugin(&self, name: &str) -> Option<Arc<PluginRuntime>> {
+        self.plugins.read().ok()?.get(name).cloned()
+    }
+
+    fn plugins_snapshot(&self) -> HashMap<String, Arc<PluginRuntime>> {
+        self.plugins
+            .read()
+            .map(|plugins| plugins.clone())
+            .unwrap_or_default()
+    }
+}
+
+struct StartingGuard {
+    set: Arc<std::sync::Mutex<HashSet<String>>>,
+    name: String,
+}
+
+impl Drop for StartingGuard {
+    fn drop(&mut self) {
+        if let Ok(mut set) = self.set.lock() {
+            set.remove(&self.name);
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_service_control(engine: Engine) -> Arc<ServiceControlContext> {
+    Arc::new(ServiceControlContext {
+        engine,
+        plugins: Arc::new(std::sync::RwLock::new(HashMap::new())),
+        services: Arc::new(Mutex::new(HashMap::new())),
+        service_health: Arc::new(Mutex::new(HashMap::new())),
+        requests: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        plugin_metrics: Arc::new(std::sync::RwLock::new(HashMap::new())),
+        starting: Arc::new(std::sync::Mutex::new(HashSet::new())),
+    })
 }
 
 struct HostState {
@@ -377,11 +463,89 @@ struct HostState {
     limits: wasmtime::StoreLimits,
     _instance_permit: tokio::sync::OwnedSemaphorePermit,
     request_id: u64,
+    /// Active plugin call chain for re-entry detection and depth limits.
+    call_stack: Vec<String>,
 }
 
 #[derive(Clone)]
 struct AllowlistHooks {
     allowed: Vec<String>,
+    outbound_any: bool,
+    /// Exact allowlist entries resolved once when the store is created. HTTP
+    /// connects only to these addresses; TLS still verifies the original host.
+    pinned: HashMap<String, Vec<IpAddr>>,
+}
+
+impl AllowlistHooks {
+    fn target(
+        &self,
+        request: &http::Request<wasmtime_wasi_http::WasiBody>,
+    ) -> Option<(String, Vec<IpAddr>, bool)> {
+        let uri = request.uri();
+        let host = uri.host()?;
+        let scheme = uri.scheme_str().unwrap_or("https");
+        let port = uri
+            .port_u16()
+            .unwrap_or(if scheme == "http" { 80 } else { 443 });
+        // Non-loopback plaintext HTTP is never allowed, even with a preset.
+        if scheme == "http" && !is_loopback_host(host) {
+            return None;
+        }
+        if scheme != "http" && scheme != "https" {
+            return None;
+        }
+        if self.outbound_any {
+            return Some((host.to_string(), Vec::new(), true));
+        }
+        let key = normalize_host_port(&format!("{host}:{port}")).ok()?;
+        if !self
+            .allowed
+            .iter()
+            .any(|entry| entry.eq_ignore_ascii_case(&key))
+        {
+            return None;
+        }
+        let pinned = self.pinned.get(&key).cloned().unwrap_or_default();
+        (!pinned.is_empty()).then_some((host.to_string(), pinned, false))
+    }
+}
+
+fn normalize_host_port(entry: &str) -> Result<String> {
+    let (host, port) = parse_exact_host_port(entry)?;
+    Ok(match host.parse::<IpAddr>() {
+        Ok(ip) if ip.is_ipv6() => format!("[{ip}]:{port}"),
+        Ok(ip) => format!("{ip}:{port}"),
+        Err(_) => format!("{}:{port}", host.to_ascii_lowercase()),
+    })
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+fn parse_exact_host_port(entry: &str) -> Result<(String, u16)> {
+    if let Ok(address) = entry.parse::<SocketAddr>() {
+        if address.port() == 0 {
+            anyhow::bail!("port must be nonzero in {entry:?}");
+        }
+        return Ok((address.ip().to_string(), address.port()));
+    }
+    let (host, port) = entry
+        .rsplit_once(':')
+        .ok_or_else(|| anyhow!("expected exact host:port, got {entry:?}"))?;
+    if host.is_empty() || host.contains(':') || host.contains('/') || host == "*" {
+        anyhow::bail!("expected exact host:port without wildcards, got {entry:?}");
+    }
+    let port: u16 = port
+        .parse()
+        .with_context(|| format!("invalid port in {entry:?}"))?;
+    if port == 0 {
+        anyhow::bail!("port must be nonzero in {entry:?}");
+    }
+    Ok((host.to_string(), port))
 }
 
 impl wasmtime_wasi_http::WasiHttpHooks for AllowlistHooks {
@@ -406,19 +570,21 @@ impl wasmtime_wasi_http::WasiHttpHooks for AllowlistHooks {
                 )>,
             > + Send,
     > {
-        let host = request.uri().host().unwrap_or("").to_string();
-        let allowed = self.allowed.iter().any(|a| a.eq_ignore_ascii_case(&host));
-        if !allowed {
+        let Some((_host, pinned, unrestricted)) = self.target(&request) else {
             _ = fut;
             return Box::new(async move { Err(wasmtime_wasi_http::Error::HttpRequestDenied) });
-        }
+        };
         Box::new(async move {
             use http_body_util::BodyExt;
-            let (res, io) = wasmtime_wasi_http::default_send_request(request, options).await?;
-            Ok((
-                res.map(BodyExt::boxed_unsync),
-                Box::new(io) as Box<dyn std::future::Future<Output = _> + Send>,
-            ))
+            if unrestricted {
+                let (res, io) = wasmtime_wasi_http::default_send_request(request, options).await?;
+                return Ok((
+                    res.map(BodyExt::boxed_unsync),
+                    Box::new(io) as Box<dyn std::future::Future<Output = _> + Send>,
+                ));
+            }
+            let (res, io) = http_client::send_pinned(request, options, pinned).await?;
+            Ok((res, io))
         })
     }
 }
@@ -471,7 +637,12 @@ impl wasmtime::ResourceLimiter for HostState {
 // Component instantiation
 // ---------------------------------------------------------------------------
 
-fn build_linker(engine: &Engine, plugin: &PluginRuntime) -> Result<Linker<HostState>> {
+fn build_linker(
+    engine: &Engine,
+    plugin: &PluginRuntime,
+    plugins: &HashMap<String, Arc<PluginRuntime>>,
+    service_control: &Arc<ServiceControlContext>,
+) -> Result<Linker<HostState>> {
     let mut linker: Linker<HostState> = Linker::new(engine);
     wasmtime_wasi::p2::add_to_linker_async(&mut linker)
         .map_err(|e| anyhow!("failed to add WASI p2 to linker: {e}"))?;
@@ -489,55 +660,92 @@ fn build_linker(engine: &Engine, plugin: &PluginRuntime) -> Result<Linker<HostSt
         .iter()
         .any(|h| h.starts_with("poc:host/host-kv"))
     {
-        let can_read = plugin
-            .manifest
-            .permissions
-            .kv
-            .as_ref()
-            .is_some_and(|permission| matches!(permission.access.as_str(), "read" | "read-write"));
-        let can_write = plugin
-            .manifest
-            .permissions
-            .kv
-            .as_ref()
-            .is_some_and(|permission| permission.access == "read-write");
-        let kv = plugin.kv.clone();
+        if plugin.manifest.permissions.kv.is_empty() {
+            anyhow::bail!(
+                "plugin {} imports host-kv without a kv permission",
+                plugin.manifest.name
+            );
+        }
         let mut root = linker.root();
         let mut inst = root
             .instance("poc:host/host-kv@0.1.0")
             .map_err(|e| anyhow!("missing host-kv interface: {e}"))?;
-        let kv_get = kv.clone();
+        inst.resource(
+            "kv",
+            ResourceType::host::<KvResource>(),
+            |mut store, rep| {
+                store
+                    .data_mut()
+                    .table
+                    .delete(Resource::<KvResource>::new_own(rep))
+                    .map(|_| ())
+                    .map_err(|error| wasmtime::Error::msg(error.to_string()))
+            },
+        )?;
+        let grants = plugin.manifest.permissions.kv.clone();
+        let databases = plugin.kv.clone();
         inst.func_wrap(
-            "get",
-            move |_store: wasmtime::StoreContextMut<'_, HostState>, (key,): (String,)| {
-                if !can_read {
-                    return Ok((None::<String>,));
-                }
-                let value = kv_get.lock().ok().and_then(|conn| {
+            "open-kv",
+            move |mut store: wasmtime::StoreContextMut<'_, HostState>, (namespace,): (String,)| {
+                let result = match (
+                    grants.iter().find(|grant| grant.namespace == namespace),
+                    databases.get(&namespace),
+                ) {
+                    (Some(grant), Some(connection)) => store
+                        .data_mut()
+                        .table
+                        .push(KvResource {
+                            connection: connection.clone(),
+                            can_write: grant.access == "read-write",
+                        })
+                        .map_err(|error| error.to_string()),
+                    _ => Err(format!("KV namespace {namespace:?} is not granted")),
+                };
+                Ok((result,))
+            },
+        )?;
+        inst.func_wrap(
+            "[method]kv.get",
+            |store: wasmtime::StoreContextMut<'_, HostState>,
+             (resource, key): (Resource<KvResource>, String)| {
+                let handle = store
+                    .data()
+                    .table
+                    .get(&resource)
+                    .map_err(|error| wasmtime::Error::msg(error.to_string()))?;
+                let value = handle.connection.lock().ok().and_then(|conn| {
                     conn.query_row(
                         "SELECT value FROM kv WHERE key = ?1",
                         rusqlite::params![key],
-                        |r| r.get::<_, String>(0),
+                        |row| row.get::<_, String>(0),
                     )
                     .ok()
                 });
                 Ok((value,))
             },
         )?;
-        let kv_set = kv.clone();
         inst.func_wrap(
-            "set",
-            move |_store: wasmtime::StoreContextMut<'_, HostState>,
-                  (key, value): (String, String)| {
-                if can_write {
-                    if let Ok(conn) = kv_set.lock() {
-                        let _ = conn.execute(
-                            "INSERT OR REPLACE INTO kv (key, value) VALUES (?1, ?2)",
-                            rusqlite::params![key, value],
-                        );
-                    }
+            "[method]kv.set",
+            |store: wasmtime::StoreContextMut<'_, HostState>,
+             (resource, key, value): (Resource<KvResource>, String, String)| {
+                let handle = store
+                    .data()
+                    .table
+                    .get(&resource)
+                    .map_err(|error| wasmtime::Error::msg(error.to_string()))?;
+                if !handle.can_write {
+                    return Ok((Err("KV handle is read-only".to_string()),));
                 }
-                Ok(())
+                let conn = handle
+                    .connection
+                    .lock()
+                    .map_err(|error| wasmtime::Error::msg(error.to_string()))?;
+                conn.execute(
+                    "INSERT OR REPLACE INTO kv (key, value) VALUES (?1, ?2)",
+                    rusqlite::params![key, value],
+                )
+                .map_err(|error| wasmtime::Error::msg(error.to_string()))?;
+                Ok((Ok::<(), String>(()),))
             },
         )?;
     }
@@ -566,14 +774,19 @@ fn build_linker(engine: &Engine, plugin: &PluginRuntime) -> Result<Linker<HostSt
         )?;
     }
 
+    register_dependency_imports(engine, plugin, plugins, service_control, &mut linker)?;
+    register_service_control(plugin, service_control, &mut linker)?;
+
     Ok(linker)
 }
 
 async fn instantiate(
     engine: &Engine,
     plugin: &PluginRuntime,
+    plugins: &HashMap<String, Arc<PluginRuntime>>,
+    service_control: &Arc<ServiceControlContext>,
 ) -> Result<(Store<HostState>, wasmtime::component::Instance)> {
-    let linker = build_linker(engine, plugin)?;
+    let linker = build_linker(engine, plugin, plugins, service_control)?;
     let mut store = create_store(engine, plugin).await?;
     let instance = linker
         .instantiate_async(&mut store, &plugin.component)
@@ -582,20 +795,13 @@ async fn instantiate(
     Ok((store, instance))
 }
 
-/// Verify the component bytes against the signed manifest and compile them.
+/// Verify the component checksum and compile it.
 /// Callers cache the returned component; never call this per invocation.
 fn verify_and_compile_component(
     engine: &Engine,
     manifest: &Manifest,
-    manifest_value: &serde_json::Value,
     component_path: &Path,
 ) -> Result<Component> {
-    if !manifest.imports.plugins.is_empty() {
-        anyhow::bail!(
-            "plugin {} declares unresolved plugin imports; compose dependencies at build time",
-            manifest.name
-        );
-    }
     if manifest
         .permissions
         .http
@@ -624,7 +830,6 @@ fn verify_and_compile_component(
             ));
         }
     }
-    verify_manifest_signature(manifest_value, &bytes)?;
     let component = Component::from_file(engine, component_path)
         .map_err(|e| anyhow!("failed to load component {component_path:?}: {e}"))?;
     validate_component_imports(engine, &component, manifest)?;
@@ -634,6 +839,8 @@ fn verify_and_compile_component(
 fn prepare_http_plugin(
     engine: &Engine,
     plugin: &PluginRuntime,
+    plugins: &HashMap<String, Arc<PluginRuntime>>,
+    service_control: &Arc<ServiceControlContext>,
 ) -> Result<Option<wasmtime_wasi_http::p2::bindings::ProxyPre<HostState>>> {
     if !matches!(plugin.manifest.kind.as_str(), "executable" | "hybrid") {
         return Ok(None);
@@ -655,7 +862,7 @@ fn prepare_http_plugin(
             plugin.manifest.name
         );
     }
-    let linker = build_linker(engine, plugin)?;
+    let linker = build_linker(engine, plugin, plugins, service_control)?;
     Ok(Some(wasmtime_wasi_http::p2::bindings::ProxyPre::new(
         linker.instantiate_pre(&plugin.component)?,
     )?))
@@ -713,14 +920,17 @@ async fn create_store(engine: &Engine, plugin: &PluginRuntime) -> Result<Store<H
         let inbound = parse_inbound_addresses(&plugin.manifest.permissions.network.inbound)?;
         let outbound_for_check = outbound.clone();
         let inbound_for_check = inbound.clone();
+        let outbound_any = plugin.manifest.permissions.network.outbound_any;
         builder
-            .allow_tcp(has_tcp && (!outbound.is_empty() || !inbound.is_empty()))
-            .allow_udp(has_udp && (!outbound.is_empty() || !inbound.is_empty()))
-            .allow_ip_name_lookup(has_name_lookup && !outbound.is_empty())
+            .allow_tcp(has_tcp && (outbound_any || !outbound.is_empty() || !inbound.is_empty()))
+            .allow_udp(has_udp && (outbound_any || !outbound.is_empty() || !inbound.is_empty()))
+            .allow_ip_name_lookup(has_name_lookup && (outbound_any || !outbound.is_empty()))
             .socket_addr_check(move |addr, usage| {
                 let outbound = outbound_for_check.clone();
                 let inbound = inbound_for_check.clone();
-                Box::pin(async move { socket_address_allowed(addr, usage, &outbound, &inbound) })
+                Box::pin(async move {
+                    socket_address_allowed(addr, usage, &outbound, &inbound, outbound_any)
+                })
             });
     }
     for fs in &plugin.manifest.permissions.filesystem {
@@ -749,7 +959,25 @@ async fn create_store(engine: &Engine, plugin: &PluginRuntime) -> Result<Store<H
             table: ResourceTable::new(),
             http: WasiHttpCtx::new(),
             http_hooks: AllowlistHooks {
-                allowed: plugin.manifest.permissions.http.outbound.clone(),
+                allowed: {
+                    let entries = plugin
+                        .manifest
+                        .permissions
+                        .http
+                        .outbound
+                        .iter()
+                        .map(|entry| normalize_host_port(entry))
+                        .collect::<Result<Vec<_>>>()
+                        .map_err(|error| {
+                            anyhow!(
+                                "invalid HTTP allowlist for {}: {error}",
+                                plugin.manifest.name
+                            )
+                        })?;
+                    entries
+                },
+                outbound_any: plugin.manifest.permissions.http.outbound_any,
+                pinned: plugin.http_pinned.clone(),
             },
             limits: {
                 let mut b = wasmtime::StoreLimitsBuilder::new();
@@ -769,6 +997,7 @@ async fn create_store(engine: &Engine, plugin: &PluginRuntime) -> Result<Store<H
             },
             _instance_permit: permit,
             request_id: 0,
+            call_stack: Vec::new(),
         },
     );
     store.limiter(|state| &mut state.limits);
@@ -832,34 +1061,40 @@ fn validate_component_imports(
     let imports_kv = actual_host
         .iter()
         .any(|interface| interface.starts_with("poc:host/host-kv"));
-    match (&manifest.permissions.kv, imports_kv) {
-        (Some(permission), true) => {
-            if !matches!(permission.access.as_str(), "read" | "read-write") {
-                anyhow::bail!(
-                    "unsupported KV access {:?} for {}",
-                    permission.access,
-                    manifest.name
-                );
-            }
-            if permission.namespace.is_empty()
-                || !permission
-                    .namespace
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
-            {
-                anyhow::bail!("invalid KV namespace for {}", manifest.name);
+    match (manifest.permissions.kv.is_empty(), imports_kv) {
+        (false, true) => {
+            let mut namespaces = HashSet::new();
+            for permission in &manifest.permissions.kv {
+                if !matches!(permission.access.as_str(), "read" | "read-write") {
+                    anyhow::bail!(
+                        "unsupported KV access {:?} for {}",
+                        permission.access,
+                        manifest.name
+                    );
+                }
+                if permission.namespace.is_empty()
+                    || !permission
+                        .namespace
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+                {
+                    anyhow::bail!("invalid KV namespace for {}", manifest.name);
+                }
+                if !namespaces.insert(permission.namespace.as_str()) {
+                    anyhow::bail!("duplicate KV namespace grant for {}", manifest.name);
+                }
             }
         }
-        (Some(_), false) => {
+        (false, false) => {
             anyhow::bail!("manifest grants unused KV permission to {}", manifest.name);
         }
-        (None, true) => {
+        (true, true) => {
             anyhow::bail!(
                 "plugin {} imports host-kv without KV permission",
                 manifest.name
             );
         }
-        (None, false) => {}
+        (true, false) => {}
     }
     let imports_filesystem = actual_wasi
         .iter()
@@ -882,14 +1117,32 @@ fn validate_component_imports(
     let imports_sockets = actual_wasi
         .iter()
         .any(|interface| interface.starts_with("wasi:sockets/"));
-    if (!manifest.permissions.network.outbound.is_empty()
-        || !manifest.permissions.network.inbound.is_empty())
-        && !imports_sockets
-    {
+    if !manifest.permissions.network.outbound.is_empty() && !imports_sockets {
         anyhow::bail!(
             "manifest grants unused network permission to {}",
             manifest.name
         );
+    }
+    if !manifest.permissions.network.inbound.is_empty() && !imports_sockets {
+        anyhow::bail!(
+            "manifest grants unused inbound network permission to {}",
+            manifest.name
+        );
+    }
+    for entry in &manifest.permissions.network.outbound {
+        parse_exact_host_port(entry)
+            .with_context(|| format!("invalid network permission for {}", manifest.name))?;
+    }
+    for entry in &manifest.permissions.network.inbound {
+        let addr = entry
+            .parse::<SocketAddr>()
+            .with_context(|| format!("invalid inbound network permission for {}", manifest.name))?;
+        if addr.port() == 0 {
+            anyhow::bail!(
+                "inbound network permission port must be nonzero for {}",
+                manifest.name
+            );
+        }
     }
     let imports_http_outbound = actual_wasi
         .iter()
@@ -899,6 +1152,11 @@ fn validate_component_imports(
             "manifest grants unused HTTP outbound permission to {}",
             manifest.name
         );
+    }
+    validate_network_preset(manifest, imports_http_outbound, imports_sockets)?;
+    for entry in &manifest.permissions.http.outbound {
+        parse_exact_host_port(entry)
+            .with_context(|| format!("invalid HTTP permission for {}", manifest.name))?;
     }
     let exports_http_inbound = manifest
         .exports
@@ -921,69 +1179,403 @@ fn validate_component_imports(
     Ok(())
 }
 
-fn signed_manifest_payload(manifest: &serde_json::Value, component: &[u8]) -> Result<Vec<u8>> {
-    let mut value = manifest.clone();
-    if let Some(metadata) = value
-        .get_mut("metadata")
-        .and_then(serde_json::Value::as_object_mut)
-    {
-        metadata.remove("signature");
-    }
-    let manifest_json = serde_json::to_vec(&value)?;
-    let mut payload = b"owasidea-plugin-signature-v1\0".to_vec();
-    payload.extend_from_slice(&manifest_json);
-    payload.push(0);
-    payload.extend_from_slice(component);
-    Ok(payload)
+const MAX_DEPENDENCY_DEPTH: usize = 16;
+const ERR_DEPENDENCY_REENTRANT: &str = "OWASIDEA_E_DEPENDENCY_REENTRANT_CALL";
+const ERR_DEPENDENCY_DEPTH: &str = "OWASIDEA_E_DEPENDENCY_DEPTH_EXCEEDED";
+
+fn manifest_dependencies(manifest: &Manifest) -> Result<Vec<String>> {
+    manifest
+        .imports
+        .plugins
+        .iter()
+        .map(|value| {
+            value.as_str().map(str::to_string).ok_or_else(|| {
+                anyhow!("plugin {} has a non-string dependency entry", manifest.name)
+            })
+        })
+        .collect()
 }
 
-fn verify_manifest_signature(manifest: &serde_json::Value, artifact: &[u8]) -> Result<()> {
-    let name = manifest
-        .get("name")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("plugin");
-    let signature = manifest
-        .get("metadata")
-        .and_then(serde_json::Value::as_object)
-        .and_then(|m| m.get("signature"))
-        .and_then(serde_json::Value::as_str);
-    let require_signatures = std::env::var("OWASIDEA_REQUIRE_SIGNATURES")
-        .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
-        .unwrap_or(!cfg!(debug_assertions));
-    if require_signatures && signature.is_none() {
-        anyhow::bail!("plugin {} is unsigned but signatures are required", name);
+fn enter_dependency(stack: &[String], target: &str) -> Result<Vec<String>> {
+    if stack.iter().any(|active| active == target) {
+        anyhow::bail!("{ERR_DEPENDENCY_REENTRANT}: {target}");
     }
-    let Some(signature) = signature else {
-        return Ok(());
-    };
-    let public_key_path = match std::env::var("OWASIDEA_PUBLIC_KEY") {
-        Ok(path) => path,
-        Err(_) if require_signatures => {
-            anyhow::bail!("OWASIDEA_PUBLIC_KEY is required to verify signed plugins")
+    if stack.len() >= MAX_DEPENDENCY_DEPTH {
+        anyhow::bail!("{ERR_DEPENDENCY_DEPTH}: maximum depth {MAX_DEPENDENCY_DEPTH}");
+    }
+    let mut next = stack.to_vec();
+    next.push(target.to_string());
+    Ok(next)
+}
+
+/// Register every non-WASI, non-host import as a typed host function that
+/// dispatches to the matching declared dependency export.
+fn register_dependency_imports(
+    engine: &Engine,
+    plugin: &PluginRuntime,
+    plugins: &HashMap<String, Arc<PluginRuntime>>,
+    service_control: &Arc<ServiceControlContext>,
+    linker: &mut Linker<HostState>,
+) -> Result<()> {
+    let component_type = plugin.component.component_type();
+    let imports: Vec<String> = component_type
+        .imports(engine)
+        .map(|(name, _)| name.to_string())
+        .collect();
+    for import_name in imports {
+        if import_name.starts_with("wasi:") || import_name.starts_with("poc:host/") {
+            continue;
         }
-        Err(_) => {
-            tracing::warn!(plugin = %name, "plugin signature present but not verified; configure OWASIDEA_PUBLIC_KEY");
-            return Ok(());
+        let provider = plugin
+            .dependencies
+            .iter()
+            .filter_map(|name| plugins.get(name).map(|runtime| (name, runtime)))
+            .find(|(_, runtime)| {
+                runtime
+                    .component
+                    .component_type()
+                    .exports(engine)
+                    .any(|(export, _)| export == import_name)
+            })
+            .map(|(_, runtime)| runtime.clone())
+            .ok_or_else(|| {
+                anyhow!(
+                    "plugin {} imports {import_name} without a matching declared local dependency",
+                    plugin.manifest.name
+                )
+            })?;
+        let provider_functions: HashMap<String, wasmtime::component::types::ComponentFunc> =
+            provider
+                .component
+                .component_type()
+                .exports(engine)
+                .find(|(name, _)| *name == import_name)
+                .and_then(|(_, item)| match item.ty {
+                    ComponentItem::ComponentInstance(instance) => Some(
+                        instance
+                            .exports(engine)
+                            .filter_map(|(name, item)| match item.ty {
+                                ComponentItem::ComponentFunc(func) => {
+                                    Some((name.to_string(), func))
+                                }
+                                _ => None,
+                            })
+                            .collect(),
+                    ),
+                    _ => None,
+                })
+                .unwrap_or_default();
+        let instance_type = component_type
+            .imports(engine)
+            .find(|(name, _)| *name == import_name)
+            .map(|(_, item)| item.ty);
+        let Some(ComponentItem::ComponentInstance(instance_type)) = instance_type else {
+            anyhow::bail!(
+                "plugin {} import {import_name} is not an interface",
+                plugin.manifest.name
+            );
+        };
+        let imported_functions: Vec<(String, wasmtime::component::types::ComponentFunc)> =
+            instance_type
+                .exports(engine)
+                .filter_map(|(name, item)| match item.ty {
+                    ComponentItem::ComponentFunc(func) => Some((name.to_string(), func)),
+                    _ => None,
+                })
+                .collect();
+        let mut root = linker.root();
+        let mut instance = root.instance(&import_name)?;
+        for (function_name, imported_type) in imported_functions {
+            let provider_type = provider_functions.get(&function_name).ok_or_else(|| {
+                anyhow!(
+                    "plugin {} imports {import_name}.{function_name}, but dependency {} does not export it",
+                    plugin.manifest.name,
+                    provider.manifest.name
+                )
+            })?;
+            let params: Vec<_> = imported_type
+                .params()
+                .map(|(name, ty)| (name.to_string(), ty))
+                .collect();
+            let provider_params: Vec<_> = provider_type
+                .params()
+                .map(|(name, ty)| (name.to_string(), ty))
+                .collect();
+            let results: Vec<_> = imported_type.results().collect();
+            let provider_results: Vec<_> = provider_type.results().collect();
+            if imported_type.async_() != provider_type.async_()
+                || params != provider_params
+                || results != provider_results
+            {
+                anyhow::bail!(
+                    "plugin {} imports {import_name}.{function_name} with a different WIT signature than dependency {}",
+                    plugin.manifest.name,
+                    provider.manifest.name
+                );
+            }
+            let engine_for_call = engine.clone();
+            let provider_runtime = provider.clone();
+            let plugins_snapshot = plugins.clone();
+            let control_snapshot = service_control.clone();
+            let interface = import_name.clone();
+            let export = function_name.clone();
+            instance.func_new_async(
+                &function_name,
+                move |caller: wasmtime::StoreContextMut<'_, HostState>,
+                      _func_type: wasmtime::component::types::ComponentFunc,
+                      params: &[Val],
+                      results: &mut [Val]| {
+                    let params = params.to_vec();
+                    let stack = caller.data().call_stack.clone();
+                    let request_id = caller.data().request_id;
+                    let engine = engine_for_call.clone();
+                    let provider = provider_runtime.clone();
+                    let plugins = plugins_snapshot.clone();
+                    let control = control_snapshot.clone();
+                    let interface = interface.clone();
+                    let export = export.clone();
+                    let target = provider_runtime.manifest.name.clone();
+                    Box::new(async move {
+                        let stack = enter_dependency(&stack, &target)
+                            .map_err(|error| wasmtime::Error::msg(error.to_string()))?;
+                        let (mut store, instance) =
+                            instantiate(&engine, &provider, &plugins, &control)
+                                .await
+                                .map_err(|error| wasmtime::Error::msg(error.to_string()))?;
+                        store.data_mut().request_id = request_id;
+                        store.data_mut().call_stack = stack;
+                        let interface_index = instance
+                            .get_export_index(&mut store, None, &interface)
+                            .ok_or_else(|| {
+                                wasmtime::Error::msg(format!(
+                                    "provider {target} no longer exports {interface}"
+                                ))
+                            })?;
+                        let function_index = instance
+                            .get_export_index(&mut store, Some(&interface_index), &export)
+                            .ok_or_else(|| {
+                                wasmtime::Error::msg(format!(
+                                    "provider {target} no longer exports {export}"
+                                ))
+                            })?;
+                        let function =
+                            instance
+                                .get_func(&mut store, function_index)
+                                .ok_or_else(|| {
+                                    wasmtime::Error::msg(format!(
+                                        "provider {target} export {export} is not callable"
+                                    ))
+                                })?;
+                        let mut provider_results = function
+                            .ty(&store)
+                            .results()
+                            .map(|ty| default_val(&ty))
+                            .collect::<Vec<_>>();
+                        function
+                            .call_async(&mut store, &params, &mut provider_results)
+                            .await?;
+                        if provider_results.len() != results.len() {
+                            return Err(wasmtime::Error::msg(format!(
+                                "provider {target} export {export} returned {} values, caller expects {}",
+                                provider_results.len(),
+                                results.len()
+                            )));
+                        }
+                        for (slot, value) in results.iter_mut().zip(provider_results) {
+                            *slot = value;
+                        }
+                        Ok(())
+                    })
+                },
+            )?;
         }
-    };
-    if manifest
-        .get("metadata")
-        .and_then(serde_json::Value::as_object)
-        .and_then(|m| m.get("signature_format"))
-        .and_then(serde_json::Value::as_str)
-        != Some("owasidea-manifest-v1")
+    }
+    Ok(())
+}
+
+/// `network-outbound` is one preset consumed by either family. Requiring both
+/// imports would make it unusable for HTTP-only or socket-only plugins.
+fn validate_network_preset(
+    manifest: &Manifest,
+    imports_http: bool,
+    imports_sockets: bool,
+) -> Result<()> {
+    if (manifest.permissions.http.outbound_any || manifest.permissions.network.outbound_any)
+        && !imports_http
+        && !imports_sockets
     {
-        anyhow::bail!("unsupported or legacy signature format for {}", name);
+        anyhow::bail!(
+            "manifest grants the network-outbound preset to {} but the component imports neither HTTP nor sockets",
+            manifest.name
+        );
     }
-    use base64::Engine;
-    let public_key = std::fs::read_to_string(public_key_path).context("read public key")?;
-    let public_key = base64::engine::general_purpose::STANDARD
-        .decode(public_key.trim())
-        .context("decode public key")?;
-    let signature = base64::engine::general_purpose::STANDARD
-        .decode(signature)
-        .context("decode signature")?;
-    verify_signature_with_key(manifest, artifact, &public_key, &signature, name)
+    Ok(())
+}
+
+/// Typed lifecycle control for services declared as dependencies. No guest stop
+/// code is called: stop drops the host-held instance.
+fn register_service_control(
+    plugin: &PluginRuntime,
+    control: &Arc<ServiceControlContext>,
+    linker: &mut Linker<HostState>,
+) -> Result<()> {
+    if !plugin
+        .manifest
+        .imports
+        .host
+        .iter()
+        .any(|import| import.starts_with("poc:host/service-control"))
+    {
+        return Ok(());
+    }
+    let mut root = linker.root();
+    let mut instance = root.instance("poc:host/service-control@0.1.0")?;
+
+    let start_control = control.clone();
+    let start_dependencies = plugin.dependencies.clone();
+    instance.func_new_async(
+        "start",
+        move |store: wasmtime::StoreContextMut<'_, HostState>,
+              _func: wasmtime::component::types::ComponentFunc,
+              params: &[Val],
+              results: &mut [Val]| {
+            let name = match params.first() {
+                Some(Val::String(name)) => name.clone(),
+                _ => String::new(),
+            };
+            let caller_stack = store.data().call_stack.clone();
+            let control = start_control.clone();
+            let dependencies = start_dependencies.clone();
+            Box::new(async move {
+                let value = if !dependencies.contains(&name) {
+                    Err(format!("plugin {name} is not a declared dependency"))
+                } else {
+                    match control.plugin(&name) {
+                        None => Err(format!("unknown plugin {name}")),
+                        Some(target)
+                            if !matches!(target.manifest.kind.as_str(), "service" | "hybrid") =>
+                        {
+                            Err(format!("plugin {name} is not a stateful service"))
+                        }
+                        Some(target) => match start_service_session(
+                            &control,
+                            &name,
+                            caller_stack.clone(),
+                            target,
+                            default_region_json(),
+                        )
+                        .await
+                        {
+                            Ok(StartOutcome::Started(output)) => Ok(output),
+                            Ok(StartOutcome::AlreadyRunning) => Ok("already running".to_string()),
+                            Err((_, message)) => Err(message),
+                        },
+                    }
+                };
+                results[0] = match value {
+                    Ok(value) => Val::Result(Ok(Some(Box::new(Val::String(value))))),
+                    Err(error) => Val::Result(Err(Some(Box::new(Val::String(error))))),
+                };
+                Ok(())
+            })
+        },
+    )?;
+
+    let status_control = control.clone();
+    let status_dependencies = plugin.dependencies.clone();
+    instance.func_new_async(
+        "status",
+        move |_store: wasmtime::StoreContextMut<'_, HostState>,
+              _func: wasmtime::component::types::ComponentFunc,
+              params: &[Val],
+              results: &mut [Val]| {
+            let name = match params.first() {
+                Some(Val::String(name)) => name.clone(),
+                _ => String::new(),
+            };
+            let control = status_control.clone();
+            let dependencies = status_dependencies.clone();
+            Box::new(async move {
+                let target = control.plugin(&name);
+                let invalid = if !dependencies.contains(&name) {
+                    Some("not a declared dependency".to_string())
+                } else if target.as_ref().is_none_or(|target| {
+                    !matches!(target.manifest.kind.as_str(), "service" | "hybrid")
+                }) {
+                    Some(format!("plugin {name} is not a stateful service"))
+                } else {
+                    None
+                };
+                let (running, address, last_error, restarts) = if let Some(error) = invalid {
+                    (false, None, Some(error), 0)
+                } else {
+                    match service_state_impl(&control, &name).await {
+                        Ok(status) => (
+                            status.running,
+                            status.address,
+                            status.last_error,
+                            status.restarts as u32,
+                        ),
+                        Err((_, message)) => (false, None, Some(message), 0),
+                    }
+                };
+                results[0] = Val::Record(vec![
+                    ("running".to_string(), Val::Bool(running)),
+                    (
+                        "address".to_string(),
+                        Val::Option(address.map(|value| Box::new(Val::String(value)))),
+                    ),
+                    (
+                        "last-error".to_string(),
+                        Val::Option(last_error.map(|value| Box::new(Val::String(value)))),
+                    ),
+                    ("restarts".to_string(), Val::U32(restarts)),
+                ]);
+                Ok(())
+            })
+        },
+    )?;
+
+    let stop_control = control.clone();
+    let stop_dependencies = plugin.dependencies.clone();
+    instance.func_new_async(
+        "stop",
+        move |_store: wasmtime::StoreContextMut<'_, HostState>,
+              _func: wasmtime::component::types::ComponentFunc,
+              params: &[Val],
+              results: &mut [Val]| {
+            let name = match params.first() {
+                Some(Val::String(name)) => name.clone(),
+                _ => String::new(),
+            };
+            let control = stop_control.clone();
+            let dependencies = stop_dependencies.clone();
+            Box::new(async move {
+                let value = if !dependencies.contains(&name) {
+                    Err(format!("plugin {name} is not a declared dependency"))
+                } else {
+                    match control.plugin(&name) {
+                        None => Err(format!("unknown plugin {name}")),
+                        Some(target)
+                            if !matches!(target.manifest.kind.as_str(), "service" | "hybrid") =>
+                        {
+                            Err(format!("plugin {name} is not a stateful service"))
+                        }
+                        Some(_) => {
+                            let _ = control.services.lock().await.remove(&name);
+                            Ok(())
+                        }
+                    }
+                };
+                results[0] = match value {
+                    Ok(()) => Val::Result(Ok(None)),
+                    Err(error) => Val::Result(Err(Some(Box::new(Val::String(error))))),
+                };
+                Ok(())
+            })
+        },
+    )?;
+    Ok(())
 }
 
 fn instance_slots(manifest: &Manifest) -> Result<Arc<tokio::sync::Semaphore>> {
@@ -992,20 +1584,6 @@ fn instance_slots(manifest: &Manifest) -> Result<Arc<tokio::sync::Semaphore>> {
         anyhow::bail!("max_instances must be at least 1 for {}", manifest.name);
     }
     Ok(Arc::new(tokio::sync::Semaphore::new(limit as usize)))
-}
-
-fn verify_signature_with_key(
-    manifest: &serde_json::Value,
-    artifact: &[u8],
-    public_key: &[u8],
-    signature: &[u8],
-    name: &str,
-) -> Result<()> {
-    use ring::signature::{UnparsedPublicKey, ED25519};
-    let payload = signed_manifest_payload(manifest, artifact)?;
-    UnparsedPublicKey::new(&ED25519, &public_key)
-        .verify(&payload, signature)
-        .map_err(|_| anyhow!("signature verification failed for {}", name))
 }
 
 // ---------------------------------------------------------------------------
@@ -1029,7 +1607,12 @@ struct CallReq {
     args: Vec<serde_json::Value>,
 }
 
-#[derive(Serialize, Default)]
+#[derive(Deserialize)]
+struct StartReq {
+    region_json: String,
+}
+
+#[derive(Serialize, Default, Clone)]
 struct ServiceStatusRes {
     running: bool,
     address: Option<String>,
@@ -1057,27 +1640,6 @@ struct ServiceStartReq {
 }
 
 #[derive(Deserialize)]
-struct BindReq {
-    port: u16,
-}
-
-#[derive(Deserialize)]
-struct ParseReq {
-    addr: String,
-}
-
-#[derive(Deserialize)]
-struct DialReq {
-    host: String,
-    port: u16,
-}
-
-#[derive(Deserialize)]
-struct StartReq {
-    region_json: String,
-}
-
-#[derive(Deserialize)]
 struct SendTextReq {
     addr: String,
     text: String,
@@ -1087,19 +1649,6 @@ struct SendTextReq {
 struct DrainRes {
     messages: Vec<String>,
     events: Vec<String>,
-}
-
-#[derive(Deserialize)]
-struct TlsReq {
-    host: String,
-    port: u16,
-    server_name: String,
-}
-
-#[derive(Deserialize)]
-struct P3Req {
-    host: String,
-    port: u16,
 }
 
 #[derive(Serialize)]
@@ -1232,6 +1781,14 @@ async fn overview(State(state): State<AppState>) -> Json<OverviewRes> {
 async fn list_plugins(State(state): State<AppState>) -> Json<Vec<PluginInfo>> {
     let mut out = Vec::new();
     for (name, p) in state.plugins.read().unwrap().iter() {
+        if !state.dev_mode
+            && state
+                .app_ui_plugin
+                .as_deref()
+                .is_some_and(|glue| glue != name)
+        {
+            continue;
+        }
         out.push(PluginInfo {
             name: name.clone(),
             version: p.manifest.version.clone(),
@@ -1385,29 +1942,13 @@ async fn reload(
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
     let component_path = base.join(&manifest.component);
-    let namespace = manifest
-        .permissions
-        .kv
-        .as_ref()
-        .map(|permission| permission.namespace.as_str())
-        .unwrap_or(&manifest.name);
-    let previous_namespace = p
-        .manifest
-        .permissions
-        .kv
-        .as_ref()
-        .map(|permission| permission.namespace.as_str())
-        .unwrap_or(&p.manifest.name);
-    let kv = if namespace == previous_namespace {
-        p.kv.clone()
-    } else {
-        Arc::new(std::sync::Mutex::new(
-            open_kv_db(namespace).map_err(internal)?,
-        ))
-    };
-    let component =
-        verify_and_compile_component(&state.engine, &manifest, &manifest_value, &component_path)
-            .map_err(internal)?;
+    let kv = open_kv_dbs(&manifest.permissions.kv, Some(&p.kv)).map_err(internal)?;
+    let component = verify_and_compile_component(&state.engine, &manifest, &component_path)
+        .map_err(internal)?;
+    let dependencies = manifest_dependencies(&manifest).map_err(internal)?;
+    let http_pinned = resolve_http_allowlist(&manifest.permissions.http.outbound)
+        .await
+        .map_err(internal)?;
     let mut runtime = PluginRuntime {
         manifest,
         manifest_path: p.manifest_path.clone(),
@@ -1416,8 +1957,17 @@ async fn reload(
         logs: p.logs.clone(),
         instance_slots: p.instance_slots.clone(),
         http_pre: None,
+        dependencies,
+        http_pinned,
     };
-    runtime.http_pre = prepare_http_plugin(&state.engine, &runtime).map_err(internal)?;
+    let plugin_snapshot = state.plugins_snapshot();
+    runtime.http_pre = prepare_http_plugin(
+        &state.engine,
+        &runtime,
+        &plugin_snapshot,
+        &state.service_control,
+    )
+    .map_err(internal)?;
     let timeout_ms = runtime
         .manifest
         .permissions
@@ -1426,7 +1976,12 @@ async fn reload(
         .unwrap_or(30000);
     match tokio::time::timeout(
         std::time::Duration::from_millis(timeout_ms),
-        instantiate(&state.engine, &runtime),
+        instantiate(
+            &state.engine,
+            &runtime,
+            &plugin_snapshot,
+            &state.service_control,
+        ),
     )
     .await
     {
@@ -1455,11 +2010,18 @@ async fn greet(
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         + 1;
     let span = otel::call_span(&name, "greet", "library");
+    let plugin_snapshot = state.plugins_snapshot();
     let work = async {
-        let (mut store, instance) = instantiate(&state.engine, p.as_ref())
-            .await
-            .map_err(internal)?;
+        let (mut store, instance) = instantiate(
+            &state.engine,
+            p.as_ref(),
+            &plugin_snapshot,
+            &state.service_control,
+        )
+        .await
+        .map_err(internal)?;
         store.data_mut().request_id = rid;
+        store.data_mut().call_stack = vec![name.clone()];
         let func = instance
             .get_typed_func::<(String,), (String,)>(&mut store, "greet")
             .map_err(internal)?;
@@ -1494,11 +2056,18 @@ async fn complete(
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         + 1;
     let span = otel::call_span(&name, "complete", "library");
+    let plugin_snapshot = state.plugins_snapshot();
     let work = async {
-        let (mut store, instance) = instantiate(&state.engine, p.as_ref())
-            .await
-            .map_err(internal)?;
+        let (mut store, instance) = instantiate(
+            &state.engine,
+            p.as_ref(),
+            &plugin_snapshot,
+            &state.service_control,
+        )
+        .await
+        .map_err(internal)?;
         store.data_mut().request_id = rid;
+        store.data_mut().call_stack = vec![name.clone()];
         let func = instance
             .get_typed_func::<(String,), (Result<String, String>,)>(&mut store, "complete")
             .map_err(internal)?;
@@ -1527,6 +2096,8 @@ async fn complete(
 async fn invoke_export(
     engine: &Engine,
     plugin: &PluginRuntime,
+    plugins: &HashMap<String, Arc<PluginRuntime>>,
+    service_control: &Arc<ServiceControlContext>,
     function: &str,
     args: &[serde_json::Value],
     request_id: u64,
@@ -1537,8 +2108,11 @@ async fn invoke_export(
         .resources
         .max_fuel
         .unwrap_or(1_000_000_000);
-    let (mut store, instance) = instantiate(engine, plugin).await.map_err(internal)?;
+    let (mut store, instance) = instantiate(engine, plugin, plugins, service_control)
+        .await
+        .map_err(internal)?;
     store.data_mut().request_id = request_id;
+    store.data_mut().call_stack = vec![plugin.manifest.name.clone()];
     // Resolve function: top-level first, then inside exported interfaces.
     let func = if let Some(f) = instance.get_func(&mut store, function) {
         f
@@ -1612,9 +2186,18 @@ async fn call_export(
     let mut fuel_used = 0u64;
     let start = std::time::Instant::now();
     let span = otel::call_span(&name, &req.function, "library");
+    let plugin_snapshot = state.plugins_snapshot();
     let work = async {
-        let (body, used) =
-            invoke_export(&state.engine, p.as_ref(), &req.function, &req.args, rid).await?;
+        let (body, used) = invoke_export(
+            &state.engine,
+            p.as_ref(),
+            &plugin_snapshot,
+            &state.service_control,
+            &req.function,
+            &req.args,
+            rid,
+        )
+        .await?;
         fuel_used = used;
         Ok::<_, (StatusCode, String)>(Json(body))
     }
@@ -1673,7 +2256,9 @@ async fn service_start_generic(
     };
     let span = otel::call_span(&name, "start-service", "service");
     let result = async {
-        match start_service_session(&state, &name, p, region_json).await? {
+        match start_service_session(&state.service_control, &name, Vec::new(), p, region_json)
+            .await?
+        {
             StartOutcome::Started(output) => Ok(Json(OutputRes { output })),
             StartOutcome::AlreadyRunning => Ok(Json(OutputRes {
                 output: "already running".to_string(),
@@ -1713,7 +2298,9 @@ async fn service_restart_generic(
     let span = otel::call_span(&name, "restart-service", "service");
     let dropped = state.services.lock().await.remove(&name).is_some();
     let result = async {
-        match start_service_session(&state, &name, p, region_json).await? {
+        match start_service_session(&state.service_control, &name, Vec::new(), p, region_json)
+            .await?
+        {
             StartOutcome::Started(_) => {}
             StartOutcome::AlreadyRunning => {
                 return Err((
@@ -1731,7 +2318,9 @@ async fn service_restart_generic(
             }
         }
         tracing::info!(plugin = %name, replaced = dropped, "service restarted");
-        service_status_impl(&state, &name).await
+        service_state_impl(&state.service_control, &name)
+            .await
+            .map(Json)
     }
     .instrument(span.clone())
     .await;
@@ -1742,11 +2331,33 @@ async fn service_restart_generic(
 /// Instantiate and start one service instance. Records `last_error` for
 /// `/service/status` and one PX-07 metric per attempt.
 async fn start_service_session(
-    state: &AppState,
+    state: &Arc<ServiceControlContext>,
     name: &str,
+    caller_stack: Vec<String>,
     p: Arc<PluginRuntime>,
     region_json: String,
 ) -> Result<StartOutcome, (StatusCode, String)> {
+    let call_stack = if caller_stack.is_empty() {
+        vec![name.to_string()]
+    } else {
+        enter_dependency(&caller_stack, name)
+            .map_err(|error| (StatusCode::CONFLICT, error.to_string()))?
+    };
+    {
+        let mut starting = state.starting.lock().map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "start lock poisoned".to_string(),
+            )
+        })?;
+        if !starting.insert(name.to_string()) {
+            return Ok(StartOutcome::AlreadyRunning);
+        }
+    }
+    let _starting = StartingGuard {
+        set: state.starting.clone(),
+        name: name.to_string(),
+    };
     let start = std::time::Instant::now();
     let timeout_ms = p.manifest.permissions.resources.timeout_ms.unwrap_or(30000);
     let rid = state
@@ -1761,16 +2372,21 @@ async fn start_service_session(
         .unwrap_or(1_000_000_000);
     let mut fuel_used = 0u64;
     let result: Result<StartOutcome, (StatusCode, String)> = async {
-        let mut sessions = state.services.lock().await;
-        if sessions.contains_key(name) {
-            return Ok(StartOutcome::AlreadyRunning);
+        {
+            let sessions = state.services.lock().await;
+            if sessions.contains_key(name) {
+                return Ok(StartOutcome::AlreadyRunning);
+            }
         }
+        let plugin_snapshot = state.plugins_snapshot();
         let work = async {
-            let (mut store, instance) = instantiate(&state.engine, p.as_ref())
-                .await
-                .map_err(internal)?;
+            let (mut store, instance) =
+                instantiate(&state.engine, p.as_ref(), &plugin_snapshot, state)
+                    .await
+                    .map_err(internal)?;
             store.data_mut().request_id = rid;
-            for candidate in ["start-service", "start-server"] {
+            store.data_mut().call_stack = call_stack.clone();
+            for candidate in ["start-service"] {
                 if let Some(func) = instance.get_func(&mut store, candidate) {
                     let ty = func.ty(&store);
                     let mut params = Vec::new();
@@ -1820,6 +2436,10 @@ async fn start_service_session(
         };
         match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), work).await {
             Ok(Ok((store, instance, output))) => {
+                let mut sessions = state.services.lock().await;
+                if sessions.contains_key(name) {
+                    return Ok(StartOutcome::AlreadyRunning);
+                }
                 sessions.insert(
                     name.to_string(),
                     ServiceSession {
@@ -1845,8 +2465,8 @@ async fn start_service_session(
             Err((_, message)) => entry.last_error = Some(message.clone()),
         }
     }
-    record_plugin_metric(
-        state,
+    plugin_metrics::record(
+        &state.plugin_metrics,
         name,
         result.is_ok(),
         start.elapsed().as_millis() as u64,
@@ -1862,8 +2482,14 @@ async fn service_stop_generic(
     let start = std::time::Instant::now();
     let span = otel::call_span(&name, "stop-service", "service");
     let result = async {
-        if state.plugin(&name).is_none() {
+        let Some(plugin) = state.plugin(&name) else {
             return Err((StatusCode::NOT_FOUND, format!("unknown plugin {name}")));
+        };
+        if !matches!(plugin.manifest.kind.as_str(), "service" | "hybrid") {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("plugin {name} is not a stateful service"),
+            ));
         }
         let stopped = state.services.lock().await.remove(&name).is_some();
         Ok::<_, (StatusCode, String)>(Json(serde_json::json!({"stopped": stopped})))
@@ -1886,7 +2512,9 @@ async fn service_status_generic(
     AxumPath(name): AxumPath<String>,
 ) -> Result<Json<ServiceStatusRes>, (StatusCode, String)> {
     let start = std::time::Instant::now();
-    let result = service_status_impl(&state, &name).await;
+    let result = service_state_impl(&state.service_control, &name)
+        .await
+        .map(Json);
     record_plugin_metric(
         &state,
         &name,
@@ -1897,12 +2525,18 @@ async fn service_status_generic(
     result
 }
 
-async fn service_status_impl(
-    state: &AppState,
+async fn service_state_impl(
+    state: &ServiceControlContext,
     name: &str,
-) -> Result<Json<ServiceStatusRes>, (StatusCode, String)> {
-    if state.plugin(name).is_none() {
+) -> Result<ServiceStatusRes, (StatusCode, String)> {
+    let Some(plugin) = state.plugin(name) else {
         return Err((StatusCode::NOT_FOUND, format!("unknown plugin {name}")));
+    };
+    if !matches!(plugin.manifest.kind.as_str(), "service" | "hybrid") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("plugin {name} is not a stateful service"),
+        ));
     }
     // Copy the lifecycle record before locking sessions (lock order:
     // service_health then services is never held simultaneously).
@@ -1912,7 +2546,7 @@ async fn service_status_impl(
     };
     let mut sessions = state.services.lock().await;
     let Some(session) = sessions.get_mut(name) else {
-        return Ok(Json(ServiceStatusRes::new(false, None, &health)));
+        return Ok(ServiceStatusRes::new(false, None, &health));
     };
     for candidate in ["service-status", "server-status"] {
         if let Some(func) = session.instance.get_func(&mut session.store, candidate) {
@@ -1940,137 +2574,18 @@ async fn service_status_impl(
                     _ => None,
                 })
                 .unwrap_or(true);
-            return Ok(Json(ServiceStatusRes::new(
+            return Ok(ServiceStatusRes::new(
                 running,
                 session.address.clone(),
                 &health,
-            )));
+            ));
         }
     }
-    Ok(Json(ServiceStatusRes::new(
+    Ok(ServiceStatusRes::new(
         true,
         session.address.clone(),
         &health,
-    )))
-}
-
-/// Default timeout for the typed POC routes (`dial-tcp`, `tls-probe`, …) when
-/// the manifest does not set `permissions.resources.timeout_ms`.
-pub(crate) const DEFAULT_POC_TIMEOUT_MS: u64 = 10_000;
-
-fn poc_timeout_ms(plugin: &PluginRuntime) -> u64 {
-    plugin
-        .manifest
-        .permissions
-        .resources
-        .timeout_ms
-        .unwrap_or(DEFAULT_POC_TIMEOUT_MS)
-        .max(1)
-}
-
-/// Run one typed POC route call under the manifest timeout (default 10 s) and
-/// answer `504` instead of hanging. Dropping the future on timeout drops the
-/// `Store`, which returns its `max_instances` slot to the plugin semaphore.
-async fn poc_call<F, T>(
-    plugin: &PluginRuntime,
-    operation: &str,
-    work: F,
-) -> Result<T, (StatusCode, String)>
-where
-    F: std::future::Future<Output = Result<T, (StatusCode, String)>>,
-{
-    let timeout_ms = poc_timeout_ms(plugin);
-    match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), work).await {
-        Ok(result) => result,
-        Err(_) => Err((
-            StatusCode::GATEWAY_TIMEOUT,
-            format!("{operation} timed out after {timeout_ms} ms"),
-        )),
-    }
-}
-
-async fn echo_udp(
-    State(state): State<AppState>,
-    AxumPath(name): AxumPath<String>,
-    Json(req): Json<BindReq>,
-) -> Result<Json<OutputRes>, (StatusCode, String)> {
-    let p = state
-        .plugin(&name)
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
-    let work = async {
-        let (mut store, instance) = instantiate(&state.engine, p.as_ref())
-            .await
-            .map_err(internal)?;
-        let func = instance
-            .get_typed_func::<(u16,), (Result<String, String>,)>(&mut store, "echo-udp")
-            .map_err(internal)?;
-        let (output,) = func
-            .call_async(&mut store, (req.port,))
-            .await
-            .map_err(internal)?;
-        Ok::<_, (StatusCode, String)>(output)
-    };
-    match poc_call(&p, "echo-udp", work).await? {
-        Ok(s) => Ok(Json(OutputRes { output: s })),
-        Err(e) => Err((StatusCode::BAD_REQUEST, e)),
-    }
-}
-
-async fn dial_echo(
-    State(state): State<AppState>,
-    AxumPath(name): AxumPath<String>,
-    Json(req): Json<P3Req>,
-) -> Result<Json<OutputRes>, (StatusCode, String)> {
-    let p = state
-        .plugin(&name)
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
-    let work = async {
-        let (mut store, instance) = instantiate(&state.engine, p.as_ref())
-            .await
-            .map_err(internal)?;
-        let func = instance
-            .get_typed_func::<(String, u16), (Result<String, String>,)>(&mut store, "dial-echo")
-            .map_err(internal)?;
-        let (output,) = func
-            .call_async(&mut store, (req.host, req.port))
-            .await
-            .map_err(internal)?;
-        Ok::<_, (StatusCode, String)>(output)
-    };
-    match poc_call(&p, "dial-echo", work).await? {
-        Ok(s) => Ok(Json(OutputRes { output: s })),
-        Err(e) => Err((StatusCode::BAD_REQUEST, e)),
-    }
-}
-
-async fn tls_probe(
-    State(state): State<AppState>,
-    AxumPath(name): AxumPath<String>,
-    Json(req): Json<TlsReq>,
-) -> Result<Json<OutputRes>, (StatusCode, String)> {
-    let p = state
-        .plugin(&name)
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
-    let work = async {
-        let (mut store, instance) = instantiate(&state.engine, p.as_ref())
-            .await
-            .map_err(internal)?;
-        let func = instance
-            .get_typed_func::<(String, u16, String), (Result<String, String>,)>(
-                &mut store,
-                "tls-probe",
-            )
-            .map_err(internal)?;
-        let (output,) = func
-            .call_async(&mut store, (req.host, req.port, req.server_name))
-            .await
-            .map_err(internal)?;
-        Ok::<_, (StatusCode, String)>(output)
-    };
-    match poc_call(&p, "tls-probe", work).await? {
-        Ok(s) => Ok(Json(OutputRes { output: s })),
-        Err(e) => Err((StatusCode::BAD_REQUEST, e)),
-    }
+    ))
 }
 
 fn ensure_ticker(state: &AppState, session: &mut TailcatSession) {
@@ -2129,9 +2644,15 @@ async fn start_service(
                 "tailcat-wasi plugin not loaded".to_string(),
             )
         })?;
-        let (store, instance) = instantiate(&state.engine, p.as_ref())
-            .await
-            .map_err(internal)?;
+        let plugin_snapshot = state.plugins_snapshot();
+        let (store, instance) = instantiate(
+            &state.engine,
+            p.as_ref(),
+            &plugin_snapshot,
+            &state.service_control,
+        )
+        .await
+        .map_err(internal)?;
         *guard = Some(TailcatSession {
             store,
             instance,
@@ -2312,28 +2833,67 @@ fn default_region_json() -> String {
     r#"{"RegionID":301,"RegionCode":"nyc","RegionName":"New York City","Nodes":[{"Name":"301a","RegionID":301,"HostName":"tc301a.ipn.dev","IPv4":"199.38.181.166","IPv6":"2607:f740:f::26b","CanPort80":true}]}"#.to_string()
 }
 
-async fn resolve_network_hosts(hosts: &[String]) -> Result<HashSet<IpAddr>> {
-    let mut addresses = HashSet::new();
-    for host in hosts {
-        if host == "*" || host.contains('/') || host.contains(':') {
-            if let Ok(ip) = host.parse::<IpAddr>() {
-                addresses.insert(ip);
-                continue;
+async fn resolve_http_allowlist(entries: &[String]) -> Result<HashMap<String, Vec<IpAddr>>> {
+    let mut pinned = HashMap::new();
+    for entry in entries {
+        let normal = normalize_host_port(entry)?;
+        let (host, port) = parse_exact_host_port(entry)?;
+        let addresses = if let Ok(ip) = host.parse::<IpAddr>() {
+            vec![ip]
+        } else {
+            let resolved = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                tokio::net::lookup_host((host.as_str(), port)),
+            )
+            .await
+            .with_context(|| format!("resolve HTTP allowlist host {host} timed out"))?
+            .with_context(|| format!("resolve HTTP allowlist host {host}"))?;
+            let addresses: Vec<IpAddr> = resolved.map(|address| address.ip()).collect();
+            if addresses.is_empty() {
+                anyhow::bail!("HTTP allowlist host {host} resolved to no addresses");
             }
-            anyhow::bail!("network permission must be an exact hostname or IP address: {host}");
+            addresses
+        };
+        pinned.insert(normal, addresses);
+    }
+    Ok(pinned)
+}
+
+async fn resolve_network_hosts(hosts: &[String]) -> Result<HashSet<(IpAddr, u16)>> {
+    let mut addresses = HashSet::new();
+    for entry in hosts {
+        if let Ok(address) = entry.parse::<SocketAddr>() {
+            if address.port() == 0 {
+                anyhow::bail!("network permission port must be nonzero: {entry}");
+            }
+            addresses.insert((address.ip(), address.port()));
+            continue;
+        }
+        let Some((host, port)) = entry.rsplit_once(':') else {
+            anyhow::bail!("network permission must be exact host:port: {entry}");
+        };
+        if host.is_empty() || host.contains(':') || host.contains('/') || host == "*" {
+            anyhow::bail!("network permission must be exact host:port: {entry}");
+        }
+        let port: u16 = port
+            .parse()
+            .with_context(|| format!("invalid port in network permission {entry}"))?;
+        if port == 0 {
+            anyhow::bail!("network permission port must be nonzero: {entry}");
         }
         if let Ok(ip) = host.parse::<IpAddr>() {
-            addresses.insert(ip);
+            addresses.insert((ip, port));
             continue;
         }
         let resolved = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            tokio::net::lookup_host((host.as_str(), 0)),
+            tokio::net::lookup_host((host, port)),
         )
         .await
         .with_context(|| format!("resolve network permission host {host} timed out"))?
         .with_context(|| format!("resolve network permission host {host}"))?;
-        let resolved: HashSet<IpAddr> = resolved.map(|addr| addr.ip()).collect();
+        let resolved: HashSet<(IpAddr, u16)> =
+            resolved.map(|addr| (addr.ip(), addr.port())).collect();
         if resolved.is_empty() {
             anyhow::bail!("network permission host {host} resolved to no addresses");
         }
@@ -2342,13 +2902,17 @@ async fn resolve_network_hosts(hosts: &[String]) -> Result<HashSet<IpAddr>> {
     Ok(addresses)
 }
 
-fn parse_inbound_addresses(hosts: &[String]) -> Result<HashSet<IpAddr>> {
+fn parse_inbound_addresses(hosts: &[String]) -> Result<HashSet<(IpAddr, u16)>> {
     hosts
         .iter()
-        .map(|host| {
-            host.parse::<IpAddr>().with_context(|| {
-                format!("inbound network permission must be an IP address: {host}")
-            })
+        .map(|entry| {
+            let addr = entry
+                .parse::<SocketAddr>()
+                .with_context(|| format!("inbound network permission must be IP:port: {entry}"))?;
+            if addr.port() == 0 {
+                anyhow::bail!("inbound network permission port must be nonzero: {entry}");
+            }
+            Ok((addr.ip(), addr.port()))
         })
         .collect()
 }
@@ -2356,129 +2920,24 @@ fn parse_inbound_addresses(hosts: &[String]) -> Result<HashSet<IpAddr>> {
 fn socket_address_allowed(
     addr: SocketAddr,
     usage: SocketAddrUse,
-    outbound: &HashSet<IpAddr>,
-    inbound: &HashSet<IpAddr>,
+    outbound: &HashSet<(IpAddr, u16)>,
+    inbound: &HashSet<(IpAddr, u16)>,
+    outbound_any: bool,
 ) -> bool {
-    let ip = addr.ip();
-    let local_bind_allowed = inbound.contains(&ip)
-        || (ip.is_unspecified()
-            && (inbound.contains(&IpAddr::V4(Ipv4Addr::UNSPECIFIED))
-                || inbound.contains(&IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED))));
+    let key = (addr.ip(), addr.port());
+    let local_bind_allowed = inbound.contains(&key)
+        || (addr.ip().is_unspecified()
+            && (inbound.contains(&(IpAddr::V4(Ipv4Addr::UNSPECIFIED), addr.port()))
+                || inbound.contains(&(IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED), addr.port()))));
     match usage {
         SocketAddrUse::TcpBind | SocketAddrUse::TcpListen | SocketAddrUse::UdpBind => {
             local_bind_allowed
         }
         SocketAddrUse::TcpAccept => !inbound.is_empty(),
-        SocketAddrUse::TcpConnect | SocketAddrUse::UdpSend => outbound.contains(&ip),
-        SocketAddrUse::UdpReceive => outbound.contains(&ip) || !inbound.is_empty(),
-    }
-}
-
-async fn start_server(
-    State(state): State<AppState>,
-    AxumPath(name): AxumPath<String>,
-    Json(req): Json<StartReq>,
-) -> Result<Json<OutputRes>, (StatusCode, String)> {
-    let p = state
-        .plugin(&name)
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
-    let work = async {
-        let (mut store, instance) = instantiate(&state.engine, p.as_ref())
-            .await
-            .map_err(internal)?;
-        let func = instance
-            .get_typed_func::<(String,), (Result<String, String>,)>(&mut store, "start-server")
-            .map_err(internal)?;
-        let (output,) = func
-            .call_async(&mut store, (req.region_json,))
-            .await
-            .map_err(internal)?;
-        Ok::<_, (StatusCode, String)>(output)
-    };
-    match poc_call(&p, "start-server", work).await? {
-        Ok(s) => Ok(Json(OutputRes { output: s })),
-        Err(e) => Err((StatusCode::BAD_REQUEST, e)),
-    }
-}
-
-async fn dial_tcp(
-    State(state): State<AppState>,
-    AxumPath(name): AxumPath<String>,
-    Json(req): Json<DialReq>,
-) -> Result<Json<OutputRes>, (StatusCode, String)> {
-    let p = state
-        .plugin(&name)
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
-    let work = async {
-        let (mut store, instance) = instantiate(&state.engine, p.as_ref())
-            .await
-            .map_err(internal)?;
-        let func = instance
-            .get_typed_func::<(String, u16), (Result<String, String>,)>(&mut store, "dial-tcp")
-            .map_err(internal)?;
-        let (output,) = func
-            .call_async(&mut store, (req.host, req.port))
-            .await
-            .map_err(internal)?;
-        Ok::<_, (StatusCode, String)>(output)
-    };
-    match poc_call(&p, "dial-tcp", work).await? {
-        Ok(s) => Ok(Json(OutputRes { output: s })),
-        Err(e) => Err((StatusCode::BAD_REQUEST, e)),
-    }
-}
-
-async fn parse_address(
-    State(state): State<AppState>,
-    AxumPath(name): AxumPath<String>,
-    Json(req): Json<ParseReq>,
-) -> Result<Json<OutputRes>, (StatusCode, String)> {
-    let p = state
-        .plugin(&name)
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
-    let work = async {
-        let (mut store, instance) = instantiate(&state.engine, p.as_ref())
-            .await
-            .map_err(internal)?;
-        let func = instance
-            .get_typed_func::<(String,), (Result<String, String>,)>(&mut store, "parse-address")
-            .map_err(internal)?;
-        let (output,) = func
-            .call_async(&mut store, (req.addr,))
-            .await
-            .map_err(internal)?;
-        Ok::<_, (StatusCode, String)>(output)
-    };
-    match poc_call(&p, "parse-address", work).await? {
-        Ok(s) => Ok(Json(OutputRes { output: s })),
-        Err(e) => Err((StatusCode::BAD_REQUEST, e)),
-    }
-}
-
-async fn bind_udp(
-    State(state): State<AppState>,
-    AxumPath(name): AxumPath<String>,
-    Json(req): Json<BindReq>,
-) -> Result<Json<OutputRes>, (StatusCode, String)> {
-    let p = state
-        .plugin(&name)
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown plugin {name}")))?;
-    let work = async {
-        let (mut store, instance) = instantiate(&state.engine, p.as_ref())
-            .await
-            .map_err(internal)?;
-        let func = instance
-            .get_typed_func::<(u16,), (Result<String, String>,)>(&mut store, "bind-udp")
-            .map_err(internal)?;
-        let (output,) = func
-            .call_async(&mut store, (req.port,))
-            .await
-            .map_err(internal)?;
-        Ok::<_, (StatusCode, String)>(output)
-    };
-    match poc_call(&p, "bind-udp", work).await? {
-        Ok(s) => Ok(Json(OutputRes { output: s })),
-        Err(e) => Err((StatusCode::BAD_REQUEST, e)),
+        SocketAddrUse::TcpConnect | SocketAddrUse::UdpSend => {
+            outbound_any || outbound.contains(&key)
+        }
+        SocketAddrUse::UdpReceive => outbound_any || outbound.contains(&key) || !inbound.is_empty(),
     }
 }
 
@@ -2769,6 +3228,28 @@ fn open_kv_db(name: &str) -> Result<rusqlite::Connection> {
     Ok(conn)
 }
 
+fn open_kv_dbs(
+    grants: &[KvPerm],
+    existing: Option<&HashMap<String, Arc<std::sync::Mutex<rusqlite::Connection>>>>,
+) -> Result<HashMap<String, Arc<std::sync::Mutex<rusqlite::Connection>>>> {
+    let mut databases = HashMap::with_capacity(grants.len());
+    for grant in grants {
+        let connection = existing
+            .and_then(|databases| databases.get(&grant.namespace).cloned())
+            .map(Ok)
+            .unwrap_or_else(|| {
+                open_kv_db(&grant.namespace).map(|db| Arc::new(std::sync::Mutex::new(db)))
+            })?;
+        if databases
+            .insert(grant.namespace.clone(), connection)
+            .is_some()
+        {
+            anyhow::bail!("duplicate KV namespace grant {:?}", grant.namespace);
+        }
+    }
+    Ok(databases)
+}
+
 // ---------------------------------------------------------------------------
 // Executable plugin proxy (POC)
 // ---------------------------------------------------------------------------
@@ -3007,43 +3488,16 @@ fn load_manifests(dir: &Path) -> Result<Vec<(Manifest, serde_json::Value, PathBu
 
 fn validate_manifest_abi(manifest: &Manifest) -> Result<()> {
     match manifest.schema_version {
-        0 => {
-            // Legacy manifests: optional fields validated only if present.
-            if let Some(host_abi) = &manifest.host_abi {
-                if host_abi != HOST_ABI {
-                    anyhow::bail!(
-                        "plugin {} manifest host_abi {} is incompatible with host {}",
-                        manifest.name,
-                        host_abi,
-                        HOST_ABI
-                    );
-                }
-            }
-            if let Some(min_host) = &manifest.min_host {
-                let required = semver::Version::parse(min_host)
-                    .with_context(|| format!("invalid min_host {min_host:?}"))?;
-                let host = semver::Version::parse(HOST_VERSION)
-                    .with_context(|| format!("invalid host version {HOST_VERSION:?}"))?;
-                if required > host {
-                    anyhow::bail!(
-                        "plugin {} manifest min_host {} is greater than host {}",
-                        manifest.name,
-                        min_host,
-                        HOST_VERSION
-                    );
-                }
-            }
-        }
-        1 => {
+        2 => {
             let host_abi = manifest.host_abi.as_deref().ok_or_else(|| {
                 anyhow!(
-                    "plugin {} manifest host_abi is required for schema_version 1",
+                    "plugin {} manifest host_abi is required for schema_version 2",
                     manifest.name
                 )
             })?;
             if host_abi != HOST_ABI {
                 anyhow::bail!(
-                    "plugin {} manifest host_abi {} is incompatible with host {}",
+                    "plugin {} manifest host_abi {} is incompatible with host {}. This host requires ABI 2; migrate the app with `owasidea migrate` and rebuild",
                     manifest.name,
                     host_abi,
                     HOST_ABI
@@ -3051,7 +3505,7 @@ fn validate_manifest_abi(manifest: &Manifest) -> Result<()> {
             }
             let min_host = manifest.min_host.as_deref().ok_or_else(|| {
                 anyhow!(
-                    "plugin {} manifest min_host is required for schema_version 1",
+                    "plugin {} manifest min_host is required for schema_version 2",
                     manifest.name
                 )
             })?;
@@ -3070,7 +3524,7 @@ fn validate_manifest_abi(manifest: &Manifest) -> Result<()> {
         }
         other => {
             anyhow::bail!(
-                "plugin {} manifest schema_version {} is not supported (expected 0 or 1)",
+                "plugin {} manifest schema_version {} is not supported (expected 2). ABI 1 manifests are not accepted; run `owasidea migrate` then rebuild with Owasidea 1.2",
                 manifest.name,
                 other
             );
@@ -3154,7 +3608,23 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
     // artifact so restarts and `owasidea dev` reloads do not pay it again.
     config.cache(compilation_cache());
     let engine = Engine::new(&config)?;
-    let mut plugins = HashMap::new();
+    let plugins: Arc<std::sync::RwLock<HashMap<String, Arc<PluginRuntime>>>> =
+        Arc::new(std::sync::RwLock::new(HashMap::new()));
+    let services = Arc::new(Mutex::new(HashMap::new()));
+    let service_health = Arc::new(Mutex::new(HashMap::new()));
+    let requests = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let errors = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let plugin_metrics: Arc<plugin_metrics::PluginMetricsMap> =
+        Arc::new(std::sync::RwLock::new(HashMap::new()));
+    let service_control = Arc::new(ServiceControlContext {
+        engine: engine.clone(),
+        plugins: plugins.clone(),
+        services: services.clone(),
+        service_health: service_health.clone(),
+        requests: requests.clone(),
+        plugin_metrics: plugin_metrics.clone(),
+        starting: Arc::new(std::sync::Mutex::new(HashSet::new())),
+    });
     let mut ui_plugins = Vec::new();
     let mut seen_plugins = HashSet::new();
 
@@ -3194,21 +3664,15 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
             .clamp(1, 4);
         for chunk in pending.chunks(concurrency) {
             let mut jobs = Vec::new();
-            for (name, manifest, manifest_value, component_path) in chunk {
+            for (name, manifest, _manifest_value, component_path) in chunk {
                 let engine = engine.clone();
                 let name = name.clone();
                 let manifest = manifest.clone();
-                let manifest_value = manifest_value.clone();
                 let component_path = component_path.clone();
                 jobs.push((
                     name,
                     tokio::task::spawn_blocking(move || {
-                        verify_and_compile_component(
-                            &engine,
-                            &manifest,
-                            &manifest_value,
-                            &component_path,
-                        )
+                        verify_and_compile_component(&engine, &manifest, &component_path)
                     }),
                 ));
             }
@@ -3268,7 +3732,6 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
                     )
                 })?
                 .to_string();
-            verify_manifest_signature(&manifest_value, &[])?;
             ui_plugins.push(UiPluginInfo {
                 name: manifest.name.clone(),
                 version: manifest.version.clone(),
@@ -3318,52 +3781,73 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
             manifest: manifest.clone(),
             manifest_path: manifest_path.clone(),
             component,
-            kv: Arc::new(std::sync::Mutex::new(open_kv_db(
-                manifest
-                    .permissions
-                    .kv
-                    .as_ref()
-                    .map(|permission| permission.namespace.as_str())
-                    .unwrap_or(&manifest.name),
-            )?)),
+            kv: open_kv_dbs(&manifest.permissions.kv, None)?,
             logs: Arc::new(Mutex::new(LogBuffer::new(&manifest.name))),
             instance_slots: instance_slots(&manifest)?,
             http_pre: None,
+            dependencies: manifest_dependencies(&manifest)?,
+            http_pinned: resolve_http_allowlist(&manifest.permissions.http.outbound).await?,
         };
 
-        let mut runtime = runtime;
+        plugin_metrics.write().unwrap().insert(
+            manifest.name.clone(),
+            Arc::new(plugin_metrics::PluginMetrics::default()),
+        );
+        plugins
+            .write()
+            .unwrap()
+            .insert(manifest.name.clone(), std::sync::Arc::new(runtime));
+    }
 
-        runtime.http_pre = prepare_http_plugin(&engine, &runtime)
-            .with_context(|| format!("HTTP preparation failed for {}", manifest.name))?;
+    // All components exist before any linker is built so declared dependencies
+    // (including cycles) resolve without a topological load order.
+    let plugin_names: Vec<String> = plugins.read().unwrap().keys().cloned().collect();
+    for name in &plugin_names {
+        let mut runtime = Arc::try_unwrap(
+            plugins
+                .write()
+                .unwrap()
+                .remove(name)
+                .expect("plugin exists"),
+        )
+        .map_err(|_| anyhow!("plugin {name} is still referenced during startup"))?;
+        let snapshot = plugins.read().unwrap().clone();
+        runtime.http_pre = prepare_http_plugin(&engine, &runtime, &snapshot, &service_control)
+            .with_context(|| format!("HTTP preparation failed for {name}"))?;
+        let runtime = Arc::new(runtime);
+        plugins
+            .write()
+            .unwrap()
+            .insert(name.clone(), runtime.clone());
         // Instantiate every WASI component at startup so bad imports/policies
         // fail fast, including executable plugins served by the embedded host.
-        instantiate(&engine, &runtime)
+        instantiate(&engine, &runtime, &snapshot, &service_control)
             .await
-            .with_context(|| format!("startup smoke test failed for {}", manifest.name))?;
+            .with_context(|| format!("startup smoke test failed for {name}"))?;
+    }
 
-        plugins.insert(manifest.name.clone(), std::sync::Arc::new(runtime));
+    let app_ui_plugin = plugins.read().unwrap().values().find_map(|plugin| {
+        plugin
+            .manifest
+            .metadata
+            .get("app_ui_plugin")
+            .and_then(serde_json::Value::as_str)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+    });
+    if let Some(glue) = &app_ui_plugin {
+        if !plugins.read().unwrap().contains_key(glue) {
+            anyhow::bail!(
+                "manifest metadata names app.ui_plugin {glue:?}, but no such plugin is loaded"
+            );
+        }
     }
 
     println!(
         "loaded {} plugins in {} ms",
-        plugins.len(),
+        plugins.read().unwrap().len(),
         startup_started.elapsed().as_millis()
     );
-
-    let plugin_metrics: Arc<plugin_metrics::PluginMetricsMap> = Arc::new(std::sync::RwLock::new(
-        plugins
-            .keys()
-            .map(|name| {
-                (
-                    name.clone(),
-                    Arc::new(plugin_metrics::PluginMetrics::default()),
-                )
-            })
-            .collect(),
-    ));
-    let plugins = Arc::new(std::sync::RwLock::new(plugins));
-    let requests = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let errors = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
     #[cfg(feature = "streaming")]
     let jobs = jobs::JobManager::new(Arc::new(jobs::HostJobExecutor::new(
@@ -3371,6 +3855,7 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
         plugins.clone(),
         plugin_metrics.clone(),
         requests.clone(),
+        service_control.clone(),
     )));
 
     let state = AppState {
@@ -3378,11 +3863,12 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
         plugins,
         ui_plugins: Arc::new(ui_plugins),
         tailcat_session: Arc::new(Mutex::new(None)),
-        services: Arc::new(Mutex::new(HashMap::new())),
-        service_health: Arc::new(Mutex::new(HashMap::new())),
+        services,
+        service_health,
         requests,
         errors,
         plugin_metrics,
+        service_control,
         dev_mode: std::env::var("OWASIDEA_DEV_MODE")
             .is_ok_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes")),
         dev_hot_reload: std::env::var("OWASIDEA_DEV_HOT_RELOAD")
@@ -3393,6 +3879,7 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
             .unwrap_or_default(),
         dev_last_reload: Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
         manifests_dir: manifests_dir.clone(),
+        app_ui_plugin,
         #[cfg(feature = "streaming")]
         jobs,
     };
@@ -3466,6 +3953,42 @@ async fn count_requests(
     resp
 }
 
+async fn app_surface_guard(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+    next: middleware::Next,
+) -> Response {
+    if !state.dev_mode {
+        if let Some(glue) = state.app_ui_plugin.as_deref() {
+            let mut segments = request.uri().path().trim_start_matches('/').split('/');
+            let surface = segments.next();
+            let name = segments.next().unwrap_or_default();
+            // Executable dependencies remain reachable at /app so the glue can
+            // expose HTTP-shaped dependencies without browser-to-plugin
+            // fan-out; every other app route is glue-only.
+            let executable_dependency = surface == Some("app")
+                && state
+                    .plugin(glue)
+                    .is_some_and(|runtime| runtime.dependencies.iter().any(|dep| dep == name))
+                && state
+                    .plugin(name)
+                    .is_some_and(|runtime| runtime.http_pre.is_some());
+            if matches!(surface, Some("plugin" | "app"))
+                && !name.is_empty()
+                && name != glue
+                && !executable_dependency
+            {
+                return (
+                    StatusCode::FORBIDDEN,
+                    "app routes expose only the configured glue plugin",
+                )
+                    .into_response();
+            }
+        }
+    }
+    next.run(request).await
+}
+
 fn build_router(state: AppState) -> Result<Router> {
     let tailcat_routes = tailcat_routes_enabled(&state);
     build_router_inner(state, tailcat_routes)
@@ -3502,13 +4025,6 @@ fn build_router_inner(state: AppState, tailcat_routes: bool) -> Result<Router> {
             "/plugin/{name}/service/restart",
             post(service_restart_generic),
         )
-        .route("/plugin/{name}/bind-udp", post(bind_udp))
-        .route("/plugin/{name}/parse-address", post(parse_address))
-        .route("/plugin/{name}/dial-tcp", post(dial_tcp))
-        .route("/plugin/{name}/start-server", post(start_server))
-        .route("/plugin/{name}/tls-probe", post(tls_probe))
-        .route("/plugin/{name}/dial-echo", post(dial_echo))
-        .route("/plugin/{name}/echo-udp", post(echo_udp))
         .route("/app/{name}/{*path}", axum::routing::any(proxy_app))
         .route("/app/{name}/", axum::routing::any(proxy_app))
         .route("/app/{name}", axum::routing::any(proxy_app));
@@ -3542,6 +4058,10 @@ fn build_router_inner(state: AppState, tailcat_routes: bool) -> Result<Router> {
         .layer(cors_layer()?)
         .layer(middleware::from_fn_with_state(
             state.clone(),
+            app_surface_guard,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
             count_requests,
         ))
         .with_state(state))
@@ -3560,9 +4080,15 @@ mod tests {
 
     #[test]
     fn load_manifests_ignores_non_manifest_json() {
-        const VALID: &str = r#"{"name":"x","version":"0.1.0","language":"rust","abi":"wasi-0.2","runtime":"wasi-component","type":"library","component":"x.wasm","exports":[],"imports":{"wasi":[],"host":[],"plugins":[]},"permissions":{},"state":{},"composition":{},"metadata":{}}"#;
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("x.manifest.json"), VALID).unwrap();
+        let valid = serde_json::json!({
+            "name": "x", "version": "0.1.0", "language": "rust", "abi": "wasi-0.2",
+            "schema_version": 2, "host_abi": HOST_ABI, "min_host": HOST_VERSION,
+            "runtime": "wasi-component", "type": "library", "component": "x.wasm",
+            "exports": [], "imports": {"wasi": [], "host": [], "plugins": []},
+            "permissions": {}, "state": {}, "composition": {}, "metadata": {}
+        });
+        std::fs::write(dir.path().join("x.manifest.json"), valid.to_string()).unwrap();
         std::fs::write(
             dir.path().join("permissions.lock.json"),
             r#"{"plugins":{"x":{"host":[]}}}"#,
@@ -3583,6 +4109,19 @@ mod tests {
     }
 
     #[test]
+    fn abi1_manifest_is_rejected_with_migration_guidance() {
+        let manifest: Manifest = serde_json::from_value(serde_json::json!({
+            "name": "old", "version": "0.1.0", "language": "rust", "abi": "wasi-0.2",
+            "schema_version": 1, "host_abi": "1", "min_host": "1.1.0",
+            "type": "library"
+        }))
+        .unwrap();
+        let error = validate_manifest_abi(&manifest).unwrap_err().to_string();
+        assert!(error.contains("expected 2"), "{error}");
+        assert!(error.contains("owasidea migrate"), "{error}");
+    }
+
+    #[test]
     fn load_manifests_still_rejects_broken_manifest() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("broken.manifest.json"), r#"{"name":42}"#).unwrap();
@@ -3590,34 +4129,285 @@ mod tests {
         assert!(error.contains("invalid manifest"), "{error}");
     }
 
+    const PROVIDER_WAT: &str = r#"
+(component
+  (core module $m
+    (func (export "answer") (result i32) i32.const 42))
+  (core instance $i (instantiate $m))
+  (func $answer (result u32) (canon lift (core func $i "answer")))
+  (instance $api (export "answer" (func $answer)))
+  (export "gate:provider/api@0.1.0" (instance $api)))
+"#;
+
+    const CONSUMER_WAT: &str = r#"
+(component
+  (import "gate:provider/api@0.1.0" (instance $api
+    (export "answer" (func $answer (result u32)))))
+  (alias export $api "answer" (func $answer_fn))
+  (core func $answer_core (canon lower (func $answer_fn)))
+  (core module $m
+    (import "" "answer" (func $answer (result i32)))
+    (func (export "run") (result i32) call $answer))
+  (core instance $i (instantiate $m
+    (with "" (instance (export "answer" (func $answer_core))))))
+  (func (export "run") (result u32) (canon lift (core func $i "run"))))
+"#;
+
+    #[tokio::test]
+    async fn dependency_call_dispatches_typed_export_to_provider() {
+        let mut config = wasmtime::Config::new();
+        config.wasm_component_model(true).consume_fuel(true);
+        let engine = Engine::new(&config).unwrap();
+        let manifest = |name: &str, plugins: Vec<&str>, host: Vec<&str>| -> Manifest {
+            serde_json::from_value(serde_json::json!({
+                "name": name, "version": "0.1.0", "language": "rust", "abi": "wasi-0.2",
+                "schema_version": 2, "host_abi": HOST_ABI, "min_host": HOST_VERSION,
+                "runtime": "wasi-component", "type": "library",
+                "exports": [], "imports": {"wasi": [], "host": host, "plugins": plugins},
+                "permissions": {}, "state": {}, "composition": {}, "metadata": {}
+            }))
+            .unwrap()
+        };
+        let provider = Arc::new(PluginRuntime {
+            manifest: manifest("provider", vec![], vec![]),
+            manifest_path: PathBuf::from("provider.manifest.json"),
+            component: Component::new(&engine, PROVIDER_WAT).unwrap(),
+            kv: HashMap::new(),
+            logs: Arc::new(Mutex::new(LogBuffer::new("provider"))),
+            instance_slots: Arc::new(tokio::sync::Semaphore::new(1)),
+            http_pre: None,
+            dependencies: Vec::new(),
+            http_pinned: HashMap::new(),
+        });
+        let consumer = PluginRuntime {
+            manifest: manifest(
+                "consumer",
+                vec!["provider"],
+                vec!["gate:provider/api@0.1.0"],
+            ),
+            manifest_path: PathBuf::from("consumer.manifest.json"),
+            component: Component::new(&engine, CONSUMER_WAT).unwrap(),
+            kv: HashMap::new(),
+            logs: Arc::new(Mutex::new(LogBuffer::new("consumer"))),
+            instance_slots: Arc::new(tokio::sync::Semaphore::new(1)),
+            http_pre: None,
+            dependencies: vec!["provider".to_string()],
+            http_pinned: HashMap::new(),
+        };
+        let plugins = HashMap::from([("provider".to_string(), provider)]);
+        let control = test_service_control(engine.clone());
+        let (body, _) = invoke_export(&engine, &consumer, &plugins, &control, "run", &[], 1)
+            .await
+            .expect("dependency call");
+        assert_eq!(body, serde_json::json!({ "result": 42 }));
+    }
+
     #[test]
-    fn socket_policy_denies_undeclared_destinations_and_bind_addresses() {
-        let outbound = HashSet::from(["203.0.113.10".parse::<IpAddr>().unwrap()]);
-        let inbound = HashSet::from(["127.0.0.1".parse::<IpAddr>().unwrap()]);
+    fn dependency_reentry_and_depth_are_rejected() {
+        let error = enter_dependency(&["a".to_string()], "a").unwrap_err();
+        assert!(error.to_string().contains(ERR_DEPENDENCY_REENTRANT));
+        let deep: Vec<String> = (0..MAX_DEPENDENCY_DEPTH).map(|i| format!("p{i}")).collect();
+        let error = enter_dependency(&deep, "next").unwrap_err();
+        assert!(error.to_string().contains(ERR_DEPENDENCY_DEPTH));
+    }
+
+    #[test]
+    fn socket_policy_denies_undeclared_destinations_ports_and_bind_addresses() {
+        let outbound = HashSet::from([("203.0.113.10".parse::<IpAddr>().unwrap(), 443)]);
+        let inbound = HashSet::from([("127.0.0.1".parse::<IpAddr>().unwrap(), 8080)]);
         assert!(socket_address_allowed(
             "203.0.113.10:443".parse().unwrap(),
             SocketAddrUse::TcpConnect,
             &outbound,
             &inbound,
+            false,
+        ));
+        assert!(!socket_address_allowed(
+            "203.0.113.10:8443".parse().unwrap(),
+            SocketAddrUse::TcpConnect,
+            &outbound,
+            &inbound,
+            false,
         ));
         assert!(!socket_address_allowed(
             "203.0.113.11:443".parse().unwrap(),
             SocketAddrUse::TcpConnect,
             &outbound,
             &inbound,
+            false,
         ));
         assert!(socket_address_allowed(
             "127.0.0.1:8080".parse().unwrap(),
             SocketAddrUse::TcpBind,
             &outbound,
             &inbound,
+            false,
+        ));
+        assert!(!socket_address_allowed(
+            "127.0.0.1:8081".parse().unwrap(),
+            SocketAddrUse::TcpBind,
+            &outbound,
+            &inbound,
+            false,
         ));
         assert!(!socket_address_allowed(
             "0.0.0.0:8080".parse().unwrap(),
             SocketAddrUse::TcpBind,
             &outbound,
             &inbound,
+            false,
         ));
+        assert!(socket_address_allowed(
+            "198.51.100.7:9000".parse().unwrap(),
+            SocketAddrUse::TcpConnect,
+            &outbound,
+            &inbound,
+            true,
+        ));
+    }
+
+    #[test]
+    fn network_outbound_preset_accepts_either_import_family() {
+        let manifest: Manifest = serde_json::from_value(serde_json::json!({
+            "name": "x", "version": "0.1.0", "language": "rust", "abi": "wasi-0.2",
+            "schema_version": 2, "host_abi": HOST_ABI, "min_host": HOST_VERSION,
+            "type": "library",
+            "permissions": {
+                "http": {"outbound": [], "outbound_any": true},
+                "network": {"outbound": [], "outbound_any": true, "inbound": []}
+            }
+        }))
+        .unwrap();
+        assert!(validate_network_preset(&manifest, true, false).is_ok());
+        assert!(validate_network_preset(&manifest, false, true).is_ok());
+        assert!(validate_network_preset(&manifest, false, false).is_err());
+    }
+
+    #[test]
+    fn exact_host_port_accepts_bracketed_ipv6() {
+        assert_eq!(
+            parse_exact_host_port("[2001:db8::1]:443").unwrap(),
+            ("2001:db8::1".to_string(), 443)
+        );
+        assert!(parse_exact_host_port("api.example.com:443").is_ok());
+        assert!(parse_exact_host_port("api.example.com").is_err());
+        assert!(parse_exact_host_port("*:443").is_err());
+        assert!(parse_exact_host_port("203.0.113.5:0").is_err());
+        assert_eq!(
+            normalize_host_port("[2001:0db8::1]:443").unwrap(),
+            "[2001:db8::1]:443"
+        );
+        assert_eq!(
+            normalize_host_port("API.Example.com:443").unwrap(),
+            "api.example.com:443"
+        );
+    }
+
+    #[tokio::test]
+    async fn http_allowlist_resolution_pins_addresses() {
+        let pinned = resolve_http_allowlist(&["localhost:8080".to_string()])
+            .await
+            .unwrap();
+        assert!(pinned
+            .get("localhost:8080")
+            .is_some_and(|addresses| !addresses.is_empty()));
+        let pinned = resolve_http_allowlist(&["203.0.113.5:443".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(
+            pinned.get("203.0.113.5:443").unwrap(),
+            &vec!["203.0.113.5".parse::<IpAddr>().unwrap()]
+        );
+    }
+
+    #[tokio::test]
+    async fn network_resolution_accepts_bracketed_ipv6() {
+        let addresses = resolve_network_hosts(&["[2001:db8::1]:443".to_string()])
+            .await
+            .unwrap();
+        assert!(addresses.contains(&("2001:db8::1".parse().unwrap(), 443)));
+    }
+
+    #[tokio::test]
+    async fn store_uses_http_allowlist_pinned_at_load() {
+        let mut config = wasmtime::Config::new();
+        config.wasm_component_model(true).consume_fuel(true);
+        let engine = Engine::new(&config).unwrap();
+        let manifest: Manifest = serde_json::from_value(serde_json::json!({
+            "name": "http-client", "version": "0.1.0", "language": "rust", "abi": "wasi-0.2",
+            "schema_version": 2, "host_abi": HOST_ABI, "min_host": HOST_VERSION,
+            "type": "library",
+            "permissions": {
+                "http": {"outbound": ["pinned.test:8080"], "outbound_any": false}
+            }
+        }))
+        .unwrap();
+        let pinned = HashMap::from([(
+            "pinned.test:8080".to_string(),
+            vec!["203.0.113.10".parse::<IpAddr>().unwrap()],
+        )]);
+        let plugin = PluginRuntime {
+            manifest,
+            manifest_path: PathBuf::from("http.manifest.json"),
+            component: Component::new(&engine, "(component)").unwrap(),
+            kv: HashMap::new(),
+            logs: Arc::new(Mutex::new(LogBuffer::new("http-client"))),
+            instance_slots: Arc::new(tokio::sync::Semaphore::new(1)),
+            http_pre: None,
+            dependencies: Vec::new(),
+            http_pinned: pinned.clone(),
+        };
+        let store = create_store(&engine, &plugin).await.unwrap();
+        assert_eq!(store.data().http_hooks.pinned, pinned);
+        assert_eq!(store.data().http_hooks.allowed, vec!["pinned.test:8080"]);
+    }
+
+    #[test]
+    fn http_policy_checks_scheme_host_and_port() {
+        let hooks = AllowlistHooks {
+            allowed: vec!["api.example.com:443".to_string()],
+            outbound_any: false,
+            pinned: HashMap::from([(
+                "api.example.com:443".to_string(),
+                vec!["203.0.113.10".parse().unwrap()],
+            )]),
+        };
+        let request = |uri: &str| {
+            use http_body_util::BodyExt;
+            let body = http_body_util::Full::new(axum::body::Bytes::new())
+                .map_err(|never| match never {})
+                .boxed_unsync();
+            http::Request::builder().uri(uri).body(body).unwrap()
+        };
+        assert!(hooks
+            .target(&request("https://api.example.com/resource"))
+            .is_some());
+        assert!(hooks
+            .target(&request("https://api.example.com:8443/resource"))
+            .is_none());
+        assert!(hooks
+            .target(&request("http://api.example.com/resource"))
+            .is_none());
+        assert!(hooks
+            .target(&request("https://other.example.com/resource"))
+            .is_none());
+        assert!(hooks
+            .target(&request("http://127.0.0.1:9000/dev"))
+            .is_none());
+        let preset = AllowlistHooks {
+            allowed: Vec::new(),
+            outbound_any: true,
+            pinned: HashMap::new(),
+        };
+        assert!(preset
+            .target(&request("https://other.example.com/resource"))
+            .is_some());
+        assert!(preset
+            .target(&request("http://other.example.com/resource"))
+            .is_none());
+        assert!(preset
+            .target(&request("http://localhost:8787/dev"))
+            .is_some());
     }
 
     #[test]
@@ -3658,56 +4448,6 @@ mod tests {
         assert_eq!(v["fields"]["k"], "v");
     }
 
-    #[test]
-    fn plugin_signature_payload_covers_manifest_permissions_and_component() {
-        let raw = r#"{"name":"x","version":"0.1.0","language":"rust","abi":"wasi-0.2","runtime":"wasi-component","type":"library","component":"x.wasm","exports":[],"imports":{"wasi":[],"host":[],"plugins":[]},"permissions":{"network":{"outbound":[],"inbound":[]}},"state":{},"composition":{},"metadata":{"sha256":"abc"}}"#;
-        let mut manifest: serde_json::Value = serde_json::from_str(raw).unwrap();
-        let original = signed_manifest_payload(&manifest, b"component bytes").unwrap();
-        manifest["permissions"]["network"]["outbound"]
-            .as_array_mut()
-            .unwrap()
-            .push(serde_json::json!("example.com"));
-        let changed_policy = signed_manifest_payload(&manifest, b"component bytes").unwrap();
-        let changed_component = signed_manifest_payload(&manifest, b"changed component").unwrap();
-        assert_ne!(original, changed_policy);
-        assert_ne!(changed_policy, changed_component);
-    }
-
-    #[test]
-    fn ed25519_signature_authenticates_manifest_and_component() {
-        use base64::Engine;
-        use ring::signature::{Ed25519KeyPair, KeyPair};
-        let raw = r#"{"name":"signed","version":"1.0.0","language":"rust","abi":"wasi-0.2","runtime":"wasi-component","type":"library","component":"signed.wasm","exports":[],"imports":{"wasi":[],"host":[],"plugins":[]},"permissions":{"filesystem":[],"http":{"outbound":[],"inbound":false},"network":{"outbound":[],"inbound":[]},"kv":null,"resources":{"max_memory_mb":64,"max_fuel":1000000,"timeout_ms":5000,"max_instances":1}},"state":{"persistent":false,"storage":"none","root":null},"composition":{"strategy":"build-time","entry":false},"metadata":{"sha256":"hash","signature_format":"owasidea-manifest-v1"}}"#;
-        let mut manifest: serde_json::Value = serde_json::from_str(raw).unwrap();
-        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();
-        let pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
-        let payload = signed_manifest_payload(&manifest, b"artifact").unwrap();
-        let signature = pair.sign(&payload);
-        manifest["metadata"]["signature"] =
-            serde_json::json!(base64::engine::general_purpose::STANDARD.encode(signature.as_ref()));
-        assert!(verify_signature_with_key(
-            &manifest,
-            b"artifact",
-            pair.public_key().as_ref(),
-            signature.as_ref(),
-            "signed",
-        )
-        .is_ok());
-
-        manifest["permissions"]["network"]["outbound"]
-            .as_array_mut()
-            .unwrap()
-            .push(serde_json::json!("attacker.example"));
-        assert!(verify_signature_with_key(
-            &manifest,
-            b"artifact",
-            pair.public_key().as_ref(),
-            signature.as_ref(),
-            "signed",
-        )
-        .is_err());
-    }
-
     fn test_app_state(plugin_metrics: plugin_metrics::PluginMetricsMap) -> AppState {
         AppState {
             engine: Engine::default(),
@@ -3719,14 +4459,114 @@ mod tests {
             requests: Arc::new(std::sync::atomic::AtomicU64::new(5)),
             errors: Arc::new(std::sync::atomic::AtomicU64::new(2)),
             plugin_metrics: Arc::new(plugin_metrics),
+            service_control: test_service_control(Engine::default()),
             dev_mode: false,
             dev_hot_reload: false,
             dev_watch_paths: Vec::new(),
             dev_last_reload: Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
             manifests_dir: PathBuf::from("."),
+            app_ui_plugin: None,
             #[cfg(feature = "streaming")]
             jobs: jobs::test_manager(),
         }
+    }
+
+    #[tokio::test]
+    async fn production_app_surface_allows_only_the_configured_glue_plugin() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let mut state = test_app_state(std::sync::RwLock::new(HashMap::new()));
+        state.app_ui_plugin = Some("glue".to_string());
+        let router = build_router(state).unwrap();
+
+        let denied = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/plugin/other/manifest")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+
+        let denied_app = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/app/other/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied_app.status(), StatusCode::FORBIDDEN);
+
+        let service = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/plugin/other/service/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            service.status(),
+            StatusCode::FORBIDDEN,
+            "service lifecycle routes are glue-only in production"
+        );
+
+        let glue = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/plugin/glue/manifest")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            glue.status(),
+            StatusCode::NOT_FOUND,
+            "glue passes the guard"
+        );
+
+        let health = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(health.status(), StatusCode::OK);
+
+        let mut dev = test_app_state(std::sync::RwLock::new(HashMap::new()));
+        dev.dev_mode = true;
+        dev.app_ui_plugin = Some("glue".to_string());
+        let dev_router = build_router(dev).unwrap();
+        let other = dev_router
+            .oneshot(
+                Request::builder()
+                    .uri("/plugin/other/manifest")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            other.status(),
+            StatusCode::NOT_FOUND,
+            "dev keeps full access"
+        );
     }
 
     #[cfg(not(feature = "streaming"))]
@@ -3836,159 +4676,6 @@ mod tests {
         let no_timeout =
             serde_json::json!({ "permissions": { "resources": { "timeout_ms": null } } });
         assert_eq!(ui_bridge_timeout_ms(&ui, &no_timeout), None);
-    }
-
-    /// Minimal empty component binary (component-model magic + version).
-    const EMPTY_COMPONENT: &[u8] = b"\0asm\x0d\0\x01\0";
-
-    /// Guest export that blocks in a WASI timer instead of returning: the
-    /// in-process stand-in for a socket call that never resolves.
-    const SLEEPY_DIAL_TCP_WAT: &str = r#"
-(component
-  (import "wasi:io/poll@0.2.0" (instance $poll
-    (export "pollable" (type $pollable0 (sub resource)))
-    (export "[method]pollable.block" (func $block (param "self" (borrow $pollable0))))
-  ))
-  (alias export $poll "pollable" (type $pollable))
-  (import "wasi:clocks/monotonic-clock@0.2.0" (instance $clock
-    (export "subscribe-duration" (func $subscribe (param "when" u64) (result (own $pollable))))
-  ))
-  (alias export $poll "[method]pollable.block" (func $block_fn))
-  (alias export $clock "subscribe-duration" (func $subscribe_fn))
-  (core func $block_lowered (canon lower (func $block_fn)))
-  (core func $subscribe_lowered (canon lower (func $subscribe_fn)))
-  (core module $m
-    (import "" "subscribe" (func $subscribe_core (param i64) (result i32)))
-    (import "" "block" (func $block_core (param i32)))
-    (memory (export "memory") 1)
-    (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32) i32.const 0)
-    (func (export "dial-tcp") (param i32 i32 i32) (result i32)
-      i64.const 2000000000
-      call $subscribe_core
-      call $block_core
-      i32.const 0))
-  (core instance $i (instantiate $m
-    (with "" (instance
-      (export "subscribe" (func $subscribe_lowered))
-      (export "block" (func $block_lowered))))))
-  (func (export "dial-tcp") (param "host" string) (param "port" u16)
-    (result (result string (error string)))
-    (canon lift (core func $i "dial-tcp")
-      (memory (core memory $i "memory"))
-      (realloc (core func $i "cabi_realloc"))))
-)
-"#;
-
-    fn poc_test_plugin(
-        engine: &Engine,
-        timeout_ms: Option<u64>,
-        wat: Option<&str>,
-    ) -> PluginRuntime {
-        let manifest: Manifest = serde_json::from_value(serde_json::json!({
-            "name": "poc-spin",
-            "version": "0.1.0",
-            "language": "rust",
-            "abi": "wasi-0.2",
-            "runtime": "wasi-component",
-            "type": "library",
-            "component": "poc-spin.wasm",
-            "exports": [],
-            "imports": { "wasi": [], "host": [], "plugins": [] },
-            "permissions": { "resources": { "timeout_ms": timeout_ms } },
-            "state": {},
-            "composition": {},
-            "metadata": {}
-        }))
-        .unwrap();
-        let component = match wat {
-            Some(wat) => Component::new(engine, wat).expect("compile WAT component"),
-            None => Component::from_binary(engine, EMPTY_COMPONENT).unwrap(),
-        };
-        PluginRuntime {
-            manifest,
-            manifest_path: PathBuf::from("poc-spin.json"),
-            component,
-            kv: Arc::new(std::sync::Mutex::new(
-                rusqlite::Connection::open_in_memory().unwrap(),
-            )),
-            logs: Arc::new(Mutex::new(LogBuffer::new("poc-spin"))),
-            instance_slots: Arc::new(tokio::sync::Semaphore::new(1)),
-            http_pre: None,
-        }
-    }
-
-    #[test]
-    fn poc_route_timeout_defaults_to_ten_seconds() {
-        let engine = Engine::default();
-        assert_eq!(
-            poc_timeout_ms(&poc_test_plugin(&engine, None, None)),
-            DEFAULT_POC_TIMEOUT_MS
-        );
-        assert_eq!(DEFAULT_POC_TIMEOUT_MS, 10_000);
-        assert_eq!(
-            poc_timeout_ms(&poc_test_plugin(&engine, Some(250), None)),
-            250
-        );
-    }
-
-    /// End-to-end: a POC route whose export never returns must answer 504 after
-    /// the manifest timeout and give the `max_instances` slot back.
-    #[tokio::test]
-    async fn poc_route_timeout_answers_504_and_releases_the_instance_slot() {
-        use axum::body::Body;
-        use axum::http::Request;
-        use tower::ServiceExt;
-
-        let mut config = wasmtime::Config::new();
-        config.wasm_component_model(true);
-        config.consume_fuel(true);
-        let engine = Engine::new(&config).expect("engine");
-        let plugin = Arc::new(poc_test_plugin(
-            &engine,
-            Some(50),
-            Some(SLEEPY_DIAL_TCP_WAT),
-        ));
-        let name = plugin.manifest.name.clone();
-        let mut state = test_app_state(std::sync::RwLock::new(HashMap::new()));
-        state.engine = engine;
-        state.plugins = Arc::new(std::sync::RwLock::new(HashMap::from([(
-            name.clone(),
-            plugin.clone(),
-        )])));
-        let router = build_router(state).expect("router");
-
-        let started = std::time::Instant::now();
-        let response = router
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!("/plugin/{name}/dial-tcp"))
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"host":"example.com","port":443}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        assert!(
-            String::from_utf8_lossy(&body).contains("dial-tcp timed out after 50 ms"),
-            "unexpected body: {}",
-            String::from_utf8_lossy(&body)
-        );
-        // The guest asked for 2 s; the 50 ms manifest timeout must cut it short.
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(1),
-            "POC route timeout did not interrupt the guest: {:?}",
-            started.elapsed()
-        );
-        assert_eq!(
-            plugin.instance_slots.available_permits(),
-            1,
-            "timed-out call must release its instance slot"
-        );
     }
 
     #[test]

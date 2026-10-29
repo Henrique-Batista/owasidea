@@ -2,6 +2,7 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 mod abi;
 mod build_id;
+mod bundle_cli;
 mod call;
 mod client_gen;
 mod config;
@@ -13,9 +14,9 @@ mod doctor;
 mod errors;
 mod go_build;
 mod logs;
+mod migrate;
 mod permissions;
 mod profile;
-mod registry_lock;
 mod sbom;
 mod signing;
 mod smoke_gen;
@@ -55,6 +56,14 @@ struct Cli {
 
     #[command(subcommand)]
     cmd: Commands,
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum BundleTarget {
+    /// Tauri desktop installer (current default).
+    Desktop,
+    /// Runnable directory with the host binary, manifests and components.
+    Cli,
 }
 
 #[derive(Subcommand)]
@@ -112,12 +121,9 @@ enum Commands {
         #[command(subcommand)]
         cmd: PluginCmd,
     },
-    /// Build all plugins, regenerate manifests, sign, and copy artifacts.
-    #[command(about = "Build all plugins, regenerate manifests, sign, and copy artifacts.")]
+    /// Build all plugins, regenerate manifests, and copy artifacts.
+    #[command(about = "Build all plugins, regenerate manifests, and copy artifacts.")]
     Build {
-        /// Do not sign manifests even if [signing] is configured.
-        #[arg(long)]
-        no_sign: bool,
         /// Fail (exit non-zero) if any plugin permission is widened vs the previous lock.
         #[arg(long)]
         fail_on_widen: bool,
@@ -194,6 +200,12 @@ enum Commands {
         #[arg(long)]
         check: bool,
     },
+    /// Show or apply explicit 1.1 to 1.2 config migration.
+    Migrate {
+        /// Rewrite supported config values (default: report only).
+        #[arg(long)]
+        write: bool,
+    },
     /// Show host health, build id, plugins and services.
     #[command(about = "Show host health, build id, plugins and services.")]
     Status {
@@ -245,12 +257,15 @@ enum Commands {
         #[arg(long, default_value_t = 30)]
         timeout: u64,
     },
-    /// Build and package the desktop app with Tauri.
-    #[command(about = "Build and package the desktop app with Tauri.")]
+    /// Build and package the app (Tauri desktop or CLI/headless).
+    #[command(about = "Build and package the app (Tauri desktop or CLI/headless).")]
     Bundle {
         /// Reuse the current build instead of running `owasidea build`.
         #[arg(long)]
         no_build: bool,
+        /// Package a desktop installer or a CLI/headless directory.
+        #[arg(long, value_enum, default_value = "desktop")]
+        target: BundleTarget,
         /// Bundle targets, comma separated (for example deb,rpm,appimage or nsis,msi).
         /// Defaults to the app/tauri config, which uses "all" for Shipyard.
         #[arg(long, value_delimiter = ',')]
@@ -308,19 +323,6 @@ enum Commands {
         #[arg(long, value_name = "PROFILE")]
         profile: Option<String>,
     },
-    /// Generate an Ed25519 keypair for signing plugins.
-    #[command(about = "Generate an Ed25519 keypair for signing plugins.")]
-    Keygen {
-        #[arg(long, default_value = ".")]
-        out: PathBuf,
-    },
-    /// Sign a plugin component and update its manifest.
-    #[command(about = "Sign a plugin component and update its manifest.")]
-    Sign {
-        plugin: String,
-        #[arg(long)]
-        key: PathBuf,
-    },
     /// WIT utilities (generate WIT from Rust attributes).
     #[command(about = "WIT utilities (generate WIT from Rust attributes).")]
     Wit {
@@ -330,18 +332,12 @@ enum Commands {
     /// Validate manifests, checksums and capabilities against config.
     #[command(about = "Validate manifests, checksums and capabilities against config.")]
     Validate,
-    /// Verify a dist directory: manifests, components, signatures, UI index.
-    #[command(about = "Verify a dist directory: manifests, components, signatures, UI index.")]
+    /// Verify a dist directory: manifests, components, UI index.
+    #[command(about = "Verify a dist directory: manifests, components, UI index.")]
     Verify {
         /// Dist directory to verify.
         #[arg(help = "Dist directory.")]
         dist: PathBuf,
-        /// Pinned Ed25519 public key (base64) used as the trust root.
-        #[arg(long, value_name = "PATH")]
-        public_key: Option<PathBuf>,
-        /// Trust the public key staged inside <dist>/trust. Local checks only.
-        #[arg(long)]
-        allow_dist_trust: bool,
     },
     /// Generate a CycloneDX/SPDX SBOM from Cargo/npm/Go lockfiles.
     #[command(about = "Generate a CycloneDX/SPDX SBOM from Cargo/npm/Go lockfiles.")]
@@ -397,52 +393,6 @@ enum Commands {
         #[command(subcommand)]
         cmd: ConfigCmd,
     },
-    /// Search or install plugins from a remote HTTPS registry.
-    #[command(about = "Search or install plugins from a remote HTTPS registry.")]
-    Registry {
-        #[command(subcommand)]
-        cmd: RegistryCmd,
-    },
-}
-
-#[derive(Subcommand)]
-enum RegistryCmd {
-    /// Search a static registry index.
-    Search {
-        query: String,
-        #[arg(long)]
-        url: String,
-    },
-    /// Install a signed plugin artifact from a registry.
-    Install {
-        name: String,
-        #[arg(long)]
-        version: String,
-        #[arg(long)]
-        url: String,
-        #[arg(long)]
-        public_key: PathBuf,
-        #[arg(long)]
-        force: bool,
-        #[arg(long)]
-        locked: bool,
-    },
-    /// Update lockfile entries from the registry (lock only).
-    Update {
-        #[arg(long)]
-        name: Option<String>,
-        #[arg(long)]
-        version: Option<String>,
-        #[arg(long)]
-        url: String,
-        #[arg(long)]
-        public_key: PathBuf,
-    },
-    /// Show plugins whose lockfile version differs from the registry.
-    Outdated {
-        #[arg(long)]
-        url: String,
-    },
 }
 
 #[derive(Subcommand)]
@@ -483,14 +433,10 @@ enum PluginCmd {
     /// Add an existing plugin (local path) to the app config.
     #[command(about = "Add an existing plugin to the app config.")]
     Add {
-        /// Local plugin directory or registry source.
+        /// Local plugin directory.
         source: String,
         #[arg(long)]
         dry_run: bool,
-        #[arg(long)]
-        registry: Option<String>,
-        #[arg(long)]
-        version: Option<String>,
     },
 }
 
@@ -548,6 +494,37 @@ fn external_command(program: &str) -> std::process::Command {
         }
     }
     std::process::Command::new(program)
+}
+
+/// Initial `dev` build when the dashboard owns the terminal: capture the
+/// child output instead of letting it print before the alternate screen hides
+/// it. The TUI shows the lines in Output and a persistent failure banner.
+fn run_captured_build(
+    config: &Path,
+    manifest_dir: &Path,
+) -> anyhow::Result<(bool, Vec<tui::OutputLine>)> {
+    let output = std::process::Command::new(std::env::current_exe()?)
+        .arg("--config")
+        .arg(config)
+        .arg("--manifest-dir")
+        .arg(manifest_dir)
+        .arg("build")
+        .stdin(std::process::Stdio::null())
+        .output()?;
+    let mut lines = Vec::new();
+    for (stream, level) in [
+        (output.stdout, tui::Level::Info),
+        (output.stderr, tui::Level::Error),
+    ] {
+        for line in String::from_utf8_lossy(&stream).lines() {
+            lines.push(tui::OutputLine {
+                source: "build".to_string(),
+                level,
+                text: line.to_string(),
+            });
+        }
+    }
+    Ok((output.status.success(), lines))
 }
 
 fn external_command_path(path: &Path) -> std::process::Command {
@@ -903,30 +880,13 @@ async fn run() -> anyhow::Result<()> {
                 &cli.config,
                 cli.json,
             ),
-            PluginCmd::Add {
-                source,
-                dry_run,
-                registry,
-                version,
-            } => cmd_plugin_add(
-                &source,
-                dry_run,
-                registry.as_deref(),
-                version.as_deref(),
-                &cli.config,
-                cli.json,
-            ),
+            PluginCmd::Add { source, dry_run } => {
+                cmd_plugin_add(&source, dry_run, &cli.config, cli.json)
+            }
         },
-        Commands::Build {
-            no_sign,
-            fail_on_widen,
-        } => cmd_build(
-            &cli.config,
-            &cli.manifest_dir,
-            !no_sign,
-            fail_on_widen,
-            None,
-        ),
+        Commands::Build { fail_on_widen } => {
+            cmd_build(&cli.config, &cli.manifest_dir, fail_on_widen, None)
+        }
         Commands::Test {
             no_build,
             no_smoke,
@@ -1029,6 +989,8 @@ async fn run() -> anyhow::Result<()> {
                 config_path: cli.config.clone(),
                 manifest_dir: app_path(&app_root(&cli.config), &cli.manifest_dir),
                 children: Vec::new(),
+                initial_output: Vec::new(),
+                initial_build_error: None,
             };
             let (tx, rx) = tui::channel();
             tui::run(session, tx, rx).await
@@ -1052,13 +1014,13 @@ async fn run() -> anyhow::Result<()> {
                 Ok(())
             }
         }
+        Commands::Migrate { write } => migrate::cmd_migrate(&cli.config, write, cli.json),
         Commands::Run => {
             let addr = cli
                 .http_addr
                 .clone()
                 .or_else(|| read_host_addr(&cli.config))
                 .unwrap_or_else(|| "127.0.0.1:0".to_string());
-            apply_signing_env(&cli.config);
             cmd_run(&manifest_dir, &addr).await
         }
         Commands::Status { watch } => {
@@ -1114,6 +1076,7 @@ async fn run() -> anyhow::Result<()> {
         }
         Commands::Bundle {
             no_build,
+            target,
             bundles,
             isolate_host_libs,
             mask_paths,
@@ -1124,6 +1087,7 @@ async fn run() -> anyhow::Result<()> {
             &cli.config,
             &cli.manifest_dir,
             !no_build,
+            target,
             &bundles,
             isolate_host_libs,
             &mask_paths,
@@ -1156,17 +1120,11 @@ async fn run() -> anyhow::Result<()> {
             check,
             cli.json,
         ),
-        Commands::Keygen { out } => cmd_keygen(&out),
-        Commands::Sign { plugin, key } => cmd_sign(&manifest_dir, &plugin, &key),
         Commands::Wit { cmd } => match cmd {
             WitCmd::Generate { path } => cmd_wit_generate(&path, cli.json),
         },
         Commands::Validate => validate::cmd_validate(&cli.config, &cli.manifest_dir, cli.json),
-        Commands::Verify {
-            dist,
-            public_key,
-            allow_dist_trust,
-        } => verify::cmd_verify(&dist, public_key.as_deref(), allow_dist_trust, cli.json),
+        Commands::Verify { dist } => verify::cmd_verify(&dist, cli.json),
         Commands::Sbom {
             output,
             format,
@@ -1197,48 +1155,6 @@ async fn run() -> anyhow::Result<()> {
         } => cmd_client(&manifest_dir, &lang, &output, check),
         Commands::Config { cmd } => match cmd {
             ConfigCmd::Render { target, check } => cmd_config_render(&cli.config, &target, check),
-        },
-        Commands::Registry { cmd } => match cmd {
-            RegistryCmd::Search { query, url } => cmd_registry_search(&query, &url, cli.json).await,
-            RegistryCmd::Install {
-                name,
-                version,
-                url,
-                public_key,
-                force,
-                locked,
-            } => {
-                cmd_registry_install(
-                    &name,
-                    &version,
-                    &url,
-                    &public_key,
-                    &manifest_dir,
-                    force,
-                    locked,
-                    cli.json,
-                )
-                .await
-            }
-            RegistryCmd::Update {
-                name,
-                version,
-                url,
-                public_key,
-            } => {
-                cmd_registry_update(
-                    name.as_deref(),
-                    version.as_deref(),
-                    &url,
-                    &public_key,
-                    &manifest_dir,
-                    cli.json,
-                )
-                .await
-            }
-            RegistryCmd::Outdated { url } => {
-                cmd_registry_outdated(&url, &manifest_dir, cli.json).await
-            }
         },
     }
 }
@@ -1981,16 +1897,9 @@ fn cmd_plugin_new(
 fn cmd_plugin_add(
     source: &str,
     dry_run: bool,
-    registry: Option<&str>,
-    _version: Option<&str>,
     config_path: &Path,
     json: bool,
 ) -> anyhow::Result<()> {
-    if registry.is_some() {
-        anyhow::bail!(
-            "registry add not yet supported; use `owasidea registry install` (follow-up)"
-        );
-    }
     let src = std::path::Path::new(source);
     if !src.exists() || !src.is_dir() {
         anyhow::bail!("plugin source path not found or not a directory: {source}");
@@ -2222,12 +2131,15 @@ fn generate_manifest(
     kind: &str,
     out: &Path,
     fs: &[String],
-    kv: Option<&str>,
+    kv_grants: &[String],
+    capabilities: &[String],
+    dependencies: &[String],
     http_outbound: &[String],
     network_outbound: &[String],
     network_inbound: &[String],
     persistent: bool,
     build_id: &str,
+    app_ui_plugin: Option<&str>,
 ) -> anyhow::Result<()> {
     use serde_json::json;
     use sha2::{Digest, Sha256};
@@ -2307,43 +2219,29 @@ fn generate_manifest(
     let wasi: Vec<String> = wasi_set.into_iter().collect();
     let host: Vec<String> = host_set.into_iter().collect();
     let imports_host_kv = host.iter().any(|name| name.starts_with("poc:host/host-kv"));
-    if imports_host_kv && kv.is_none() {
+    if imports_host_kv && kv_grants.is_empty() {
         anyhow::bail!(
             "plugin {name}: the component imports poc:host/host-kv but no kv permission is configured.\n\
              Add this to wasm-app.toml and build again:\n\n\
              [plugins.{name}]\n\
-             kv = \"{name}:read-write\"\n"
+             kv = [\"{name}:read-write\"]\n"
         );
     }
-    if !imports_host_kv && kv.is_some() {
+    if !imports_host_kv && !kv_grants.is_empty() {
         anyhow::bail!(
             "plugin {name}: kv permission is configured but the component does not import \
              poc:host/host-kv; remove the kv line or annotate the component with \
              #[owasidea::host_kv]"
         );
     }
-    for host in http_outbound {
-        if host == "*"
-            || host.is_empty()
-            || host.contains('/')
-            || (host.contains(':') && host.parse::<std::net::IpAddr>().is_err())
-        {
-            anyhow::bail!("invalid outbound HTTP host {host:?} for {name}");
-        }
+    for (i, host) in http_outbound.iter().enumerate() {
+        config::validate_host_port(&format!("{name}.http_outbound[{i}]"), host)?;
     }
-    for host in network_outbound {
-        if host == "*"
-            || host.contains('/')
-            || (host.contains(':') && host.parse::<std::net::IpAddr>().is_err())
-            || host.is_empty()
-        {
-            anyhow::bail!("invalid outbound network host {host:?} for {name}");
-        }
+    for (i, host) in network_outbound.iter().enumerate() {
+        config::validate_host_port(&format!("{name}.network_outbound[{i}]"), host)?;
     }
-    for address in network_inbound {
-        if address.parse::<std::net::IpAddr>().is_err() {
-            anyhow::bail!("inbound network permission must be an IP address: {address}");
-        }
+    for (i, address) in network_inbound.iter().enumerate() {
+        config::validate_ip_port(&format!("{name}.network_inbound[{i}]"), address)?;
     }
 
     let exports = wit_types::extract_exports(&doc);
@@ -2392,31 +2290,42 @@ fn generate_manifest(
         }
         fs_perms.push(json!({"path": path, "access": access, "preopen": true}));
     }
+    if capabilities
+        .iter()
+        .any(|capability| capability == "app-data")
+    {
+        fs_perms.push(json!({
+            "path": format!("plugins/{name}/data"),
+            "access": "read-write",
+            "preopen": true
+        }));
+    }
 
     // kv
-    let kv = if let Some(k) = kv {
-        let (ns, access) = if let Some((n, a)) = k.rsplit_once(':') {
-            (n.to_string(), a.to_string())
-        } else {
-            (k.to_string(), "read-write".to_string())
-        };
-        if ns.is_empty()
-            || !ns
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
-            || !matches!(access.as_str(), "read" | "read-write")
-        {
-            anyhow::bail!("invalid KV permission {k:?}");
-        }
-        Some(json!({"namespace": ns, "access": access}))
-    } else {
-        None
-    };
+    let kv = kv_grants
+        .iter()
+        .map(|k| {
+            let (ns, access) = if let Some((n, a)) = k.rsplit_once(':') {
+                (n.to_string(), a.to_string())
+            } else {
+                (k.to_string(), "read-write".to_string())
+            };
+            if ns.is_empty()
+                || !ns
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+                || !matches!(access.as_str(), "read" | "read-write")
+            {
+                anyhow::bail!("invalid KV permission {k:?}");
+            }
+            Ok(json!({"namespace": ns, "access": access}))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
 
     let storage = if persistent {
-        if !fs.is_empty() {
+        if !fs_perms.is_empty() {
             "wasi-filesystem"
-        } else if kv.is_some() {
+        } else if !kv.is_empty() {
             "host-kv"
         } else {
             "none"
@@ -2435,7 +2344,7 @@ fn generate_manifest(
         "name": name,
         "version": version,
         "language": language,
-        "schema_version": 1,
+        "schema_version": abi::CURRENT_SCHEMA_VERSION,
         "host_abi": owasidea_host::HOST_ABI,
         "min_host": owasidea_host::HOST_VERSION,
         "abi": abi,
@@ -2443,18 +2352,26 @@ fn generate_manifest(
         "type": kind,
         "component": std::path::Path::new(component).file_name().unwrap_or_default().to_string_lossy(),
         "exports": exports,
-        "imports": {"wasi": wasi, "host": host, "plugins": []},
+        "imports": {"wasi": wasi, "host": host, "plugins": dependencies},
         "permissions": {
             "filesystem": fs_perms,
-            "http": {"outbound": http_outbound, "inbound": kind == "executable" || kind == "hybrid"},
-            "network": {"outbound": network_outbound, "inbound": network_inbound},
+            "http": {
+                "outbound": http_outbound,
+                "outbound_any": capabilities.iter().any(|capability| capability == "network-outbound"),
+                "inbound": kind == "executable" || kind == "hybrid"
+            },
+            "network": {
+                "outbound": network_outbound,
+                "outbound_any": capabilities.iter().any(|capability| capability == "network-outbound"),
+                "inbound": network_inbound
+            },
             "kv": kv,
             "resources": {"max_memory_mb": 64, "max_fuel": 1000000000, "timeout_ms": 30000, "max_instances": 1}
         },
         "state": {"persistent": persistent, "storage": storage,
                   "root": if storage == "wasi-filesystem" { format!("./data/{}", name) } else { String::new() }},
         "composition": {"strategy": "build-time", "entry": kind == "executable"},
-        "metadata": {"author": "", "license": "MIT", "description": "", "sha256": sha, "build_id": build_id}
+        "metadata": {"author": "", "license": "MIT", "description": "", "sha256": sha, "build_id": build_id, "app_ui_plugin": app_ui_plugin}
     });
 
     let manifest_dir = out.parent().unwrap_or_else(|| std::path::Path::new("."));
@@ -2475,11 +2392,74 @@ fn generate_manifest(
     Ok(())
 }
 
+fn component_export_interfaces(
+    component: &Path,
+) -> anyhow::Result<std::collections::BTreeSet<String>> {
+    let output = std::process::Command::new("wasm-tools")
+        .args(["component", "wit"])
+        .arg(component)
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "wasm-tools component wit failed for {}",
+            component.display()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            line.strip_prefix("export ")
+                .and_then(|line| line.strip_suffix(';'))
+                .filter(|line| line.contains('/'))
+                .map(str::to_string)
+        })
+        .collect())
+}
+
+/// Every non-host import must resolve to an interface exported by one of the
+/// plugin's declared local dependencies.
+fn validate_dependency_contracts(
+    root: &Path,
+    plugins: &std::collections::BTreeMap<String, PluginSection>,
+    manifest_dir: &Path,
+) -> anyhow::Result<()> {
+    for (name, plugin) in plugins {
+        let manifest_path = manifest_dir.join(format!("{name}.manifest.json"));
+        let manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&manifest_path)?)?;
+        let mut available = std::collections::BTreeSet::new();
+        for dependency in &plugin.dependencies {
+            let dep = plugins.get(dependency).ok_or_else(|| {
+                anyhow::anyhow!("plugin {name} depends on unknown plugin {dependency:?}")
+            })?;
+            let component = app_path(root, &dep.path).join(format!("{dependency}.component.wasm"));
+            available.extend(component_export_interfaces(&component).with_context(|| {
+                format!("cannot inspect dependency {dependency} for plugin {name}")
+            })?);
+        }
+        for interface in manifest["imports"]["host"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .filter(|interface| !interface.starts_with("poc:host/"))
+        {
+            if !available.contains(interface) {
+                anyhow::bail!(
+                    "plugin {name} imports {interface}, which is not exported by its declared dependencies {:?}",
+                    plugin.dependencies
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::regex_creation_in_loops, clippy::too_many_lines)]
 fn cmd_build(
     config: &Path,
     manifest_dir: &Path,
-    sign: bool,
     fail_on_widen: bool,
     cfg_override: Option<&AppConfig>,
 ) -> anyhow::Result<()> {
@@ -2488,7 +2468,9 @@ fn cmd_build(
         Some(cfg) => cfg.clone(),
         None => {
             let raw = std::fs::read_to_string(config)?;
-            toml::from_str(&raw)?
+            toml::from_str(&raw).map_err(|error| {
+                anyhow::anyhow!("{error}; if this is a 1.1 config, run `owasidea migrate`")
+            })?
         }
     };
     cfg.validate()?;
@@ -2509,6 +2491,7 @@ fn cmd_build(
         .as_ref()
         .and_then(|a| a.version.clone())
         .unwrap_or_else(|| "0.1.0".to_string());
+    let app_ui_plugin = cfg.app.as_ref().and_then(|app| app.ui_plugin.as_deref());
 
     let build_id = build_id::compute_build_id();
     std::env::set_var("OWASIDEA_BUILD_ID", &build_id);
@@ -2525,7 +2508,15 @@ fn cmd_build(
     for (name, p) in ordered {
         println!("==> Building {} ({})", name, p.language);
         if p.runtime.as_deref() == Some("js-wasm") {
-            let manifest = build_ui_plugin(&root, name, p, &app_version, &manifest_dir, &build_id)?;
+            let manifest = build_ui_plugin(
+                &root,
+                name,
+                p,
+                &app_version,
+                &manifest_dir,
+                &build_id,
+                app_ui_plugin,
+            )?;
             ui_index.push(ui_index_entry(name, &manifest));
             continue;
         }
@@ -2806,15 +2797,19 @@ fn cmd_build(
             &p.kind,
             &manifest,
             &p.fs,
-            p.kv.as_deref(),
+            &p.kv,
+            &p.capabilities,
+            &p.dependencies,
             &p.http_outbound,
             &p.network_outbound,
             &p.network_inbound,
             p.persistent,
             &build_id,
+            app_ui_plugin,
         )?;
         println!("    manifest: {}", manifest.display());
     }
+    validate_dependency_contracts(&root, &plugins, &manifest_dir)?;
     if ui_dir.join("public").is_dir() {
         // Digests must travel with the assets they describe. The dashboard
         // verifies the bundle it actually loaded, even when the running
@@ -2899,9 +2894,6 @@ fn cmd_build(
         println!("    permissions lock: {}", lock_path.display());
     }
 
-    if sign {
-        sign_all(&root, &manifest_dir, cfg.signing.as_ref())?;
-    }
     // Regenerate the UI runtime descriptor. Propagate failures: a stale
     // runtime.json would point the webview at the wrong host/build id, so a
     // "Build complete" message must not hide it.
@@ -2921,6 +2913,7 @@ fn build_ui_plugin(
     app_version: &str,
     manifest_dir: &Path,
     build_id: &str,
+    app_ui_plugin: Option<&str>,
 ) -> anyhow::Result<serde_json::Value> {
     validate_plugin_name(name)?;
     if plugin.kind != "ui" {
@@ -2971,6 +2964,13 @@ fn build_ui_plugin(
             anyhow::bail!("invalid bridge entry {item:?} for {name}: expected \"plugin.export\"");
         }
         let (plugin_name, export_name) = (parts[0], parts[1]);
+        if let Some(glue) = app_ui_plugin {
+            if plugin_name != glue {
+                anyhow::bail!(
+                    "bridge entry {item:?} for {name}: production exposes only glue plugin {glue:?}"
+                );
+            }
+        }
         let manifest_path = manifest_dir.join(format!("{plugin_name}.manifest.json"));
         let raw = std::fs::read_to_string(&manifest_path).map_err(|_| {
             anyhow::anyhow!(
@@ -3008,7 +3008,7 @@ fn build_ui_plugin(
         "version": plugin.version.as_deref().unwrap_or(app_version),
         "language": plugin.language,
         "abi": "webview-v1",
-        "schema_version": 1,
+        "schema_version": abi::CURRENT_SCHEMA_VERSION,
         "host_abi": owasidea_host::HOST_ABI,
         "min_host": owasidea_host::HOST_VERSION,
         "runtime": "js-wasm",
@@ -3018,15 +3018,16 @@ fn build_ui_plugin(
         "imports": {"wasi": [], "host": [], "plugins": []},
         "permissions": {
             "filesystem": [],
-            "http": {"outbound": [], "inbound": false},
-            "network": {"outbound": [], "inbound": []},
-            "kv": null,
+            "http": {"outbound": [], "outbound_any": false, "inbound": false},
+            "network": {"outbound": [], "outbound_any": false, "inbound": []},
+            "kv": [],
             "resources": {"max_memory_mb": null, "max_fuel": null, "timeout_ms": null, "max_instances": 1}
         },
         "state": {"persistent": false, "storage": "none", "root": null},
         "composition": {"strategy": "webview", "entry": false},
         "metadata": {
             "build_id": build_id,
+            "app_ui_plugin": app_ui_plugin,
             "ui": {"entry": entry, "sha256": digest, "files": files, "bridge": bridge},
             "description": "Webview-only UI plugin"
         }
@@ -3234,8 +3235,25 @@ async fn cmd_dev(
         eprintln!("warning: --no-host without --desktop: UI will have no host backend");
     }
     let root = app_root(config_path);
+    let mut initial_output = Vec::new();
+    let mut initial_build_error = None;
     if build {
-        cmd_build(config_path, manifest_dir, true, false, None)?;
+        if use_tui {
+            match run_captured_build(config_path, manifest_dir) {
+                Ok((ok, lines)) => {
+                    initial_output = lines;
+                    if !ok {
+                        initial_build_error =
+                            Some("build failed; see Output and press R to retry".to_string());
+                    }
+                }
+                Err(error) => {
+                    initial_build_error = Some(format!("build did not start: {error}"));
+                }
+            }
+        } else {
+            cmd_build(config_path, manifest_dir, false, None)?;
+        }
     }
     let manifest_dir = app_path(&root, manifest_dir);
     build_id::ensure_env_from_manifests(&manifest_dir);
@@ -3261,12 +3279,6 @@ async fn cmd_dev(
             _ => {}
         }
     }
-    if !build {
-        if let Ok(cfg) = read_app_config(config_path) {
-            sign_all(&root, &manifest_dir, cfg.signing.as_ref())?;
-        }
-    }
-    apply_signing_env(config_path);
     let dev = std::fs::read_to_string(config_path)
         .ok()
         .and_then(|raw| toml::from_str::<AppConfig>(&raw).ok())
@@ -3463,6 +3475,8 @@ async fn cmd_dev(
             config_path: config_path.to_path_buf(),
             manifest_dir: manifest_dir.to_path_buf(),
             children,
+            initial_output,
+            initial_build_error,
         };
         return tui::run(session, tx, rx).await;
     }
@@ -3478,12 +3492,7 @@ async fn cmd_dev(
             anyhow::bail!("`cargo tauri` not found; install it with `cargo install tauri-cli`");
         }
         let cfg = read_app_config(config_path)?;
-        let desktop_path = cfg.desktop.as_ref().and_then(|d| d.path.clone());
-        let desktop_dir = match desktop_path {
-            Some(path) => app_path(&root, path),
-            None if root.join("desktop/Cargo.toml").is_file() => root.join("desktop"),
-            None => root.join("crates/desktop"),
-        };
+        let desktop_dir = crate::config_render::desktop_dir(&root, &cfg)?;
         if !desktop_dir.join("tauri.conf.json").is_file() {
             anyhow::bail!(
                 "Tauri config not found in {}; add [desktop] path",
@@ -3954,6 +3963,7 @@ fn rebuild_ui_plugin_from_dist(
         &app_version,
         manifest_dir,
         &build_id,
+        cfg.app.as_ref().and_then(|app| app.ui_plugin.as_deref()),
     ) {
         Ok(_) => {
             let mut ui_index = Vec::new();
@@ -4033,574 +4043,6 @@ fn cmd_inspect(manifest_dir: &Path, plugin: &str, json: bool) -> anyhow::Result<
     Ok(())
 }
 
-#[derive(serde::Deserialize)]
-struct RegistryIndex {
-    version: u32,
-    plugins: Vec<RegistryPlugin>,
-}
-
-#[derive(serde::Deserialize)]
-struct RegistryPlugin {
-    name: String,
-    version: String,
-    #[serde(default)]
-    description: String,
-    manifest: String,
-    #[serde(default)]
-    artifact: String,
-    #[serde(default)]
-    assets: Vec<RegistryAsset>,
-}
-
-#[derive(serde::Deserialize)]
-struct RegistryAsset {
-    path: String,
-    url: String,
-}
-
-fn registry_url(raw: &str) -> anyhow::Result<reqwest::Url> {
-    let url = reqwest::Url::parse(raw)?;
-    let local_http =
-        url.scheme() == "http" && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
-    if url.scheme() != "https" && !local_http {
-        anyhow::bail!("registry must use HTTPS (HTTP is allowed only for localhost tests)");
-    }
-    if url.username() != "" || url.password().is_some() || url.fragment().is_some() {
-        anyhow::bail!("registry URL must not contain credentials or a fragment");
-    }
-    Ok(url)
-}
-
-async fn fetch_registry_index(url: &str) -> anyhow::Result<(reqwest::Url, RegistryIndex)> {
-    let index_url = registry_url(url)?;
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(20))
-        .build()?;
-    let response = client
-        .get(index_url.clone())
-        .send()
-        .await?
-        .error_for_status()?;
-    let bytes = read_limited(response, 4 * 1024 * 1024).await?;
-    let index: RegistryIndex = serde_json::from_slice(&bytes)?;
-    if index.version != 1 {
-        anyhow::bail!("unsupported registry index version {}", index.version);
-    }
-    Ok((index_url, index))
-}
-
-async fn cmd_registry_search(query: &str, url: &str, json: bool) -> anyhow::Result<()> {
-    let (_, index) = fetch_registry_index(url).await?;
-    let query = query.to_ascii_lowercase();
-    let found: Vec<_> = index
-        .plugins
-        .into_iter()
-        .filter(|plugin| {
-            plugin.name.to_ascii_lowercase().contains(&query)
-                || plugin.description.to_ascii_lowercase().contains(&query)
-        })
-        .collect();
-    if json {
-        println!("{}", serde_json::to_string_pretty(&found.iter().map(|plugin| {
-            serde_json::json!({"name": plugin.name, "version": plugin.version, "description": plugin.description})
-        }).collect::<Vec<_>>())?);
-    } else if found.is_empty() {
-        println!("No plugins found.");
-    } else {
-        for plugin in found {
-            println!("{}@{}  {}", plugin.name, plugin.version, plugin.description);
-        }
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn cmd_registry_install(
-    name: &str,
-    version: &str,
-    registry: &str,
-    public_key: &Path,
-    manifest_dir: &Path,
-    force: bool,
-    locked: bool,
-    json: bool,
-) -> anyhow::Result<()> {
-    validate_plugin_name(name)?;
-    let lock_path = registry_lock::lockfile_path(manifest_dir);
-    let lock = registry_lock::read_lock(&lock_path)?;
-    if locked {
-        let entry = registry_lock::find_entry(&lock, name)
-            .ok_or_else(|| anyhow::anyhow!("lockfile has no entry for {name}"))?;
-        if entry.version != version {
-            anyhow::bail!(
-                "locked version mismatch: lock has {} but requested {}",
-                entry.version,
-                version
-            );
-        }
-        if entry.source != registry {
-            anyhow::bail!(
-                "locked source mismatch: lock has {} but requested {}",
-                entry.source,
-                registry
-            );
-        }
-    }
-    let (index_url, index) = fetch_registry_index(registry).await?;
-    let entry = index
-        .plugins
-        .into_iter()
-        .find(|plugin| plugin.name == name && plugin.version == version)
-        .ok_or_else(|| anyhow::anyhow!("registry does not contain {name}@{version}"))?;
-    let manifest_url = index_url.join(&entry.manifest)?;
-    let artifact_url = index_url.join(&entry.artifact)?;
-    if manifest_url.origin() != index_url.origin() || artifact_url.origin() != index_url.origin() {
-        anyhow::bail!("registry manifest and artifact must stay on registry origin");
-    }
-
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(60))
-        .build()?;
-    let manifest_response = client.get(manifest_url).send().await?.error_for_status()?;
-    let manifest_bytes = read_limited(manifest_response, 1024 * 1024).await?;
-    let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes)?;
-    if manifest["name"].as_str() != Some(name) || manifest["version"].as_str() != Some(version) {
-        anyhow::bail!("registry index and plugin manifest identity do not match");
-    }
-    let is_ui = manifest["runtime"].as_str() == Some("js-wasm");
-    let mut ui_assets = std::collections::BTreeMap::new();
-    let artifact = if is_ui {
-        if !entry.artifact.is_empty() {
-            anyhow::bail!("UI registry entries must use the assets list, not artifact");
-        }
-        let expected_files = manifest["metadata"]["ui"]["files"]
-            .as_object()
-            .ok_or_else(|| anyhow::anyhow!("UI manifest has no asset digest map"))?;
-        if expected_files.len() != entry.assets.len() {
-            anyhow::bail!("registry file list does not match signed UI manifest");
-        }
-        for asset in &entry.assets {
-            validate_registry_path(&asset.path)?;
-            let expected = expected_files
-                .get(&asset.path)
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| {
-                    anyhow::anyhow!("asset {} is not declared by manifest", asset.path)
-                })?;
-            let asset_url = index_url.join(&asset.url)?;
-            if asset_url.origin() != index_url.origin() {
-                anyhow::bail!("registry assets must stay on registry origin");
-            }
-            let response = client.get(asset_url).send().await?.error_for_status()?;
-            let bytes = read_limited(response, 64 * 1024 * 1024).await?;
-            use sha2::{Digest, Sha256};
-            let actual = format!("{:x}", Sha256::digest(&bytes));
-            if actual != expected {
-                anyhow::bail!("UI asset checksum mismatch: {}", asset.path);
-            }
-            ui_assets.insert(asset.path.clone(), bytes);
-        }
-        if ui_assets.len() != expected_files.len() {
-            anyhow::bail!("registry file list contains duplicate or missing UI assets");
-        }
-        let digests = expected_files
-            .iter()
-            .map(|(path, value)| {
-                Ok((
-                    path.clone(),
-                    value
-                        .as_str()
-                        .ok_or_else(|| anyhow::anyhow!("invalid digest for {path}"))?
-                        .to_string(),
-                ))
-            })
-            .collect::<anyhow::Result<std::collections::BTreeMap<_, _>>>()?;
-        let bundle_digest = digest_ui_file_list(&digests);
-        if manifest["metadata"]["ui"]["sha256"].as_str() != Some(bundle_digest.as_str()) {
-            anyhow::bail!("UI bundle digest does not match signed manifest");
-        }
-        Vec::new()
-    } else {
-        if !entry.assets.is_empty() {
-            anyhow::bail!("WASI component registry entries cannot contain UI assets");
-        }
-        let component_rel = manifest["component"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("manifest has no component path"))?;
-        validate_registry_path(component_rel)?;
-        if artifact_url.origin() != index_url.origin() {
-            anyhow::bail!("registry artifact must stay on registry origin");
-        }
-        let response = client
-            .get(artifact_url.clone())
-            .send()
-            .await?
-            .error_for_status()?;
-        let artifact = read_limited(response, 512 * 1024 * 1024).await?;
-        use sha2::{Digest, Sha256};
-        let digest = format!("{:x}", Sha256::digest(&artifact));
-        if manifest["metadata"]["sha256"].as_str() != Some(digest.as_str()) {
-            anyhow::bail!("plugin artifact checksum mismatch");
-        }
-        artifact.to_vec()
-    };
-    let artifact_digest = if is_ui {
-        manifest["metadata"]["ui"]["sha256"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string()
-    } else {
-        use sha2::{Digest, Sha256};
-        format!("{:x}", Sha256::digest(&artifact))
-    };
-    if locked {
-        let entry = registry_lock::find_entry(&lock, name).unwrap();
-        if entry.sha256 != artifact_digest {
-            anyhow::bail!("locked artifact digest mismatch");
-        }
-        if let Some(fmt) = manifest["metadata"]["signature_format"].as_str() {
-            if entry.signature_format != fmt {
-                anyhow::bail!("locked signature format mismatch");
-            }
-        }
-    }
-    let signature = manifest["metadata"]["signature"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("registry plugin is unsigned"))?;
-    if manifest["metadata"]["signature_format"].as_str() != Some("owasidea-manifest-v1") {
-        anyhow::bail!("unsupported plugin signature format");
-    }
-    let key_b64 = std::fs::read_to_string(public_key)?;
-    let key_bytes = base64_decode(key_b64.trim())?;
-    let signature_bytes = base64_decode(signature)?;
-    let signed_manifest = manifest.clone();
-    let payload = cli_signature_payload(signed_manifest, &artifact)?;
-    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &key_bytes)
-        .verify(&payload, &signature_bytes)
-        .map_err(|_| anyhow::anyhow!("plugin signature verification failed"))?;
-
-    std::fs::create_dir_all(manifest_dir)?;
-    let manifest_root = std::fs::canonicalize(manifest_dir)?;
-    let manifest_path = manifest_root.join(format!("{name}.manifest.json"));
-    let component_path = if is_ui {
-        None
-    } else {
-        let component_rel = manifest["component"].as_str().unwrap();
-        let path = manifest_root.join(component_rel);
-        if path == manifest_path {
-            anyhow::bail!("component and manifest paths collide");
-        }
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let parent = std::fs::canonicalize(path.parent().unwrap())?;
-        if !parent.starts_with(&manifest_root) {
-            anyhow::bail!("component path resolves outside manifest directory");
-        }
-        Some(path)
-    };
-    let ui_root = if is_ui {
-        let project_root = std::fs::canonicalize(".")?;
-        let base = Path::new("ui/public/plugins");
-        std::fs::create_dir_all(base)?;
-        let base = std::fs::canonicalize(base)?;
-        if !base.starts_with(&project_root) {
-            anyhow::bail!("UI plugin root resolves outside the project directory");
-        }
-        let root = base.join(name);
-        if std::fs::symlink_metadata(&root).is_ok_and(|metadata| metadata.file_type().is_symlink())
-        {
-            anyhow::bail!("UI plugin asset directory must not be a symlink");
-        }
-        std::fs::create_dir_all(&root)?;
-        let root = std::fs::canonicalize(root)?;
-        if !root.starts_with(&base) {
-            anyhow::bail!("UI plugin directory resolves outside static asset root");
-        }
-        Some(root)
-    } else {
-        None
-    };
-    if !force
-        && (manifest_path.exists()
-            || component_path.as_ref().is_some_and(|path| path.exists())
-            || ui_root
-                .as_ref()
-                .is_some_and(|root| root.read_dir().is_ok_and(|mut d| d.next().is_some())))
-    {
-        anyhow::bail!("plugin files already exist; pass --force to replace them");
-    }
-    let previous_component = if force {
-        component_path
-            .as_ref()
-            .filter(|path| path.is_file())
-            .map(std::fs::read)
-            .transpose()?
-    } else {
-        None
-    };
-    let suffix = format!("tmp-{}", std::process::id());
-    let manifest_tmp = manifest_path.with_extension(suffix);
-    let component_tmp = component_path
-        .as_ref()
-        .map(|path| path.with_extension(format!("tmp-{}", std::process::id())));
-    if let Some(tmp) = &component_tmp {
-        std::fs::write(tmp, &artifact)?;
-    }
-    std::fs::write(&manifest_tmp, serde_json::to_vec_pretty(&manifest)?)?;
-    if let (Some(path), Some(tmp)) = (&component_path, &component_tmp) {
-        if let Err(error) = std::fs::rename(tmp, path) {
-            let _ = std::fs::remove_file(tmp);
-            let _ = std::fs::remove_file(&manifest_tmp);
-            return Err(error.into());
-        }
-    }
-    if let Some(root) = &ui_root {
-        for (relative, bytes) in &ui_assets {
-            let path = root.join(relative);
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            let parent = std::fs::canonicalize(path.parent().unwrap())?;
-            if !parent.starts_with(root) {
-                anyhow::bail!("UI asset path resolves outside plugin asset directory");
-            }
-            if std::fs::symlink_metadata(&path)
-                .is_ok_and(|metadata| metadata.file_type().is_symlink())
-            {
-                anyhow::bail!("refusing to replace symlink UI asset: {}", path.display());
-            }
-            std::fs::write(path, bytes)?;
-        }
-    }
-    if let Err(error) = std::fs::rename(&manifest_tmp, &manifest_path) {
-        if let (Some(path), Some(tmp)) = (&component_path, &component_tmp) {
-            if let Some(previous) = previous_component {
-                let _ = std::fs::write(path, previous);
-            } else {
-                let _ = std::fs::remove_file(path);
-            }
-            let _ = std::fs::remove_file(tmp);
-        }
-        let _ = std::fs::remove_file(&manifest_tmp);
-        return Err(error.into());
-    }
-    let signature_format = manifest["metadata"]["signature_format"]
-        .as_str()
-        .unwrap_or("owasidea-manifest-v1")
-        .to_string();
-    let mut lock = registry_lock::read_lock(&lock_path)?;
-    lock.plugins
-        .retain(|e| !(e.name == name && e.version == version));
-    lock.plugins.push(registry_lock::PluginLockEntry {
-        name: name.to_string(),
-        version: version.to_string(),
-        source: registry.to_string(),
-        sha256: artifact_digest,
-        signature_format,
-    });
-    registry_lock::write_lock(&lock_path, &lock)?;
-
-    if json {
-        println!(
-            "{}",
-            serde_json::json!({"installed": name, "version": version})
-        );
-    } else {
-        println!("installed {name}@{version} into {}", manifest_dir.display());
-    }
-    Ok(())
-}
-
-async fn cmd_registry_update(
-    name: Option<&str>,
-    version: Option<&str>,
-    registry: &str,
-    public_key: &Path,
-    manifest_dir: &Path,
-    json: bool,
-) -> anyhow::Result<()> {
-    let lock_path = registry_lock::lockfile_path(manifest_dir);
-    let mut lock = registry_lock::read_lock(&lock_path)?;
-    let (index_url, index) = fetch_registry_index(registry).await?;
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(60))
-        .build()?;
-
-    let targets: Vec<String> = if let Some(n) = name {
-        vec![n.to_string()]
-    } else {
-        lock.plugins.iter().map(|e| e.name.clone()).collect()
-    };
-    let mut updated = 0usize;
-    for target in targets {
-        let entry = index
-            .plugins
-            .iter()
-            .filter(|p| p.name == target)
-            .max_by(|a, b| a.version.cmp(&b.version));
-        let reg_entry = if let Some(v) = version {
-            index
-                .plugins
-                .iter()
-                .find(|p| p.name == target && p.version == v)
-        } else {
-            entry
-        };
-        let reg_entry =
-            reg_entry.ok_or_else(|| anyhow::anyhow!("registry does not contain {target}"))?;
-        // verify by fetching manifest+artifact (reuse install path minimal): fetch manifest
-        let manifest_url = index_url.join(&reg_entry.manifest)?;
-        let artifact_url = index_url.join(&reg_entry.artifact)?;
-        if manifest_url.origin() != index_url.origin()
-            || artifact_url.origin() != index_url.origin()
-        {
-            anyhow::bail!("registry manifest and artifact must stay on registry origin");
-        }
-        let manifest_response = client.get(manifest_url).send().await?.error_for_status()?;
-        let manifest_bytes = read_limited(manifest_response, 1024 * 1024).await?;
-        let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes)?;
-        let is_ui = manifest["runtime"].as_str() == Some("js-wasm");
-        let artifact_digest = if is_ui {
-            // fetch assets digests not needed for lock update? Use manifest ui sha256
-            manifest["metadata"]["ui"]["sha256"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string()
-        } else {
-            let response = client
-                .get(artifact_url.clone())
-                .send()
-                .await?
-                .error_for_status()?;
-            let artifact = read_limited(response, 512 * 1024 * 1024).await?;
-            use sha2::{Digest, Sha256};
-            format!("{:x}", Sha256::digest(&artifact))
-        };
-        // signature format
-        let sig_fmt = manifest["metadata"]["signature_format"]
-            .as_str()
-            .unwrap_or("owasidea-manifest-v1")
-            .to_string();
-        // verify signature
-        let signature = manifest["metadata"]["signature"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("registry plugin is unsigned"))?;
-        let key_b64 = std::fs::read_to_string(public_key)?;
-        let key_bytes = base64_decode(key_b64.trim())?;
-        let signature_bytes = base64_decode(signature)?;
-        let signed_manifest = manifest.clone();
-        let payload = if is_ui {
-            // reuse cli_signature_payload with empty artifact
-            cli_signature_payload(signed_manifest, &[])?
-        } else {
-            // need artifact bytes; re-fetch? We discarded; fetch again
-            let response = client.get(artifact_url).send().await?.error_for_status()?;
-            let artifact = read_limited(response, 512 * 1024 * 1024).await?;
-            cli_signature_payload(signed_manifest, &artifact)?
-        };
-        ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &key_bytes)
-            .verify(&payload, &signature_bytes)
-            .map_err(|_| anyhow::anyhow!("plugin signature verification failed"))?;
-
-        // update lock entry
-        if let Some(e) = lock.plugins.iter_mut().find(|e| e.name == target) {
-            e.version = reg_entry.version.clone();
-            e.source = registry.to_string();
-            e.sha256 = artifact_digest;
-            e.signature_format = sig_fmt;
-        } else {
-            lock.plugins.push(registry_lock::PluginLockEntry {
-                name: target.clone(),
-                version: reg_entry.version.clone(),
-                source: registry.to_string(),
-                sha256: artifact_digest,
-                signature_format: sig_fmt,
-            });
-        }
-        updated += 1;
-    }
-    registry_lock::write_lock(&lock_path, &lock)?;
-    if json {
-        println!("{}", serde_json::json!({"updated": updated}));
-    } else {
-        println!("updated {updated} lock entries");
-    }
-    let _ = (index_url, index);
-    Ok(())
-}
-
-async fn cmd_registry_outdated(
-    registry: &str,
-    manifest_dir: &Path,
-    json: bool,
-) -> anyhow::Result<()> {
-    let lock_path = registry_lock::lockfile_path(manifest_dir);
-    let lock = registry_lock::read_lock(&lock_path)?;
-    let (_, index) = fetch_registry_index(registry).await?;
-    let mut outdated = Vec::new();
-    for entry in &lock.plugins {
-        let latest = index
-            .plugins
-            .iter()
-            .filter(|p| p.name == entry.name)
-            .map(|p| p.version.as_str())
-            .max();
-        if let Some(latest) = latest {
-            if latest != entry.version {
-                outdated.push((
-                    entry.name.clone(),
-                    entry.version.clone(),
-                    latest.to_string(),
-                ));
-            }
-        }
-    }
-    if json {
-        println!("{}", serde_json::to_string_pretty(&outdated)?);
-    } else {
-        if outdated.is_empty() {
-            println!("all lock entries up to date");
-        } else {
-            for (name, current, latest) in &outdated {
-                println!("{name}: {current} -> {latest}");
-            }
-        }
-    }
-    Ok(())
-}
-
-async fn read_limited(mut response: reqwest::Response, limit: usize) -> anyhow::Result<Vec<u8>> {
-    if response
-        .content_length()
-        .is_some_and(|length| length > limit as u64)
-    {
-        anyhow::bail!("remote response exceeds {} bytes", limit);
-    }
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await? {
-        if bytes.len().saturating_add(chunk.len()) > limit {
-            anyhow::bail!("remote response exceeds {} bytes", limit);
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    Ok(bytes)
-}
-
-fn validate_registry_path(value: &str) -> anyhow::Result<()> {
-    validate_ui_entry(value)?;
-    if !value
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || b"._-/".contains(&byte))
-    {
-        anyhow::bail!("unsupported character in registry artifact path {value:?}");
-    }
-    Ok(())
-}
-
 fn digest_ui_file_list(files: &std::collections::BTreeMap<String, String>) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -4611,22 +4053,6 @@ fn digest_ui_file_list(files: &std::collections::BTreeMap<String, String>) -> St
         hasher.update(b"\n");
     }
     format!("{:x}", hasher.finalize())
-}
-
-fn cli_signature_payload(
-    mut manifest: serde_json::Value,
-    component: &[u8],
-) -> anyhow::Result<Vec<u8>> {
-    manifest["metadata"]
-        .as_object_mut()
-        .ok_or_else(|| anyhow::anyhow!("manifest metadata must be an object"))?
-        .remove("signature");
-    let manifest_bytes = serde_json::to_vec(&manifest)?;
-    let mut payload = b"owasidea-plugin-signature-v1\0".to_vec();
-    payload.extend_from_slice(&manifest_bytes);
-    payload.push(0);
-    payload.extend_from_slice(component);
-    Ok(payload)
 }
 
 fn isolated_bundle_command(
@@ -4746,6 +4172,7 @@ fn cmd_bundle(
     config: &Path,
     manifest_dir: &Path,
     build: bool,
+    target: BundleTarget,
     bundles: &[String],
     isolate_host_libs: bool,
     mask_paths: &[PathBuf],
@@ -4772,10 +4199,17 @@ fn cmd_bundle(
     if build {
         // Build with the merged config so overlay plugins and [app].version are
         // reflected in the generated manifests.
-        cmd_build(config, manifest_dir, true, false, Some(&cfg))?;
+        cmd_build(config, manifest_dir, false, Some(&cfg))?;
     }
-    if !build {
-        sign_all(&root, &app_path(&root, manifest_dir), cfg.signing.as_ref())?;
+    if matches!(target, BundleTarget::Cli) {
+        if provenance || !no_sbom {
+            eprintln!("CLI bundle: SBOM/provenance are only generated for desktop bundles");
+        }
+        let output = match profile {
+            Some(profile) => root.join("dist").join(profile).join("cli"),
+            None => root.join("dist").join("cli"),
+        };
+        return bundle_cli::cmd_bundle_cli(&root, config, &output);
     }
     let desktop = cfg.desktop.clone().unwrap_or_default();
     let ui_dir = if let Some(ui) = desktop.ui.as_deref() {
@@ -4784,11 +4218,7 @@ fn cmd_bundle(
         root.join("ui")
     };
 
-    let desktop_dir = match desktop.path.as_deref() {
-        Some(path) => crate::config_render::safe_resolve(&root, path)?,
-        None if root.join("desktop/Cargo.toml").is_file() => root.join("desktop"),
-        None => root.join("crates/desktop"),
-    };
+    let desktop_dir = crate::config_render::desktop_dir(&root, &cfg)?;
     if !ui_dir.join("package.json").is_file() {
         anyhow::bail!("UI package.json not found in {}", ui_dir.display());
     }
@@ -4919,12 +4349,7 @@ fn cmd_bundle(
     let target = PathBuf::from(meta["target_directory"].as_str().unwrap_or(""));
     let bundle_dir = target.join("release/bundle");
     let direct_resources = target.join("release/resources");
-    copy_runtime_resources(
-        &root,
-        &direct_resources,
-        cfg.signing.as_ref(),
-        profile_runtime.as_deref(),
-    )?;
+    copy_runtime_resources(&root, &direct_resources, profile_runtime.as_deref())?;
     println!("Direct-run resources: {}", direct_resources.display());
     // Profiles always get their own artifact directory so `dev`, `staging` and
     // `prod` bundles never overwrite each other.
@@ -4954,11 +4379,7 @@ fn cmd_bundle(
                 )?;
             }
             println!("Artifacts copied to {}", output_dir.display());
-            let public_key = dist_stage::resolve_public_key(
-                &root,
-                cfg.signing.as_ref().and_then(|s| s.public_key.as_deref()),
-            );
-            let staged = dist_stage::stage_dist(&root, &output_dir, public_key.as_deref())?;
+            let staged = dist_stage::stage_dist(&root, &output_dir)?;
             println!(
                 "Verifiable payload staged in {} ({})",
                 output_dir.display(),
@@ -4996,7 +4417,6 @@ fn cmd_bundle(
 fn copy_runtime_resources(
     root: &Path,
     destination: &Path,
-    signing: Option<&SigningSection>,
     runtime_src: Option<&Path>,
 ) -> anyhow::Result<()> {
     std::fs::create_dir_all(destination)?;
@@ -5028,15 +4448,6 @@ fn copy_runtime_resources(
                 std::fs::copy(&component, target.join(component.file_name().unwrap()))?;
             }
         }
-    }
-    let public_key = signing
-        .and_then(|signing| signing.public_key.as_deref())
-        .map(|path| app_path(root, path))
-        .unwrap_or_else(|| root.join("keys/owasidea.pub"));
-    if public_key.is_file() {
-        let trust = destination.join("trust");
-        std::fs::create_dir_all(&trust)?;
-        std::fs::copy(&public_key, trust.join("owasidea.pub"))?;
     }
     Ok(())
 }
@@ -5153,7 +4564,11 @@ impl Drop for TestHost {
     }
 }
 
-async fn wait_for_host(client: &reqwest::Client, base: &str) -> anyhow::Result<()> {
+async fn wait_for_host(
+    client: &reqwest::Client,
+    base: &str,
+    host: &mut TestHost,
+) -> anyhow::Result<()> {
     // A cold CI runner can spend more than 30 s compiling 11 components at
     // host startup; keep the default generous and allow an override.
     let timeout_ms = std::env::var("OWASIDEA_HOST_READY_TIMEOUT_MS")
@@ -5162,7 +4577,16 @@ async fn wait_for_host(client: &reqwest::Client, base: &str) -> anyhow::Result<(
         .unwrap_or(600_000);
     let attempts = (timeout_ms / 250).max(1);
     for _ in 0..attempts {
-        if let Ok(response) = client.get(format!("{base}/health")).send().await {
+        if let Some(status) = host.child.try_wait()? {
+            anyhow::bail!("host exited before becoming ready: {status}");
+        }
+        // A health request must not block the whole readiness budget.
+        if let Ok(response) = client
+            .get(format!("{base}/health"))
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+        {
             if response.status().is_success() {
                 return Ok(());
             }
@@ -5170,6 +4594,28 @@ async fn wait_for_host(client: &reqwest::Client, base: &str) -> anyhow::Result<(
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
     anyhow::bail!("host did not become ready at {base} within {timeout_ms} ms")
+}
+
+async fn wait_child_with_timeout(
+    child: &mut std::process::Child,
+    timeout: std::time::Duration,
+    label: &str,
+) -> anyhow::Result<std::process::ExitStatus> {
+    let started = std::time::Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!(
+                "{label} timed out after {} s",
+                timeout.as_secs_f64().round() as u64
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
 }
 
 fn check(ok: bool, label: impl std::fmt::Display) -> bool {
@@ -5225,19 +4671,25 @@ async fn run_api_smoke(
         .arg("run")
         .current_dir(&root)
         .env("OWASIDEA_DATA_DIR", &data_dir)
+        // smoke/test are developer tooling: keep every plugin route visible.
+        .env("OWASIDEA_DEV_MODE", "1")
         .env("OWASIDEA_WASMTIME_CACHE", "off")
         .env("NO_PROXY", "127.0.0.1,localhost")
         .env("no_proxy", "127.0.0.1,localhost")
         .stdout(std::process::Stdio::from(log.try_clone()?))
         .stderr(std::process::Stdio::from(log));
-    apply_signing_env_to(&mut command, cfg, &root);
     let child = command.spawn()?;
     let mut host = TestHost { child, data_dir };
+    let request_timeout_ms = std::env::var("OWASIDEA_TEST_REQUEST_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(60_000);
     let client = reqwest::Client::builder()
         .no_proxy()
+        .timeout(std::time::Duration::from_millis(request_timeout_ms))
         .build()
         .context("failed to build smoke HTTP client")?;
-    if let Err(error) = wait_for_host(&client, &base).await {
+    if let Err(error) = wait_for_host(&client, &base, &mut host).await {
         let status = host.child.try_wait();
         let connect = std::net::TcpStream::connect(&port);
         eprintln!("host process status after timeout: {status:?}");
@@ -5431,105 +4883,6 @@ async fn run_api_smoke(
         );
     }
     Ok(failures)
-}
-
-fn apply_signing_env_to(command: &mut std::process::Command, cfg: &AppConfig, root: &Path) {
-    let Some(signing) = &cfg.signing else {
-        return;
-    };
-    let public_key = app_path(
-        root,
-        signing.public_key.as_deref().unwrap_or("keys/owasidea.pub"),
-    );
-    if public_key.is_file() {
-        command.env("OWASIDEA_PUBLIC_KEY", public_key);
-    }
-    command.env(
-        "OWASIDEA_REQUIRE_SIGNATURES",
-        if signing.require.unwrap_or(true) {
-            "true"
-        } else {
-            "false"
-        },
-    );
-}
-
-#[derive(Clone, Copy)]
-struct TestOptions<'a> {
-    build: bool,
-    smoke: bool,
-    ui: bool,
-    json: bool,
-    filter: Option<&'a str>,
-    plugin: Option<&'a str>,
-    watch: bool,
-}
-
-async fn cmd_test(
-    config_path: &Path,
-    manifest_dir: &Path,
-    opts: &TestOptions<'_>,
-) -> anyhow::Result<()> {
-    if opts.watch {
-        let mut inner = *opts;
-        inner.watch = false;
-        loop {
-            let _ = Box::pin(cmd_test(config_path, manifest_dir, &inner)).await;
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => { return Ok(()); }
-                _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
-            }
-        }
-    }
-    let root = app_root(config_path);
-    if opts.build {
-        cmd_build(config_path, manifest_dir, true, false, None)?;
-    }
-    let cfg = read_app_config(config_path)?;
-    let manifest_dir = app_path(&root, manifest_dir);
-    if !opts.build {
-        sign_all(&root, &manifest_dir, cfg.signing.as_ref())?;
-    }
-    let mut failures = 0usize;
-    if opts.smoke {
-        failures += run_api_smoke(
-            config_path,
-            &manifest_dir,
-            &cfg,
-            opts.json,
-            opts.filter,
-            opts.plugin,
-        )
-        .await?;
-    }
-    if opts.ui {
-        let command = cfg
-            .test
-            .as_ref()
-            .map(|test| test.ui.clone())
-            .unwrap_or_default();
-        if command.is_empty() {
-            println!("ui tests: no [test].ui command configured; skipped");
-        } else {
-            println!("ui tests: {}", command.join(" "));
-            let mut child = external_command(&command[0]);
-            child.args(&command[1..]).current_dir(&root);
-            if let Ok(exe) = std::env::current_exe() {
-                child.env("OWASIDEA_BIN", exe);
-            }
-            apply_signing_env_to(&mut child, &cfg, &root);
-            let status = child.status()?;
-            if !status.success() {
-                failures += 1;
-                println!("  FAIL ui test command");
-            }
-        }
-    }
-    if failures > 0 {
-        anyhow::bail!("{failures} test failure(s)");
-    }
-    println!("tests passed");
-    Ok(())
 }
 
 #[derive(Clone)]
@@ -6785,145 +6138,100 @@ fn cmd_wit_generate(path: &Path, json: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn generate_keypair(private_key_path: &Path, public_key_path: &Path) -> anyhow::Result<()> {
-    use ring::signature::{Ed25519KeyPair, KeyPair};
-    if let Some(parent) = private_key_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    if let Some(parent) = public_key_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
-        .map_err(|e| anyhow::anyhow!("keygen failed: {e}"))?;
-    let keypair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())
-        .map_err(|e| anyhow::anyhow!("parse key failed: {e}"))?;
-    let pub_bytes = keypair.public_key().as_ref();
-    std::fs::write(private_key_path, base64_encode(pkcs8.as_ref()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(private_key_path, std::fs::Permissions::from_mode(0o600))?;
-    }
-    std::fs::write(public_key_path, base64_encode(pub_bytes))?;
-    println!(
-        "generated {} and {}",
-        private_key_path.display(),
-        public_key_path.display()
-    );
-    Ok(())
+#[derive(Clone, Copy)]
+struct TestOptions<'a> {
+    build: bool,
+    smoke: bool,
+    ui: bool,
+    json: bool,
+    filter: Option<&'a str>,
+    plugin: Option<&'a str>,
+    watch: bool,
 }
 
-fn cmd_keygen(out: &Path) -> anyhow::Result<()> {
-    generate_keypair(&out.join("owasidea.key"), &out.join("owasidea.pub"))
-}
-
-fn base64_encode(data: &[u8]) -> String {
-    use base64::Engine;
-    base64::engine::general_purpose::STANDARD.encode(data)
-}
-
-fn sign_manifest(manifest_dir: &Path, plugin: &str, key_path: &Path) -> anyhow::Result<()> {
-    use ring::signature::Ed25519KeyPair;
-    let manifest_path = manifest_dir.join(format!("{}.manifest.json", plugin));
-    let raw = std::fs::read_to_string(&manifest_path)?;
-    let mut manifest: serde_json::Value = serde_json::from_str(&raw)?;
-    let bytes = if manifest["runtime"].as_str() == Some("js-wasm") {
-        Vec::new()
-    } else {
-        let comp_rel = manifest["component"].as_str().unwrap_or("").to_string();
-        let comp_path = manifest_path.parent().unwrap().join(&comp_rel);
-        std::fs::read(&comp_path)?
-    };
-    let key_b64 = std::fs::read_to_string(key_path)?;
-    let key_bytes = base64_decode(key_b64.trim())?;
-    let keypair = Ed25519KeyPair::from_pkcs8(&key_bytes)
-        .map_err(|e| anyhow::anyhow!("invalid private key: {e}"))?;
-    manifest["permissions"]
-        .as_object_mut()
-        .ok_or_else(|| anyhow::anyhow!("manifest permissions must be an object"))?
-        .entry("network")
-        .or_insert_with(|| serde_json::json!({"outbound": [], "inbound": []}));
-    manifest["metadata"]["signature_format"] = serde_json::json!("owasidea-manifest-v1");
-    manifest["metadata"]
-        .as_object_mut()
-        .ok_or_else(|| anyhow::anyhow!("manifest metadata must be an object"))?
-        .remove("signature");
-    let manifest_bytes = serde_json::to_vec(&manifest)?;
-    let mut payload = b"owasidea-plugin-signature-v1\0".to_vec();
-    payload.extend_from_slice(&manifest_bytes);
-    payload.push(0);
-    payload.extend_from_slice(&bytes);
-    let sig = keypair.sign(&payload);
-    manifest["metadata"]["signature"] = serde_json::json!(base64_encode(sig.as_ref()));
-    std::fs::write(
-        &manifest_path,
-        serde_json::to_string_pretty(&manifest)? + "\n",
-    )?;
-    Ok(())
-}
-
-fn sign_all(
-    root: &Path,
+async fn cmd_test(
+    config_path: &Path,
     manifest_dir: &Path,
-    signing: Option<&SigningSection>,
+    opts: &TestOptions<'_>,
 ) -> anyhow::Result<()> {
-    let Some(signing) = signing else {
-        return Ok(());
-    };
-    let key_path = app_path(root, signing.key.as_deref().unwrap_or("keys/owasidea.key"));
-    if !key_path.is_file() {
-        if !signing.generate {
-            anyhow::bail!(
-                "signing key not found at {}; run `owasidea keygen --out keys` or set [signing].generate = true",
-                key_path.display()
-            );
+    if opts.watch {
+        let mut inner = *opts;
+        inner.watch = false;
+        loop {
+            if let Err(error) = Box::pin(cmd_test(config_path, manifest_dir, &inner)).await {
+                eprintln!("test: {error}");
+            }
+            eprintln!("test: watch mode re-runs the full suite every second; press Ctrl+C to stop");
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => { return Ok(()); }
+                _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+            }
         }
-        let public_key_path = app_path(
-            root,
-            signing.public_key.as_deref().unwrap_or("keys/owasidea.pub"),
-        );
-        generate_keypair(&key_path, &public_key_path)?;
     }
-    let mut names = std::fs::read_dir(manifest_dir)?
-        .flatten()
-        .filter_map(|entry| {
-            let name = entry.file_name().to_string_lossy().to_string();
-            name.strip_suffix(".manifest.json").map(str::to_string)
-        })
-        .collect::<Vec<_>>();
-    names.sort();
-    for name in &names {
-        sign_manifest(manifest_dir, name, &key_path)?;
-    }
-    if !names.is_empty() {
-        println!("signed {} manifests", names.len());
-    }
-    Ok(())
-}
-
-fn apply_signing_env(config_path: &Path) {
     let root = app_root(config_path);
-    let Ok(config) = read_app_config(config_path) else {
-        return;
-    };
-    let Some(signing) = config.signing else {
-        return;
-    };
-    let public_key = app_path(
-        &root,
-        signing.public_key.as_deref().unwrap_or("keys/owasidea.pub"),
-    );
-    if public_key.is_file() {
-        std::env::set_var("OWASIDEA_PUBLIC_KEY", &public_key);
+    if opts.build {
+        println!("test: building...");
+        cmd_build(config_path, manifest_dir, false, None)?;
     }
-    std::env::set_var(
-        "OWASIDEA_REQUIRE_SIGNATURES",
-        if signing.require.unwrap_or(true) {
-            "true"
+    let cfg = read_app_config(config_path)?;
+    let manifest_dir = app_path(&root, manifest_dir);
+    let mut failures = 0usize;
+    if opts.smoke {
+        println!("test: api smoke...");
+        failures += run_api_smoke(
+            config_path,
+            &manifest_dir,
+            &cfg,
+            opts.json,
+            opts.filter,
+            opts.plugin,
+        )
+        .await?;
+    }
+    if opts.ui {
+        let command = cfg
+            .test
+            .as_ref()
+            .map(|test| test.ui.clone())
+            .unwrap_or_default();
+        if command.is_empty() {
+            println!("ui tests: no [test].ui command configured; skipped");
         } else {
-            "false"
-        },
-    );
+            println!("test: ui: {}", command.join(" "));
+            let mut command_child = external_command(&command[0]);
+            command_child
+                .args(&command[1..])
+                .current_dir(&root)
+                // Never let npx/npm prompt for input in a test run.
+                .stdin(std::process::Stdio::null());
+            if let Ok(exe) = std::env::current_exe() {
+                command_child.env("OWASIDEA_BIN", exe);
+            }
+            let timeout_ms = std::env::var("OWASIDEA_UI_TEST_TIMEOUT_MS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(30 * 60 * 1000);
+            let mut child = command_child.spawn()?;
+            let status = wait_child_with_timeout(
+                &mut child,
+                std::time::Duration::from_millis(timeout_ms),
+                "ui test command",
+            )
+            .await?;
+            if !status.success() {
+                failures += 1;
+                println!("  FAIL ui test command");
+                println!(
+                    "  hint: install the UI test dependencies (npm install) or rerun with --no-ui"
+                );
+            }
+        }
+    }
+    if failures > 0 {
+        anyhow::bail!("{failures} test failure(s)");
+    }
+    println!("tests passed");
+    Ok(())
 }
 
 fn ensure_npm_dependencies(plugin_dir: &Path) -> anyhow::Result<()> {
@@ -6949,25 +6257,6 @@ fn ensure_npm_dependencies(plugin_dir: &Path) -> anyhow::Result<()> {
         anyhow::bail!("npm install failed in {}", plugin_dir.display());
     }
     Ok(())
-}
-
-fn cmd_sign(manifest_dir: &Path, plugin: &str, key_path: &Path) -> anyhow::Result<()> {
-    sign_manifest(manifest_dir, plugin, key_path)?;
-    println!(
-        "signed {} -> {}",
-        plugin,
-        manifest_dir
-            .join(format!("{}.manifest.json", plugin))
-            .display()
-    );
-    Ok(())
-}
-
-fn base64_decode(s: &str) -> anyhow::Result<Vec<u8>> {
-    use base64::Engine;
-    base64::engine::general_purpose::STANDARD
-        .decode(s)
-        .map_err(|e| anyhow::anyhow!("base64 decode failed: {e}"))
 }
 
 #[cfg(test)]

@@ -1,8 +1,11 @@
 package poc:host@0.1.0;
 
 interface host-kv {
-    get: func(key: string) -> option<string>;
-    set: func(key: string, value: string);
+    resource kv {
+        get: func(key: string) -> option<string>;
+        set: func(key: string, value: string) -> result<_, string>;
+    }
+    open-kv: func(namespace: string) -> result<kv, string>;
 }
 
 interface host-log {

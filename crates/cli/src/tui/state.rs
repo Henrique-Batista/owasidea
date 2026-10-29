@@ -3,12 +3,16 @@
 //! interaction model is unit-tested.
 
 use super::api::{LogLine, PluginRow, ReloadRecord, Snapshot};
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{
+    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use serde_json::Value;
 use std::collections::VecDeque;
 
 pub const OUTPUT_CAP: usize = 2000;
 pub const LOG_CAP: usize = 500;
+pub const KEY_HINTS: &str =
+    "↑↓ plugin · r reload · s service · R rebuild · o open UI · ? help · q quit";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
@@ -108,6 +112,9 @@ pub struct App {
     pub manifest_requested: Option<String>,
     pub call: CallForm,
     pub status: Option<(Level, String)>,
+    /// Last build failure. Kept until a rebuild succeeds so the footer cannot
+    /// hide it behind a later transient status message.
+    pub build_error: Option<String>,
     pub busy: Option<String>,
     pub help: bool,
     pub quit: bool,
@@ -137,6 +144,7 @@ impl App {
             manifest_requested: None,
             call: CallForm::default(),
             status: None,
+            build_error: None,
             busy: None,
             help: false,
             quit: false,
@@ -156,6 +164,19 @@ impl App {
 
     pub fn set_status(&mut self, level: Level, text: impl Into<String>) {
         self.status = Some((level, text.into()));
+    }
+
+    pub fn apply_done(&mut self, ok: bool, text: String, refresh_manifest: bool) {
+        self.busy = None;
+        if ok {
+            self.build_error = None;
+        } else if text.starts_with("build") {
+            self.build_error = Some(text.clone());
+        }
+        self.set_status(if ok { Level::Info } else { Level::Error }, text);
+        if refresh_manifest {
+            self.forget_manifest();
+        }
     }
 
     pub fn apply_snapshot(&mut self, snapshot: Snapshot) {
@@ -305,6 +326,75 @@ impl App {
         }
     }
 
+    /// Mouse hit-testing for the tab bar, plugin list and footer buttons.
+    /// Coordinates are terminal cells; layout constants mirror `view.rs`.
+    pub fn handle_mouse(&mut self, mouse: MouseEvent, height: u16) -> Option<Action> {
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return None;
+        }
+        let (col, row) = (mouse.column, mouse.row);
+
+        // Tab bar: detail pane starts at x=40, first row under the header.
+        if row == 4 && col >= 40 {
+            let mut start = 40u16;
+            for tab in Tab::ALL {
+                let width = tab.title().len() as u16;
+                if col >= start && col < start + width {
+                    self.set_tab(tab);
+                    return None;
+                }
+                start += width + 3; // " │ "
+            }
+            return None;
+        }
+
+        // Plugin list: body starts at y=4, list block border occupies y=4.
+        if col < 40 && (5..height.saturating_sub(4)).contains(&row) {
+            let index = (row - 5) as usize;
+            if index < self.plugins.len() {
+                self.selected = index;
+            }
+            return None;
+        }
+
+        // Footer buttons: second line inside the footer block.
+        if row == height.saturating_sub(2) {
+            let x = col.saturating_sub(1) as usize;
+            let hit = |needle: &str| {
+                KEY_HINTS
+                    .find(needle)
+                    .is_some_and(|start| x >= start && x < start + needle.len())
+            };
+            if hit("r reload") {
+                return self
+                    .selected_plugin()
+                    .map(|p| Action::Reload(p.name.clone()));
+            }
+            if hit("s service") {
+                return self.service_toggle();
+            }
+            if hit("R rebuild") {
+                let reload = self
+                    .plugins
+                    .iter()
+                    .filter(|p| !p.is_service())
+                    .map(|p| p.name.clone())
+                    .collect();
+                return Some(Action::Rebuild { reload });
+            }
+            if hit("o open") {
+                return Some(Action::OpenUi);
+            }
+            if hit("? help") {
+                self.help = true;
+            }
+            if hit("q quit") {
+                self.quit = true;
+            }
+        }
+        None
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.quit = true;
@@ -450,6 +540,15 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
+    fn click(column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
     fn plugin(name: &str, kind: &str, exports: &[&str]) -> PluginRow {
         PluginRow {
             name: name.into(),
@@ -466,6 +565,55 @@ mod tests {
         let mut app = App::new("demo".into(), "http://127.0.0.1:8787".into(), None, true);
         app.plugins = plugins;
         app
+    }
+
+    #[test]
+    fn mouse_clicks_tabs_plugins_and_footer_buttons() {
+        let mut app = app_with(vec![
+            plugin("a", "library", &[]),
+            plugin("b", "library", &[]),
+        ]);
+
+        // Tab bar starts at x=40; skip "Overview" (8) plus the 3-cell divider.
+        app.handle_mouse(click(40 + 8 + 3, 4), 20);
+        assert_eq!(app.tab, Tab::Manifest);
+
+        // First plugin row is y=5 (header 4 + list border).
+        app.handle_mouse(click(2, 5), 20);
+        assert_eq!(app.selected, 0);
+
+        let reload = KEY_HINTS.find("r reload").unwrap() as u16 + 1;
+        assert_eq!(
+            app.handle_mouse(click(reload, 18), 20),
+            Some(Action::Reload("a".into()))
+        );
+
+        let rebuild = KEY_HINTS.find("R rebuild").unwrap() as u16 + 1;
+        assert_eq!(
+            app.handle_mouse(click(rebuild, 18), 20),
+            Some(Action::Rebuild {
+                reload: vec!["a".into(), "b".into()]
+            })
+        );
+    }
+
+    #[test]
+    fn build_failure_persists_until_a_successful_build() {
+        let mut app = app_with(vec![]);
+        app.apply_done(false, "build failed; see the Output view".into(), true);
+        assert_eq!(
+            app.build_error.as_deref(),
+            Some("build failed; see the Output view")
+        );
+        app.apply_done(true, "build ok".into(), true);
+        assert!(app.build_error.is_none());
+    }
+
+    #[test]
+    fn non_build_failure_does_not_set_build_error() {
+        let mut app = app_with(vec![]);
+        app.apply_done(false, "reload failed: notes".into(), false);
+        assert!(app.build_error.is_none());
     }
 
     #[test]

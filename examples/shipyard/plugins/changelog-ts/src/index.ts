@@ -38,3 +38,5 @@ export function render(version: string, changes: string[]): string {
   lines.push(`_Prepared by the TypeScript changelog component._`);
   return lines.join('\n');
 }
+
+export const api = { render };

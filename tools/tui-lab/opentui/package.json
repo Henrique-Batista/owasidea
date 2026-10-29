@@ -1,0 +1,11 @@
+{
+  "name": "tui-lab-opentui",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun run src/index.ts"
+  },
+  "dependencies": {
+    "@opentui/core": "0.7.0"
+  }
+}

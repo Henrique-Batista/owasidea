@@ -24,7 +24,7 @@
 ## v0.2 — Genericidade e composição
 
 - [x] Dispatcher genérico baseado em WIT (endpoint `/call`)
-- [x] Composição build-time via `wasm-tools compose` (exemplo `composed`)
+- [x] Composição build-time via `wasm-tools compose` (exemplo `examples/shipyard`)
 - [x] Tipos de plugin: `service` formalizado (lifecycle genérico via /service/*)
 - [x] Hot-reload explícito para plugins stateful (restart) com status visível
 - [x] Suporte a C# e JS/TS plugins
@@ -57,8 +57,7 @@
 - [x] `owasidea bundle` resolves app-relative UI/desktop paths and packages
       only manifests + component artifacts
 - [x] Verificação de integridade por checksum (sha256)
-- [x] Assinatura criptográfica de plugins (Ed25519 via `owasidea keygen/sign`)
-- [x] Registry HTTPS estático: search/install de versões assinadas para WASI e UI; publicação via CI
+- [x] ~~Assinatura criptográfica de plugins~~ (removida em 1.1; SHA-256 + code signing do instalador)
 - [x] Isolamento por capabilities WASI: imports validados, filesystem/socket/HTTP deny-by-default; limites OS documentados
 - [x] Execução concorrente por requisição (instância por chamada)
 - [x] Observabilidade básica (métricas /metrics + tracing)
@@ -101,7 +100,6 @@ está em [`plans/ROADMAP_STATUS.md`](plans/ROADMAP_STATUS.md).
 - [x] `owasidea doctor --fix` com versões pinadas e `tools.lock`.
 - [x] JSON Schema de `wasm-app.toml` e `owasidea schema`.
 - [x] `owasidea verify dist/` para assinaturas/checksums no CI.
-- [x] Registry com lockfile (`plugins.lock`), `registry update` e `outdated`.
 - [x] Selo de build (`build_id` em host, UI e manifests) com aviso de UI anterior ao host.
 
 ### P2 — operação e release
@@ -123,7 +121,9 @@ está em [`plans/ROADMAP_STATUS.md`](plans/ROADMAP_STATUS.md).
   persistência entre reinícios do host.
 - WebView2 (Tauri Windows) não foi validado para o bridge de UI; engines sem
   suporte devem falhar fechado (`BRIDGE_DISABLED`, iframe isolado).
-- Orçamentos de performance do gate G3 estão definidos, mas ainda não medidos.
+- Orçamentos de performance do gate G3 foram medidos em
+  [`plans/PERFORMANCE.md`](plans/PERFORMANCE.md); a medição cobre um host Linux
+  com cache quente e chamadas sequenciais, não Windows/macOS nem carga.
 - Release notes finais e tag `v1.0.0` pertencem ao gate G5.
 
 ### Anti-metas

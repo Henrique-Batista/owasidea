@@ -90,18 +90,16 @@ ui_entry = "wwwroot/index.html"
 - UI plugins are listed by `GET /ui-plugins` and by the bundled
   `ui-plugins.json`; headless plugins remain in `GET /plugins`.
 - The dashboard checks every listed asset and the aggregate digest against
-  `ui-plugins.json` before creating the iframe. Signed manifests remain the
-  source of truth for headless plugins and registry installs.
+  `ui-plugins.json` before creating the iframe. Manifests remain the source of
+  truth for headless plugins.
 - The iframe uses `sandbox="allow-scripts allow-forms"`; it does not receive
   same-origin, top-navigation, or popup privileges.
 - UI plugins do not receive WASI, host KV/log, filesystem, socket, or native host
   capabilities. The iframe stays fully isolated unless the plugin opts into the
   least-privilege parent-to-plugin bridge (ADR-0004, CT-05/CT-06/CT-07): only the
   exports listed in `bridge` are callable, and everything else is denied.
-- UI assets are included in local desktop bundles; remote registry entries list
-  each file separately and verify it against the same manifest digest map.
-
-For registry signing and publishing, see [REGISTRY.md](REGISTRY.md).
+- UI assets are included in local desktop bundles and verified against the
+  manifest digest map.
 
 ## Working examples
 
@@ -182,7 +180,7 @@ same-origin with the bundle at `./owasidea-bridge.js` (copied by
 ```toml
 [plugins.board-svelte]
 ...
-bridge = ["changelog-ts.render"]
+bridge = ["app-glue.call"]
 ```
 
 ### Usage (Svelte/TS)
@@ -190,8 +188,12 @@ bridge = ["changelog-ts.render"]
 ```ts
 const mod: any = await import(/* @vite-ignore */ './owasidea-bridge.js');
 const bridge = await mod.connect(); // handshake; rejects BRIDGE_DISABLED after 5s
-const result = await bridge.call('changelog-ts', 'render', ['v1.0.0', ['feat: add']]);
-// or: bridge.call('changelog-ts.render', ['v1.0.0', ['feat: add']])
+const result = await bridge.call('app-glue', 'call', [
+  'changelog-ts',
+  'render',
+  JSON.stringify(['v1.0.0', ['feat: add']]),
+]);
+// The glue returns a result<string,string>; unwrap ok/err and JSON.parse its value.
 ```
 
 `connect()` resolves with `{ call, cancel }`. `call()` returns a Promise that

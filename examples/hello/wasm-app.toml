@@ -2,6 +2,7 @@
 name = "hello"
 version = "0.1.0"
 identifier = "dev.owasidea.examples.hello"
+ui_plugin = "greeter"
 
 [host]
 addr = "127.0.0.1:8801"

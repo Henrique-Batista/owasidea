@@ -1,0 +1,9 @@
+package interop:provider@0.1.0;
+
+interface catalog {
+    echo: func(value: string) -> string;
+}
+
+world provider {
+    export catalog;
+}

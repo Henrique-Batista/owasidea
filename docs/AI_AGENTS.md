@@ -24,8 +24,9 @@ and the example build scripts) over prose.
 5. **UI-plugin output goes through `owasidea build`.** It hashes files, writes a
    `webview-v1` manifest, and copies assets into `ui/public/plugins/`.
 6. **A bundled app needs both manifests and components.** `owasidea bundle`
-   generates `bundle.resources` from `wasm-app.toml` (manifests, components,
-   trust key, `runtime.json`); adding a plugin needs no manual config edit.
+   generates `bundle.resources` from `wasm-app.toml` (manifests, components and
+   `runtime.json`); adding a plugin needs no manual config edit. `--target cli`
+   stages a headless bundle.
 7. **Do not put `node_modules`, source trees, or UI caches in Tauri resources.**
 8. **Services are persistent instances.** Stop before reload; reload while
    running returns `409`.
@@ -40,8 +41,7 @@ and the example build scripts) over prose.
 ```
 crates/host/                 Wasmtime runtime, manifest verification, HTTP API
 crates/cli/                  `owasidea` CLI; reuses host as a library
-crates/desktop/              generic Tauri shell for the repository root app
-crates/macros/               Rust source-generator attributes
+crates/owasidea/             Rust attribute markers for source-generated WIT
 examples/shipyard/           real end-to-end reference app
   wasm-app.toml              app config (plugins, permissions, desktop)
   plugins/*/                 one directory per plugin
@@ -52,6 +52,7 @@ examples/shipyard/           real end-to-end reference app
 docs/GET_STARTED.md          human guide
 docs/API.md                  HTTP API
 docs/PLUGIN_AUTHORING.md     language-specific authoring notes
+docs/RUNTIME_MODEL.md        routes, plugin-to-plugin, KV, network, sandbox timing
 docs/UI_PLUGINS.md           isolated UI contract
 docs/SECURITY.md             threat model and production policy
 ```
@@ -71,9 +72,9 @@ owasidea test                        # build + smoke + Playwright
 
 Expected build facts:
 
-- 11 plugin manifests: 9 WASI + 2 UI.
+- 12 plugin manifests: 10 WASI + 2 UI.
 - `examples/shipyard/manifests/pipeline-go.manifest.json` has `composition.strategy = "build-time"` and no `imports.plugins`.
-- `examples/shipyard/plugins/*/*.component.wasm` exist for the 9 headless plugins.
+- `examples/shipyard/plugins/*/*.component.wasm` exist for the 10 headless plugins.
 - `examples/shipyard/ui/public/plugins/{board-svelte,map-react}/` contain `index.html`, `assets/*`, and are hashed into their manifests.
 
 If you need the CLI without installing it:
@@ -189,11 +190,11 @@ For a `result<T,E>` export, the body is `{"result":{"ok":...}}` or
    - build config (`Cargo.toml`, `go.mod`, `package.json`, `.csproj`, `Makefile`)
 3. Add `[plugins.<name>]` in `wasm-app.toml` with `path`, `language`, `type`.
 4. Add permissions only if WIT imports them (Rust: `#[owasidea::host_kv]`):
-   - `poc:host/host-kv` → `kv = "<namespace>:read-write"`
+   - `poc:host/host-kv` → `kv = ["<namespace>:read-write"]`
    - `poc:host/host-log` → no config needed
    - `wasi:filesystem` → `fs = ["<guest-path>:read-write"]`
-   - `wasi:http/outgoing-handler` → `http_outbound = ["exact.host"]`
-   - `wasi:sockets` → `network_outbound` / `network_inbound`
+   - `wasi:http/outgoing-handler` → `http_outbound = ["exact.host:443"]`
+   - `wasi:sockets` → `network_outbound = ["host:port"]`, `network_inbound = ["IP:port"]`
 5. For a `wasi:http/incoming-handler` export, set `type = "executable"`.
 6. For `start-service`/`service-status`, set `type = "service"`.
 7. For a UI bundle, set `type = "ui"`, `runtime = "js-wasm"`, `ui_entry`, and
@@ -255,6 +256,16 @@ Config:
 compose_with = ["core-rust"]
 ```
 
+Runtime dependencies use generated WIT bindings instead:
+
+```toml
+[plugins.app-glue]
+dependencies = ["catalog-go"]
+```
+
+The same edge cannot be both `dependencies` and `compose_with`. Declarations may
+cycle; a runtime re-entry fails with `OWASIDEA_E_DEPENDENCY_REENTRANT_CALL`.
+
 `owasidea build` builds ordinary plugins first, then composes. Dependency
 components are staged under single-dot filenames because `wasm-tools` derives a
 package name from the path and rejects `core-rust.component.wasm`.
@@ -299,11 +310,9 @@ owasidea --config examples/shipyard/wasm-app.toml bundle
 owasidea --config examples/shipyard/wasm-app.toml bundle --bundles deb
 ```
 
-`[signing]` in `wasm-app.toml` makes `build` and `bundle` sign every manifest
-automatically. Create the demo key under `keys/` (gitignored) once with
-`owasidea keygen --out keys`; the example does not set `generate = true`.
-Production must use a protected CI key and distribute the public key out of
-band (`--public-key` for `verify`).
+Manifests are unsigned and checked by SHA-256. Release integrity comes from the
+build pipeline and OS code signing of the installer; there is no plugin
+`keygen`/`sign` step.
 
 `bundle` reads `[desktop]` from the app config:
 
@@ -324,7 +333,6 @@ let manifests = app.path().resource_dir()?.join("manifests"); // bundled
 let data_dir = app.path().app_data_dir()?;
 std::fs::create_dir_all(&data_dir)?;
 std::env::set_var("OWASIDEA_DATA_DIR", &data_dir);
-std::env::set_var("OWASIDEA_PUBLIC_KEY", app.path().resource_dir()?.join("trust/owasidea.pub"));
 owasidea_host::run(manifests, "127.0.0.1:8790".into()).await?;
 ```
 
@@ -364,13 +372,13 @@ Acceptance criteria for the reference app:
 
 - [ ] `owasidea smoke` exits 0.
 - [ ] `owasidea test` runs smoke + 5/5 Playwright tests.
-- [ ] `/plugins` returns 9 headless plugins.
+- [ ] `/plugins` returns 10 headless plugins (or only the glue on a production host).
 - [ ] `/ui-plugins` returns 2 UI plugins with per-file hashes.
 - [ ] `pipeline-go` returns a composed verdict.
 - [ ] `core-rust` saves and loads a report under `OWASIDEA_DATA_DIR`.
 - [ ] `watchtower-rust` start/status/stop works.
 - [ ] `/app/webhook-go/health` returns `ok: true`.
-- [ ] The `.deb` contains `manifests/`, `trust/owasidea.pub`, and `plugins/*/*.component.wasm`.
+- [ ] The `.deb` contains `manifests/` and `plugins/*/*.component.wasm`.
 
 ---
 

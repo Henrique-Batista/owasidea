@@ -1,0 +1,50 @@
+[app]
+name = "interop"
+version = "0.1.0"
+identifier = "dev.owasidea.examples.interop"
+ui_plugin = "glue-rust"
+
+[host]
+addr = "127.0.0.1:8803"
+
+[plugins.provider-go]
+path = "plugins/provider-go"
+language = "go"
+type = "library"
+# Declared cycle: provider -> glue -> provider builds; runtime re-entry is rejected.
+dependencies = ["glue-rust"]
+
+[plugins.glue-rust]
+path = "plugins/glue-rust"
+language = "rust"
+type = "library"
+dependencies = ["provider-go"]
+kv = ["app-state:read-write", "catalog-cache:read"]
+
+[dev]
+watch = true
+hot_reload = true
+ui_addr = "127.0.0.1:5203"
+
+[[smoke.calls]]
+plugin = "glue-rust"
+function = "call-provider"
+args = ["interop"]
+expect_equals = "Go:interop"
+
+[[smoke.calls]]
+plugin = "glue-rust"
+function = "remember"
+args = ["release", "1.2.0"]
+expect_equals = { ok = "saved release" }
+
+[[smoke.calls]]
+plugin = "glue-rust"
+function = "recall"
+args = ["release"]
+expect_equals = "1.2.0"
+
+[[smoke.calls]]
+plugin = "glue-rust"
+function = "cache-read-only"
+expect_equals = true

@@ -75,6 +75,7 @@ fn bundle_help_documents_host_lib_isolation() {
     assert!(stdout.contains("--profile"));
     assert!(stdout.contains("--provenance"));
     assert!(stdout.contains("--no-sbom"));
+    assert!(stdout.contains("--target"));
 }
 
 #[test]
@@ -527,287 +528,6 @@ fn build_resolves_paths_from_the_config_directory() {
 }
 
 #[test]
-fn build_generates_and_signs_when_signing_is_configured() {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let root = std::env::temp_dir().join(format!(
-        "owasidea-sign-build-test-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let app = root.join("apps/signed");
-    std::fs::create_dir_all(app.join("plugins/panel/dist")).unwrap();
-    std::fs::write(
-        app.join("plugins/panel/dist/index.html"),
-        "<!doctype html><title>signed panel</title>",
-    )
-    .unwrap();
-    std::fs::write(
-        app.join("wasm-app.toml"),
-        "[app]\nversion = \"1.0.0\"\n\n[signing]\ngenerate = true\n\n[plugins.panel]\npath = \"plugins/panel\"\nlanguage = \"svelte\"\ntype = \"ui\"\nruntime = \"js-wasm\"\nui_entry = \"index.html\"\n",
-    )
-    .unwrap();
-
-    let mut build = Command::cargo_bin("owasidea").unwrap();
-    build
-        .args(["--config", "apps/signed/wasm-app.toml", "build"])
-        .current_dir(&root)
-        .assert()
-        .success();
-
-    assert!(app.join("keys/owasidea.key").is_file());
-    assert!(app.join("keys/owasidea.pub").is_file());
-    let manifest: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(app.join("manifests/panel.manifest.json")).unwrap())
-            .unwrap();
-    assert_eq!(
-        manifest["metadata"]["signature_format"],
-        "owasidea-manifest-v1"
-    );
-    assert!(manifest["metadata"]["signature"]
-        .as_str()
-        .is_some_and(|signature| !signature.is_empty()));
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn registry_rejects_non_https_remote_urls() {
-    let mut cmd = Command::cargo_bin("owasidea").unwrap();
-    cmd.args([
-        "registry",
-        "search",
-        "notes",
-        "--url",
-        "http://example.com/index.json",
-    ])
-    .assert()
-    .failure()
-    .stderr(predicates::str::contains("must use HTTPS"));
-}
-
-#[test]
-fn signing_binds_component_and_effective_manifest() {
-    use base64::Engine;
-    use ring::signature::{UnparsedPublicKey, ED25519};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let root = std::env::temp_dir().join(format!(
-        "owasidea-sign-test-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let manifests = root.join("manifests");
-    let keys = root.join("keys");
-    std::fs::create_dir_all(&manifests).unwrap();
-    std::fs::write(manifests.join("artifact.wasm"), b"component bytes").unwrap();
-    std::fs::write(
-        manifests.join("signed.manifest.json"),
-        r#"{
-          "name":"signed","version":"1.0.0","language":"rust","abi":"wasi-0.2",
-          "runtime":"wasi-component","type":"library","component":"artifact.wasm",
-          "exports":[],"imports":{"wasi":[],"host":[],"plugins":[]},
-          "permissions":{"filesystem":[],"http":{"outbound":[],"inbound":false},"kv":null,
-            "resources":{"max_memory_mb":64,"max_fuel":1000000,"timeout_ms":5000,"max_instances":1}},
-          "state":{"persistent":false,"storage":"none","root":null},
-          "composition":{"strategy":"build-time","entry":false},"metadata":{"sha256":"unused"}
-        }"#,
-    )
-    .unwrap();
-
-    let mut keygen = Command::cargo_bin("owasidea").unwrap();
-    keygen
-        .args(["keygen", "--out"])
-        .arg(&keys)
-        .assert()
-        .success();
-    let mut sign = Command::cargo_bin("owasidea").unwrap();
-    sign.args(["sign", "signed", "--manifest-dir"])
-        .arg(&manifests)
-        .args(["--key"])
-        .arg(keys.join("owasidea.key"))
-        .assert()
-        .success();
-
-    let mut manifest: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(manifests.join("signed.manifest.json")).unwrap())
-            .unwrap();
-    let signature = base64::engine::general_purpose::STANDARD
-        .decode(manifest["metadata"]["signature"].as_str().unwrap())
-        .unwrap();
-    let public_key = base64::engine::general_purpose::STANDARD
-        .decode(
-            std::fs::read_to_string(keys.join("owasidea.pub"))
-                .unwrap()
-                .trim(),
-        )
-        .unwrap();
-    let component = std::fs::read(manifests.join("artifact.wasm")).unwrap();
-    let mut unsigned = manifest.clone();
-    unsigned["metadata"]
-        .as_object_mut()
-        .unwrap()
-        .remove("signature");
-    let mut payload = b"owasidea-plugin-signature-v1\0".to_vec();
-    payload.extend_from_slice(&serde_json::to_vec(&unsigned).unwrap());
-    payload.push(0);
-    payload.extend_from_slice(&component);
-    let key = UnparsedPublicKey::new(&ED25519, &public_key);
-    assert!(key.verify(&payload, &signature).is_ok());
-
-    manifest["metadata"]
-        .as_object_mut()
-        .unwrap()
-        .remove("signature");
-    manifest["permissions"]["network"]["outbound"] = serde_json::json!(["evil.example"]);
-    let mut altered = b"owasidea-plugin-signature-v1\0".to_vec();
-    altered.extend_from_slice(&serde_json::to_vec(&manifest).unwrap());
-    altered.push(0);
-    altered.extend_from_slice(&component);
-    assert!(key.verify(&altered, &signature).is_err());
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn registry_install_downloads_only_after_checksum_and_signature_validation() {
-    use base64::Engine;
-    use sha2::Digest;
-    use std::io::{Read, Write};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let root = std::env::temp_dir().join(format!(
-        "owasidea-registry-test-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let packages = root.join("packages");
-    let keys = root.join("keys");
-    let install = root.join("installed");
-    std::fs::create_dir_all(&packages).unwrap();
-    let artifact = b"signed registry component";
-    std::fs::write(packages.join("artifact.wasm"), artifact).unwrap();
-    let sha256 = format!("{:x}", sha2::Sha256::digest(artifact));
-    std::fs::write(
-        packages.join("registry-demo.manifest.json"),
-        format!(
-            r#"{{
-              "name":"registry-demo","version":"1.0.0","language":"rust","abi":"wasi-0.2",
-              "runtime":"wasi-component","type":"library","component":"artifact.wasm",
-              "exports":[],"imports":{{"wasi":[],"host":[],"plugins":[]}},
-              "permissions":{{"filesystem":[],"http":{{"outbound":[],"inbound":false}},"network":{{"outbound":[],"inbound":[]}},"kv":null,
-                "resources":{{"max_memory_mb":64,"max_fuel":1000000,"timeout_ms":5000,"max_instances":1}}}},
-              "state":{{"persistent":false,"storage":"none","root":null}},
-              "composition":{{"strategy":"build-time","entry":false}},"metadata":{{"sha256":"{sha256}"}}
-            }}"#
-        ),
-    )
-    .unwrap();
-
-    let mut keygen = Command::cargo_bin("owasidea").unwrap();
-    keygen
-        .args(["keygen", "--out"])
-        .arg(&keys)
-        .assert()
-        .success();
-    let mut sign = Command::cargo_bin("owasidea").unwrap();
-    sign.args(["sign", "registry-demo", "--manifest-dir"])
-        .arg(&packages)
-        .args(["--key"])
-        .arg(keys.join("owasidea.key"))
-        .assert()
-        .success();
-    std::fs::write(
-        root.join("index.json"),
-        r#"{"version":1,"plugins":[{"name":"registry-demo","version":"1.0.0","description":"test","manifest":"packages/registry-demo.manifest.json","artifact":"packages/artifact.wasm"}]}"#,
-    )
-    .unwrap();
-
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-    let address = listener.local_addr().unwrap();
-    let server_root = root.clone();
-    let server = std::thread::spawn(move || {
-        for incoming in listener.incoming().take(3) {
-            let mut stream = incoming.unwrap();
-            let mut request = Vec::new();
-            let mut chunk = [0u8; 1024];
-            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
-                let count = stream.read(&mut chunk).unwrap();
-                if count == 0 {
-                    break;
-                }
-                request.extend_from_slice(&chunk[..count]);
-            }
-            let first_line = String::from_utf8_lossy(&request)
-                .lines()
-                .next()
-                .unwrap_or_default()
-                .to_string();
-            let relative = first_line.split_whitespace().nth(1).unwrap_or("/");
-            let path = server_root.join(relative.trim_start_matches('/'));
-            let (status, body) = match std::fs::read(path) {
-                Ok(body) => ("200 OK", body),
-                Err(_) => ("404 Not Found", Vec::new()),
-            };
-            write!(
-                stream,
-                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            )
-            .unwrap();
-            stream.write_all(&body).unwrap();
-        }
-    });
-
-    let mut install_cmd = Command::cargo_bin("owasidea").unwrap();
-    install_cmd
-        .args([
-            "registry",
-            "install",
-            "registry-demo",
-            "--version",
-            "1.0.0",
-            "--url",
-        ])
-        .arg(format!("http://{address}/index.json"))
-        .args(["--public-key"])
-        .arg(keys.join("owasidea.pub"))
-        .args(["--manifest-dir"])
-        .arg(install.join("manifests"))
-        .assert()
-        .success();
-    server.join().unwrap();
-
-    assert_eq!(
-        std::fs::read(install.join("manifests/artifact.wasm")).unwrap(),
-        artifact
-    );
-    let installed: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(install.join("manifests/registry-demo.manifest.json")).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        installed["metadata"]["signature_format"],
-        "owasidea-manifest-v1"
-    );
-    let public_key = base64::engine::general_purpose::STANDARD
-        .decode(
-            std::fs::read_to_string(keys.join("owasidea.pub"))
-                .unwrap()
-                .trim(),
-        )
-        .unwrap();
-    assert_eq!(public_key.len(), 32);
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
 fn dev_help_documents_desktop_flag() {
     let mut cmd = Command::cargo_bin("owasidea").unwrap();
     let output = cmd.args(["dev", "--help"]).output().unwrap();
@@ -918,7 +638,7 @@ fn call_command_reads_args_from_stdin() {
 }
 
 #[test]
-fn verify_dist_valid_signed_component() {
+fn verify_dist_valid_component() {
     use sha2::{Digest, Sha256};
     use std::time::{SystemTime, UNIX_EPOCH};
     let root = std::env::temp_dir().join(format!(
@@ -937,10 +657,10 @@ fn verify_dist_valid_signed_component() {
     let sha = format!("{:x}", Sha256::digest(component));
     let manifest = serde_json::json!({
         "name":"demo","version":"1.0.0","language":"rust","abi":"wasi-0.2",
-        "schema_version":1,"host_abi":owasidea_host::HOST_ABI,"min_host":owasidea_host::HOST_VERSION,
+        "schema_version":2,"host_abi":owasidea_host::HOST_ABI,"min_host":owasidea_host::HOST_VERSION,
         "runtime":"wasi-component","type":"library","component":"../plugins/demo/demo.component.wasm",
         "exports":[],"imports":{"wasi":[],"host":[],"plugins":[]},
-        "permissions":{"filesystem":[],"http":{"outbound":[],"inbound":false},"kv":null,
+        "permissions":{"filesystem":[],"http":{"outbound":[],"inbound":false},"kv":[],
             "network":{"outbound":[],"inbound":[]},
             "resources":{"max_memory_mb":64,"max_fuel":1000000,"timeout_ms":5000,"max_instances":1}},
         "state":{"persistent":false,"storage":"none","root":null},
@@ -953,29 +673,11 @@ fn verify_dist_valid_signed_component() {
     )
     .unwrap();
 
-    std::fs::create_dir_all(dist.join("keys")).unwrap();
-    let mut keygen = Command::cargo_bin("owasidea").unwrap();
-    keygen
-        .args(["keygen", "--out"])
-        .arg(dist.join("keys"))
-        .assert()
-        .success();
-
-    let mut sign = Command::cargo_bin("owasidea").unwrap();
-    sign.args(["sign", "demo", "--manifest-dir"])
-        .arg(dist.join("manifests"))
-        .args(["--key"])
-        .arg(dist.join("keys/owasidea.key"))
-        .assert()
-        .success();
-
     // valid
     let mut verify = Command::cargo_bin("owasidea").unwrap();
     let out = verify
         .args(["verify"])
         .arg(&dist)
-        .args(["--public-key"])
-        .arg(dist.join("keys/owasidea.pub"))
         .args(["--json"])
         .output()
         .unwrap();
@@ -992,124 +694,7 @@ fn verify_dist_valid_signed_component() {
     // tampered component
     std::fs::write(dist.join("plugins/demo/demo.component.wasm"), b"tampered").unwrap();
     let mut verify2 = Command::cargo_bin("owasidea").unwrap();
-    verify2
-        .args(["verify"])
-        .arg(&dist)
-        .args(["--public-key"])
-        .arg(dist.join("keys/owasidea.pub"))
-        .assert()
-        .failure();
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn verify_dist_unsigned_or_missing_key_fails() {
-    use sha2::{Digest, Sha256};
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let root = std::env::temp_dir().join(format!(
-        "owasidea-verify-unsigned-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let dist = root.join("dist");
-    std::fs::create_dir_all(dist.join("manifests")).unwrap();
-    std::fs::create_dir_all(dist.join("plugins/demo")).unwrap();
-    let component = b"component bytes";
-    std::fs::write(dist.join("plugins/demo/demo.component.wasm"), component).unwrap();
-    let sha = format!("{:x}", Sha256::digest(component));
-    let manifest = serde_json::json!({
-        "name":"demo","version":"1.0.0","language":"rust","abi":"wasi-0.2",
-        "schema_version":1,"host_abi":owasidea_host::HOST_ABI,"min_host":owasidea_host::HOST_VERSION,
-        "runtime":"wasi-component","type":"library","component":"../plugins/demo/demo.component.wasm",
-        "exports":[],"imports":{"wasi":[],"host":[],"plugins":[]},
-        "permissions":{"filesystem":[],"http":{"outbound":[],"inbound":false},"kv":null,
-            "network":{"outbound":[],"inbound":[]},
-            "resources":{"max_memory_mb":64,"max_fuel":1000000,"timeout_ms":5000,"max_instances":1}},
-        "state":{"persistent":false,"storage":"none","root":null},
-        "composition":{"strategy":"build-time","entry":false},
-        "metadata":{"author":"","license":"MIT","description":"","sha256":sha}
-    });
-    std::fs::write(
-        dist.join("manifests/demo.manifest.json"),
-        serde_json::to_string_pretty(&manifest).unwrap(),
-    )
-    .unwrap();
-    let mut verify = Command::cargo_bin("owasidea").unwrap();
-    let out = verify
-        .args(["verify"])
-        .arg(&dist)
-        .args(["--json"])
-        .output()
-        .unwrap();
-    assert!(!out.status.success());
-    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(report["ok"], false);
-    assert_eq!(report["errors"][0]["code"], "TRUST_ROOT_MISSING");
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn verify_dist_rejects_key_staged_inside_dist() {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let root = std::env::temp_dir().join(format!(
-        "owasidea-verify-unpinned-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let dist = root.join("dist");
-    std::fs::create_dir_all(dist.join("manifests")).unwrap();
-    std::fs::create_dir_all(dist.join("trust")).unwrap();
-    // base64 of b"k"
-    std::fs::write(dist.join("trust/owasidea.pub"), b"aw==\n").unwrap();
-    std::fs::write(
-        dist.join("manifests/demo.manifest.json"),
-        br#"{"name":"demo","version":"1.0.0","runtime":"wasi-component","type":"library","component":"demo.wasm","metadata":{"sha256":""}}"#,
-    )
-    .unwrap();
-
-    let mut verify = Command::cargo_bin("owasidea").unwrap();
-    verify.env_remove("OWASIDEA_PUBLIC_KEY");
-    let out = verify
-        .args(["verify"])
-        .arg(&dist)
-        .args(["--json"])
-        .output()
-        .unwrap();
-    assert!(!out.status.success());
-    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(report["ok"], false);
-    let codes: Vec<&str> = report["errors"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|error| error["code"].as_str())
-        .collect();
-    assert!(codes.contains(&"TRUST_ROOT_UNPINNED"), "codes: {codes:?}");
-
-    // Explicit opt-in accepts the staged key for local checks.
-    let mut allowed = Command::cargo_bin("owasidea").unwrap();
-    allowed.env_remove("OWASIDEA_PUBLIC_KEY");
-    let out = allowed
-        .args(["verify"])
-        .arg(&dist)
-        .args(["--allow-dist-trust", "--json"])
-        .output()
-        .unwrap();
-    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    let codes: Vec<&str> = report["errors"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|error| error["code"].as_str())
-        .collect();
-    assert!(!codes.contains(&"TRUST_ROOT_UNPINNED"), "codes: {codes:?}");
-
+    verify2.args(["verify"]).arg(&dist).assert().failure();
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -1148,10 +733,10 @@ fn verify_dist_ui_asset_hash_mismatch_fails() {
     let bundle_digest = format!("{:x}", h.finalize());
     let manifest = serde_json::json!({
         "name":"ui","version":"1.0.0","language":"yew","abi":"wasi-0.2",
-        "schema_version":1,"host_abi":owasidea_host::HOST_ABI,"min_host":owasidea_host::HOST_VERSION,
+        "schema_version":2,"host_abi":owasidea_host::HOST_ABI,"min_host":owasidea_host::HOST_VERSION,
         "runtime":"js-wasm","type":"ui","component":"",
         "exports":[],"imports":{"wasi":[],"host":[],"plugins":[]},
-        "permissions":{"filesystem":[],"http":{"outbound":[],"inbound":false},"kv":null,
+        "permissions":{"filesystem":[],"http":{"outbound":[],"inbound":false},"kv":[],
             "network":{"outbound":[],"inbound":[]},
             "resources":{"max_memory_mb":64,"max_fuel":1000000,"timeout_ms":5000,"max_instances":1}},
         "state":{"persistent":false,"storage":"none","root":null},
@@ -1165,30 +750,9 @@ fn verify_dist_ui_asset_hash_mismatch_fails() {
     )
     .unwrap();
 
-    std::fs::create_dir_all(dist.join("keys")).unwrap();
-    let mut keygen = Command::cargo_bin("owasidea").unwrap();
-    keygen
-        .args(["keygen", "--out"])
-        .arg(dist.join("keys"))
-        .assert()
-        .success();
-    let mut sign = Command::cargo_bin("owasidea").unwrap();
-    sign.args(["sign", "ui", "--manifest-dir"])
-        .arg(dist.join("manifests"))
-        .args(["--key"])
-        .arg(dist.join("keys/owasidea.key"))
-        .assert()
-        .success();
-
     // valid first
     let mut verify = Command::cargo_bin("owasidea").unwrap();
-    verify
-        .args(["verify"])
-        .arg(&dist)
-        .args(["--public-key"])
-        .arg(dist.join("keys/owasidea.pub"))
-        .assert()
-        .success();
+    verify.args(["verify"]).arg(&dist).assert().success();
 
     // tamper asset
     std::fs::write(
@@ -1197,13 +761,7 @@ fn verify_dist_ui_asset_hash_mismatch_fails() {
     )
     .unwrap();
     let mut verify2 = Command::cargo_bin("owasidea").unwrap();
-    verify2
-        .args(["verify"])
-        .arg(&dist)
-        .args(["--public-key"])
-        .arg(dist.join("keys/owasidea.pub"))
-        .assert()
-        .failure();
+    verify2.args(["verify"]).arg(&dist).assert().failure();
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -1537,7 +1095,7 @@ fn base_manifest(sha: &str) -> serde_json::Value {
         "permissions": {
             "filesystem": [],
             "http": {"outbound": [], "inbound": false},
-            "kv": null
+            "kv": []
         },
         "state": {}, "composition": {},
         "metadata": {"sha256": sha}
@@ -1545,18 +1103,13 @@ fn base_manifest(sha: &str) -> serde_json::Value {
 }
 
 #[test]
-fn validate_warns_about_legacy_manifest_without_failing() {
+fn validate_rejects_legacy_manifest_with_migration_hint() {
     let root = write_validate_fixture("legacy", base_manifest);
     let out = validate_fixture(&root);
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "{stdout}");
-    assert!(
-        stdout.contains("warning: legacy: ABI_LEGACY_MANIFEST"),
-        "{stdout}"
-    );
-    assert!(stdout.contains("ABI_MISSING_HOST_FIELDS"), "{stdout}");
-    assert!(stdout.contains("docs/ABI_POLICY.md"), "{stdout}");
-    assert!(stdout.contains("deprecation warning(s)"), "{stdout}");
+    assert!(!out.status.success(), "{stdout}");
+    assert!(stdout.contains("schema_version 0"), "{stdout}");
+    assert!(stdout.contains("owasidea migrate"), "{stdout}");
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -1565,7 +1118,7 @@ fn validate_is_quiet_for_current_manifest() {
     let root = write_validate_fixture("current", |sha| {
         let mut manifest = base_manifest(sha);
         let object = manifest.as_object_mut().unwrap();
-        object.insert("schema_version".to_string(), serde_json::json!(1));
+        object.insert("schema_version".to_string(), serde_json::json!(2));
         object.insert(
             "host_abi".to_string(),
             serde_json::json!(owasidea_host::HOST_ABI),
@@ -1587,7 +1140,7 @@ fn validate_is_quiet_for_current_manifest() {
 fn current_manifest(sha: &str) -> serde_json::Value {
     let mut manifest = base_manifest(sha);
     let object = manifest.as_object_mut().unwrap();
-    object.insert("schema_version".to_string(), serde_json::json!(1));
+    object.insert("schema_version".to_string(), serde_json::json!(2));
     object.insert(
         "host_abi".to_string(),
         serde_json::json!(owasidea_host::HOST_ABI),
@@ -1653,37 +1206,19 @@ fn validate_json_reports_tampered_manifest_as_not_ok() {
 }
 
 #[test]
-fn validate_json_includes_abi_warnings_without_failing() {
+fn validate_json_reports_abi1_as_error_with_migration_hint() {
     let root = write_validate_fixture("json-legacy", base_manifest);
     let out = validate_fixture_json(&root);
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "{stdout}");
+    assert!(!out.status.success(), "{stdout}");
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(value["ok"], true);
-    let warnings = value["warnings"].as_array().unwrap();
+    assert_eq!(value["ok"], false);
+    assert_eq!(value["warnings"], serde_json::json!([]));
     assert!(
-        warnings.iter().any(|w| w
+        value["errors"].as_array().unwrap().iter().any(|error| error
             .as_str()
             .unwrap_or_default()
-            .contains("ABI_LEGACY_MANIFEST")),
-        "{value}"
-    );
-    assert!(
-        warnings.iter().any(|w| w
-            .as_str()
-            .unwrap_or_default()
-            .contains("ABI_MISSING_HOST_FIELDS")),
-        "{value}"
-    );
-    assert!(
-        value["plugins"][0]["warnings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|w| w
-                .as_str()
-                .unwrap_or_default()
-                .contains("ABI_LEGACY_MANIFEST")),
+            .contains("owasidea migrate")),
         "{value}"
     );
     std::fs::remove_dir_all(root).unwrap();

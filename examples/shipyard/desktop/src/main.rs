@@ -10,10 +10,6 @@ fn first_dir(candidates: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
     candidates.into_iter().find(|path| path.is_dir())
 }
 
-fn first_file(candidates: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
-    candidates.into_iter().find(|path| path.is_file())
-}
-
 fn exe_dir() -> Option<PathBuf> {
     std::env::current_exe()
         .ok()
@@ -50,32 +46,6 @@ fn manifests_dir(handle: &tauri::AppHandle) -> PathBuf {
     build_tree
 }
 
-fn trust_key(handle: &tauri::AppHandle) -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("OWASIDEA_PUBLIC_KEY") {
-        return Some(PathBuf::from(path));
-    }
-    let resource = handle.path().resource_dir().ok();
-    let exe = exe_dir();
-    let build_tree = Path::new(env!("CARGO_MANIFEST_DIR")).join("../keys/owasidea.pub");
-    first_file(
-        resource
-            .iter()
-            .flat_map(|dir| {
-                [
-                    dir.join("trust/owasidea.pub"),
-                    dir.join("resources/trust/owasidea.pub"),
-                ]
-            })
-            .chain(exe.iter().flat_map(|dir| {
-                [
-                    dir.join("trust/owasidea.pub"),
-                    dir.join("resources/trust/owasidea.pub"),
-                ]
-            }))
-            .chain(std::iter::once(build_tree)),
-    )
-}
-
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -92,22 +62,6 @@ fn main() {
             let data_dir = handle.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             std::env::set_var("OWASIDEA_DATA_DIR", &data_dir);
-
-            // Release builds require signed manifests. Find the trust key next
-            // to the executable, in Tauri resources, or in the build tree when
-            // running the binary directly from an external target directory.
-            std::env::set_var("OWASIDEA_REQUIRE_SIGNATURES", "true");
-            match trust_key(&handle) {
-                Some(path) => {
-                    std::env::set_var("OWASIDEA_PUBLIC_KEY", &path);
-                    eprintln!("shipyard trust key: {}", path.display());
-                }
-                None => {
-                    eprintln!(
-                        "shipyard: trust key not found; set OWASIDEA_PUBLIC_KEY or bundle trust/owasidea.pub"
-                    );
-                }
-            }
 
             eprintln!("shipyard manifests: {}", manifests.display());
             eprintln!("shipyard data: {}", data_dir.display());
