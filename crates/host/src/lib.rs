@@ -361,6 +361,8 @@ struct AppState {
     engine: Engine,
     plugins: Arc<std::sync::RwLock<HashMap<String, std::sync::Arc<PluginRuntime>>>>,
     ui_plugins: Arc<Vec<UiPluginInfo>>,
+    /// Native UI entries from `native-ui.json`; discovery only, never routed.
+    native_uis: Arc<Vec<NativeUiInfo>>,
     tailcat_session: Arc<Mutex<Option<TailcatSession>>>,
     services: Arc<Mutex<HashMap<String, ServiceSession>>>,
     service_health: Arc<Mutex<HashMap<String, ServiceHealth>>>,
@@ -1690,6 +1692,27 @@ struct PluginInfo {
     served_on: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct NativeUiInfo {
+    name: String,
+    #[serde(rename = "type", default = "native_ui_kind")]
+    kind: String,
+    #[serde(default = "native_ui_runtime")]
+    runtime: String,
+    binary: String,
+    sha256: String,
+    #[serde(default)]
+    trust: String,
+}
+
+fn native_ui_kind() -> String {
+    "native-ui".to_string()
+}
+
+fn native_ui_runtime() -> String {
+    "native".to_string()
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct UiPluginInfo {
     name: String,
@@ -1814,6 +1837,19 @@ async fn list_plugins(State(state): State<AppState>) -> Json<Vec<PluginInfo>> {
             imports_host: p.manifest.imports.host.clone(),
             served_on: matches!(p.manifest.kind.as_str(), "executable" | "hybrid")
                 .then(|| format!("/app/{name}")),
+        });
+    }
+    for native in state.native_uis.iter() {
+        out.push(PluginInfo {
+            name: native.name.clone(),
+            version: String::new(),
+            language: "native".to_string(),
+            runtime: native.runtime.clone(),
+            kind: native.kind.clone(),
+            exports: Vec::new(),
+            imports_wasi: 0,
+            imports_host: Vec::new(),
+            served_on: None,
         });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -3496,6 +3532,43 @@ fn load_manifests(dir: &Path) -> Result<Vec<(Manifest, serde_json::Value, PathBu
     Ok(out)
 }
 
+/// Native UI index entries are discovery metadata only. A missing file is
+/// normal; a malformed file is non-fatal at startup and leaves the rest of the
+/// host serving.
+fn load_native_uis(dir: &Path) -> Result<Vec<NativeUiInfo>> {
+    let path = dir.join("native-ui.json");
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    let raw =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let index: serde_json::Value = serde_json::from_str(&raw)
+        .with_context(|| format!("invalid JSON in {}", path.display()))?;
+    if index.get("schema").and_then(serde_json::Value::as_str) != Some("native-v1") {
+        anyhow::bail!(
+            "{}: unsupported native UI schema; expected \"native-v1\"",
+            path.display()
+        );
+    }
+    let plugins = index
+        .get("plugins")
+        .cloned()
+        .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
+    serde_json::from_value::<Vec<NativeUiInfo>>(plugins)
+        .with_context(|| format!("invalid native UI entries in {}", path.display()))
+}
+
+fn load_native_uis_or_warn(dir: &Path) -> Vec<NativeUiInfo> {
+    match load_native_uis(dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!("ignoring native UI index: {error:#}");
+            eprintln!("warning: ignoring native UI index: {error:#}");
+            Vec::new()
+        }
+    }
+}
+
 fn validate_manifest_abi(manifest: &Manifest) -> Result<()> {
     match manifest.schema_version {
         2 => {
@@ -3609,6 +3682,7 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
     if loaded.is_empty() {
         return Err(anyhow!("no manifests found in {manifests_dir:?}"));
     }
+    let native_uis = load_native_uis_or_warn(&manifests_dir);
 
     let mut config = wasmtime::Config::new();
     config.wasm_component_model(true);
@@ -3872,6 +3946,7 @@ pub async fn run(manifests_dir: PathBuf, addr: String) -> Result<()> {
         engine,
         plugins,
         ui_plugins: Arc::new(ui_plugins),
+        native_uis: Arc::new(native_uis),
         tailcat_session: Arc::new(Mutex::new(None)),
         services,
         service_health,
@@ -4499,6 +4574,7 @@ mod tests {
             engine: Engine::default(),
             plugins: Arc::new(std::sync::RwLock::new(HashMap::new())),
             ui_plugins: Arc::new(Vec::new()),
+            native_uis: Arc::new(Vec::new()),
             tailcat_session: Arc::new(Mutex::new(None)),
             services: Arc::new(Mutex::new(HashMap::new())),
             service_health: Arc::new(Mutex::new(HashMap::new())),
@@ -4613,6 +4689,103 @@ mod tests {
             StatusCode::NOT_FOUND,
             "dev keeps full access"
         );
+    }
+
+    #[tokio::test]
+    async fn native_ui_entries_are_discoverable_but_not_routable() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let mut state = test_app_state(std::sync::RwLock::new(HashMap::new()));
+        state.native_uis = Arc::new(vec![NativeUiInfo {
+            name: "board".to_string(),
+            kind: "native-ui".to_string(),
+            runtime: "native".to_string(),
+            binary: "native/board/board".to_string(),
+            sha256: "a".repeat(64),
+            trust: "unrestricted".to_string(),
+        }]);
+        let router = build_router(state).unwrap();
+
+        let listed = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/plugins")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(listed.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(listed.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let plugins: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let board = plugins
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|plugin| plugin["name"] == "board")
+            .expect("native UI listed");
+        assert_eq!(board["type"], "native-ui");
+        assert_eq!(board["runtime"], "native");
+        assert_eq!(board["exports"], serde_json::json!([]));
+
+        let call = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/plugin/board/call")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"function":"greet","args":[]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(call.status(), StatusCode::NOT_FOUND);
+
+        let app = router
+            .oneshot(
+                Request::builder()
+                    .uri("/app/board/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(app.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn malformed_native_ui_index_is_reported_not_fatal() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("native-ui.json"), b"{not json").unwrap();
+        assert!(load_native_uis(dir.path()).is_err());
+        assert!(
+            load_native_uis_or_warn(dir.path()).is_empty(),
+            "a malformed index must not block host startup"
+        );
+
+        std::fs::write(
+            dir.path().join("native-ui.json"),
+            serde_json::json!({
+                "schema": "native-v1",
+                "trust": "unrestricted-local-process",
+                "plugins": [{
+                    "name": "board", "type": "native-ui", "runtime": "native",
+                    "binary": "native/board/board", "sha256": "a".repeat(64),
+                    "trust": "unrestricted"
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let entries = load_native_uis(dir.path()).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "board");
     }
 
     #[tokio::test]

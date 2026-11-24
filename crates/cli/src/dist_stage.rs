@@ -15,15 +15,17 @@ use std::path::Path;
 pub struct StageReport {
     pub manifests: usize,
     pub components: usize,
+    pub native_uis: usize,
     pub ui: bool,
 }
 
 impl StageReport {
     pub fn summary(&self) -> String {
         format!(
-            "{} manifest(s), {} component(s), UI {}",
+            "{} manifest(s), {} component(s), {} native UI(s), UI {}",
             self.manifests,
             self.components,
+            self.native_uis,
             if self.ui { "staged" } else { "absent" }
         )
     }
@@ -156,7 +158,60 @@ pub fn stage_dist(root: &Path, output: &Path) -> anyhow::Result<StageReport> {
         report.ui = true;
     }
 
+    report.native_uis = stage_native_uis(root, output, &manifests_dst)?;
+
     Ok(report)
+}
+
+/// Copy native UI binaries under `native/<name>/` and rewrite their index so
+/// the bundle resolves them from its own tree. Returns the number staged.
+fn stage_native_uis(root: &Path, output: &Path, manifests_dst: &Path) -> anyhow::Result<usize> {
+    let index_path = root.join("manifests").join("native-ui.json");
+    let native_dst = output.join("native");
+    if !index_path.is_file() {
+        let _ = std::fs::remove_dir_all(&native_dst);
+        let _ = std::fs::remove_file(manifests_dst.join("native-ui.json"));
+        return Ok(0);
+    }
+    let raw = std::fs::read_to_string(&index_path)?;
+    let mut index: crate::native_ui::Index = serde_json::from_str(&raw)
+        .with_context(|| format!("invalid native UI index {}", index_path.display()))?;
+    reset_dir(&native_dst)?;
+    for entry in &mut index.plugins {
+        let source = crate::native_ui::resolve_binary(root, &entry.binary);
+        if !source.is_file() {
+            anyhow::bail!(
+                "native UI {} binary not found: {}",
+                entry.name,
+                source.display()
+            );
+        }
+        let file_name = source
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("native UI {} binary has no file name", entry.name))?;
+        let target = native_dst.join(&entry.name).join(file_name);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(&source, &target)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&target)?.permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&target, permissions)?;
+        }
+        entry.binary = format!(
+            "native/{}/{}",
+            entry.name,
+            file_name.to_string_lossy().replace('\\', "/")
+        );
+    }
+    std::fs::write(
+        manifests_dst.join("native-ui.json"),
+        serde_json::to_string_pretty(&index)? + "\n",
+    )?;
+    Ok(index.plugins.len())
 }
 
 fn reset_dir(path: &Path) -> anyhow::Result<()> {
@@ -172,6 +227,7 @@ fn clear_staged(output: &Path) {
     for path in [
         output.join("manifests"),
         output.join("plugins"),
+        output.join("native"),
         output.join("ui").join("public"),
     ] {
         let _ = std::fs::remove_dir_all(path);
@@ -218,6 +274,7 @@ mod tests {
             StageReport {
                 manifests: 1,
                 components: 1,
+                native_uis: 0,
                 ui: true,
             }
         );
@@ -252,5 +309,47 @@ mod tests {
         let report = stage_dist(&root, &dist).unwrap();
         assert_eq!(report, StageReport::default());
         assert!(!dist.join("manifests").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stages_native_ui_binaries_and_rewrites_the_index() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = temp_root("native");
+        std::fs::create_dir_all(root.join("manifests")).unwrap();
+        std::fs::create_dir_all(root.join("plugins/board/target/release")).unwrap();
+        let binary = root.join("plugins/board/target/release/board");
+        std::fs::write(&binary, b"binary").unwrap();
+        let digest = crate::native_ui::digest(&binary).unwrap();
+        crate::native_ui::write_index(
+            &root.join("manifests"),
+            vec![crate::native_ui::IndexEntry {
+                name: "board".to_string(),
+                kind: "native-ui".to_string(),
+                runtime: "native".to_string(),
+                binary: "plugins/board/target/release/board".to_string(),
+                sha256: digest.clone(),
+                trust: crate::native_ui::PLUGIN_TRUST.to_string(),
+            }],
+        )
+        .unwrap();
+
+        let dist = root.join("dist");
+        std::fs::create_dir_all(&dist).unwrap();
+        let report = stage_dist(&root, &dist).unwrap();
+
+        assert_eq!(report.native_uis, 1);
+        let staged = dist.join("native/board/board");
+        assert!(staged.is_file());
+        assert_ne!(
+            std::fs::metadata(&staged).unwrap().permissions().mode() & 0o111,
+            0
+        );
+        let index: crate::native_ui::Index = serde_json::from_str(
+            &std::fs::read_to_string(dist.join("manifests/native-ui.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(index.plugins[0].binary, "native/board/board");
+        assert_eq!(index.plugins[0].sha256, digest);
     }
 }

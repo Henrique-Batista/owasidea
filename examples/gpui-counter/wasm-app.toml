@@ -1,0 +1,37 @@
+[app]
+name = "gpui-counter"
+version = "0.1.0"
+identifier = "dev.owasidea.examples.gpui-counter"
+
+[host]
+addr = "127.0.0.1:8810"
+
+[desktop]
+path = "desktop"
+ui = "ui"
+output = "dist"
+
+[plugins.counter]
+path = "plugins/counter"
+language = "rust"
+type = "library"
+wit_source = "attributes"
+
+[plugins.window]
+path = "plugins/window"
+language = "gpui"
+type = "native-ui"
+runtime = "native"
+native_build = ["cargo", "build", "--release", "--target-dir", "target"]
+native_entry = "target/release/window"
+
+[dev]
+watch = true
+hot_reload = true
+ui_addr = "127.0.0.1:5210"
+
+[[smoke.calls]]
+plugin = "counter"
+function = "increment"
+args = [1]
+expect_equals = 1

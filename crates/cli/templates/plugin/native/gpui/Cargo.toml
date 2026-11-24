@@ -1,0 +1,13 @@
+[package]
+name = "{{name}}"
+version = "0.1.0"
+edition = "2021"
+
+# Standalone workspace: the plugin builds without mutating the framework root.
+[workspace]
+
+[dependencies]
+gpui = "=0.2.2"
+# gpui 0.2.2 pulls xattr 0.2.3, which no longer compiles against libc >= 0.2.190.
+# Pin the last compatible libc; remove when GPUI moves past xattr 0.2.
+libc = "=0.2.189"

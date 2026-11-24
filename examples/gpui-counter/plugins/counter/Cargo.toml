@@ -1,0 +1,19 @@
+[workspace]
+
+[package]
+name = "counter"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.41"
+owasidea = { path = "../../../../crates/owasidea" }
+
+[package.metadata.component]
+package = "poc:counter"
+[package.metadata.component.target]
+path = ".owasidea/wit"
+world = "counter"

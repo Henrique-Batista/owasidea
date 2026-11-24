@@ -483,6 +483,35 @@ The example ships two different frameworks:
 Yew, Blazor, and Uno use the same static-bundle contract; set the framework's
 build command in `ui_build` and point `ui_entry` at the produced HTML.
 
+### Native UI plugins (GPUI)
+
+A native UI is a trusted local process instead of an iframe. The reference is
+[`examples/gpui-counter`](../examples/gpui-counter):
+
+```sh
+owasidea plugin new board --lang gpui --type native-ui
+owasidea build
+owasidea run
+```
+
+The scaffold registers:
+
+```toml
+[plugins.board]
+path = "plugins/board"
+language = "gpui"
+type = "native-ui"
+runtime = "native"
+native_build = ["cargo", "build", "--release"]
+native_entry = "target/release/board"
+```
+
+`build` writes `manifests/native-ui.json`; `run` starts the host, waits for
+`/health`, then launches the window with `OWASIDEA_HOST`, `OWASIDEA_PLUGIN` and
+`OWASIDEA_MANIFESTS`. There is no sandbox: native UIs run with your user
+privileges. On a headless machine use `owasidea run --no-native-ui`, and see
+[`OPTIONAL_TOOLCHAINS.md`](OPTIONAL_TOOLCHAINS.md) for GPU/display prerequisites.
+
 ---
 
 ## 6. Build-time composition between languages

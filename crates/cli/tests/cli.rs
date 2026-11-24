@@ -135,6 +135,203 @@ fn bundle_rejects_unknown_profile() {
 }
 
 #[test]
+fn desktop_bundle_rejects_cross_target_native_sidecars() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let root = std::env::temp_dir().join(format!(
+        "owasidea-native-cross-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(root.join("plugins/board")).unwrap();
+    std::fs::write(
+        root.join("wasm-app.toml"),
+        "[app]\nversion = \"0.1.0\"\n\n[host]\naddr = \"127.0.0.1:8812\"\n\n[plugins.board]\npath = \"plugins/board\"\nlanguage = \"gpui\"\ntype = \"native-ui\"\nruntime = \"native\"\nnative_entry = \"board\"\n",
+    )
+    .unwrap();
+    let host = std::process::Command::new("rustc")
+        .args(["-vV"])
+        .output()
+        .ok()
+        .and_then(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .find_map(|line| line.strip_prefix("host: ").map(str::to_string))
+        })
+        .expect("host triple");
+    let other = if host == "aarch64-unknown-linux-gnu" {
+        "x86_64-unknown-linux-gnu"
+    } else {
+        "aarch64-unknown-linux-gnu"
+    };
+    let output = Command::cargo_bin("owasidea")
+        .unwrap()
+        .args([
+            "--config",
+            "wasm-app.toml",
+            "--manifest-dir",
+            "manifests",
+            "bundle",
+            "--target",
+            "desktop",
+            "--no-build",
+            "--target-triple",
+            other,
+        ])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("not cross-compiled"), "{stderr}");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn native_ui_builds_index_bundles_and_verifies() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let root = std::env::temp_dir().join(format!(
+        "owasidea-native-cli-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(root.join("plugins/board")).unwrap();
+    std::fs::write(
+        root.join("wasm-app.toml"),
+        "[app]\nversion = \"0.1.0\"\n\n[host]\naddr = \"127.0.0.1:8811\"\n\n[plugins.board]\npath = \"plugins/board\"\nlanguage = \"gpui\"\ntype = \"native-ui\"\nruntime = \"native\"\nnative_build = [\"sh\", \"-c\", \"printf '#!/bin/sh\\\\nexit 0\\\\n' > board && chmod +x board\"]\nnative_entry = \"board\"\n",
+    )
+    .unwrap();
+
+    let build = Command::cargo_bin("owasidea")
+        .unwrap()
+        .args([
+            "--config",
+            "wasm-app.toml",
+            "--manifest-dir",
+            "manifests",
+            "build",
+        ])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&build.stdout);
+    assert!(build.status.success(), "{stdout}");
+    assert!(
+        stdout.contains("native UI board runs as trusted local code"),
+        "{stdout}"
+    );
+    assert!(!root.join("manifests/board.manifest.json").exists());
+    let index: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.join("manifests/native-ui.json")).unwrap())
+            .unwrap();
+    assert_eq!(index["schema"], "native-v1");
+    assert_eq!(index["trust"], "unrestricted-local-process");
+    assert_eq!(index["plugins"][0]["name"], "board");
+    assert_eq!(index["plugins"][0]["type"], "native-ui");
+    assert_eq!(index["plugins"][0]["runtime"], "native");
+    assert_eq!(index["plugins"][0]["binary"], "plugins/board/board");
+    assert_eq!(index["plugins"][0]["trust"], "unrestricted");
+    assert_eq!(index["plugins"][0]["sha256"].as_str().unwrap().len(), 64);
+
+    let validate = Command::cargo_bin("owasidea")
+        .unwrap()
+        .args([
+            "--config",
+            "wasm-app.toml",
+            "--manifest-dir",
+            "manifests",
+            "validate",
+        ])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(
+        validate.status.success(),
+        "{}",
+        String::from_utf8_lossy(&validate.stderr)
+    );
+
+    let bundle = Command::cargo_bin("owasidea")
+        .unwrap()
+        .args([
+            "--config",
+            "wasm-app.toml",
+            "--manifest-dir",
+            "manifests",
+            "bundle",
+            "--target",
+            "cli",
+            "--no-build",
+        ])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(
+        bundle.status.success(),
+        "{}",
+        String::from_utf8_lossy(&bundle.stderr)
+    );
+    let bundled = root.join("dist/cli");
+    let staged = bundled.join("native/board/board");
+    assert!(staged.is_file());
+    assert_ne!(
+        std::fs::metadata(&staged).unwrap().permissions().mode() & 0o111,
+        0,
+        "staged native UI must stay executable"
+    );
+    let bundled_config: toml::Value =
+        toml::from_str(&std::fs::read_to_string(bundled.join("wasm-app.toml")).unwrap()).unwrap();
+    assert_eq!(
+        bundled_config["plugins"]["board"]["native_entry"].as_str(),
+        Some("native/board/board")
+    );
+
+    let verify = Command::cargo_bin("owasidea")
+        .unwrap()
+        .args(["verify", "dist/cli"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    let verify_stdout = String::from_utf8_lossy(&verify.stdout);
+    assert!(verify.status.success(), "{verify_stdout}");
+    assert!(verify_stdout.contains("1 native UI(s)"), "{verify_stdout}");
+
+    std::fs::write(&staged, b"tampered").unwrap();
+    let tampered = Command::cargo_bin("owasidea")
+        .unwrap()
+        .args(["verify", "dist/cli"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(!tampered.status.success());
+    let tampered_stdout = String::from_utf8_lossy(&tampered.stdout);
+    assert!(tampered_stdout.contains("board"), "{tampered_stdout}");
+    assert!(
+        tampered_stdout.contains("NATIVE_UI_CHECKSUM"),
+        "{tampered_stdout}"
+    );
+
+    std::fs::remove_file(&staged).unwrap();
+    let missing = Command::cargo_bin("owasidea")
+        .unwrap()
+        .args(["verify", "dist/cli"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stdout).contains("NATIVE_UI_MISSING"));
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn ui_plugin_scaffold_builds_a_manifest_and_static_bundle() {
     use std::time::{SystemTime, UNIX_EPOCH};
     let root = std::env::temp_dir().join(format!(

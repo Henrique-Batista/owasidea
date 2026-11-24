@@ -329,6 +329,12 @@ pub struct PluginSection {
     pub ui_entry: Option<String>,
     #[serde(default)]
     pub ui_build: Vec<String>,
+    /// argv run in the plugin directory to produce `native_entry`.
+    #[serde(default)]
+    pub native_build: Vec<String>,
+    /// Built executable, relative to the plugin directory.
+    #[serde(default)]
+    pub native_entry: Option<String>,
     #[serde(default)]
     pub build: Vec<String>,
     #[serde(default)]

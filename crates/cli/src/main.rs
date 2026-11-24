@@ -16,6 +16,7 @@ mod go_build;
 mod layout;
 mod logs;
 mod migrate;
+mod native_ui;
 mod permissions;
 mod profile;
 mod sbom;
@@ -181,6 +182,9 @@ enum Commands {
         no_host: bool,
         #[arg(long)]
         no_watch: bool,
+        /// Start the host without launching native UI processes.
+        #[arg(long)]
+        no_native_ui: bool,
         /// Print logs instead of the interactive dashboard (also automatic without a TTY).
         #[arg(long)]
         no_tui: bool,
@@ -190,7 +194,11 @@ enum Commands {
     Tui,
     /// Run the current build without file watching.
     #[command(about = "Run the current build without file watching.")]
-    Run,
+    Run {
+        /// Start the host without launching native UI processes.
+        #[arg(long)]
+        no_native_ui: bool,
+    },
     /// Print the JSON Schema for wasm-app.toml.
     #[command(about = "Print the JSON Schema for wasm-app.toml.")]
     Schema {
@@ -283,6 +291,9 @@ enum Commands {
         /// (dev|staging|prod) and write artifacts to `dist/<profile>`.
         #[arg(long, value_name = "PROFILE")]
         profile: Option<String>,
+        /// Explicit target triple for native UI sidecars; must match the host.
+        #[arg(long, value_name = "TRIPLE")]
+        target_triple: Option<String>,
         /// Write an in-toto/SLSA-like provenance attestation into the bundle.
         #[arg(long)]
         provenance: bool,
@@ -944,6 +955,7 @@ async fn run() -> anyhow::Result<()> {
             no_ui,
             no_host,
             no_watch,
+            no_native_ui,
             no_tui,
         } => {
             let addr = cli
@@ -966,6 +978,7 @@ async fn run() -> anyhow::Result<()> {
                 no_ui,
                 no_host,
                 no_watch,
+                no_native_ui,
                 use_tui,
             )
             .await
@@ -992,6 +1005,7 @@ async fn run() -> anyhow::Result<()> {
                 children: Vec::new(),
                 initial_output: Vec::new(),
                 initial_build_error: None,
+                native: None,
             };
             let (tx, rx) = tui::channel();
             tui::run(session, tx, rx).await
@@ -1016,13 +1030,13 @@ async fn run() -> anyhow::Result<()> {
             }
         }
         Commands::Migrate { write } => migrate::cmd_migrate(&cli.config, write, cli.json),
-        Commands::Run => {
+        Commands::Run { no_native_ui } => {
             let addr = cli
                 .http_addr
                 .clone()
                 .or_else(|| read_host_addr(&cli.config))
                 .unwrap_or_else(|| "127.0.0.1:0".to_string());
-            cmd_run(&manifest_dir, &addr).await
+            cmd_run(&cli.config, &manifest_dir, &addr, no_native_ui).await
         }
         Commands::Status { watch } => {
             let addr = cli
@@ -1082,6 +1096,7 @@ async fn run() -> anyhow::Result<()> {
             isolate_host_libs,
             mask_paths,
             profile,
+            target_triple,
             provenance,
             no_sbom,
         } => cmd_bundle(
@@ -1093,6 +1108,7 @@ async fn run() -> anyhow::Result<()> {
             isolate_host_libs,
             &mask_paths,
             profile.as_deref(),
+            target_triple.as_deref(),
             provenance,
             no_sbom,
         ),
@@ -1480,6 +1496,7 @@ fn cmd_plugin_new(
                     "csharp",
                     "c",
                     "cpp",
+                    "gpui",
                     "yew",
                     "blazor",
                     "uno",
@@ -1503,7 +1520,7 @@ fn cmd_plugin_new(
         Some(k) => k,
         None => {
             if interactive {
-                let items = ["library", "executable", "service", "ui"];
+                let items = ["library", "executable", "service", "ui", "native-ui"];
                 let sel =
                     dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
                         .with_prompt("Type")
@@ -1526,6 +1543,7 @@ fn cmd_plugin_new(
         "csharp",
         "c",
         "cpp",
+        "gpui",
         "yew",
         "blazor",
         "uno",
@@ -1537,11 +1555,16 @@ fn cmd_plugin_new(
     {
         anyhow::bail!("unsupported plugin language: {lang}");
     }
-    if !["library", "executable", "service", "ui"].contains(&kind.as_str()) {
+    if !["library", "executable", "service", "ui", "native-ui"].contains(&kind.as_str()) {
         anyhow::bail!("unsupported plugin type: {kind}");
     }
     if ["yew", "blazor", "uno", "svelte", "react"].contains(&lang.as_str()) && kind != "ui" {
         anyhow::bail!("{lang} is supported as a webview UI plugin; use --type ui");
+    }
+    if lang == "gpui" && kind != "native-ui" {
+        anyhow::bail!(
+            "gpui is supported as a native UI plugin; use --type native-ui --runtime native"
+        );
     }
     ensure_plugin_config_available(config_path, &name)?;
     let root = app_root(config_path);
@@ -1565,10 +1588,17 @@ fn cmd_plugin_new(
     let runtime = runtime.unwrap_or_else(|| {
         if kind == "ui" {
             "js-wasm".to_string()
+        } else if kind == "native-ui" {
+            "native".to_string()
         } else {
             "wasi-component".to_string()
         }
     });
+    if kind == "native-ui" && runtime == "js-wasm" {
+        anyhow::bail!(
+            "native UI plugins require --runtime native; js-wasm is webview-only and cannot render a native window"
+        );
+    }
     if runtime == "js-wasm" {
         if kind != "ui" {
             anyhow::bail!("js-wasm runtime is webview-only; use --type ui");
@@ -1714,6 +1744,44 @@ fn cmd_plugin_new(
             );
         } else {
             println!("created webview UI plugin scaffold at {}", dir.display());
+        }
+        return Ok(());
+    }
+    if kind == "native-ui" || runtime == "native" {
+        if kind != "native-ui" {
+            anyhow::bail!("runtime = \"native\" is only supported with --type native-ui");
+        }
+        if lang != "gpui" {
+            anyhow::bail!(
+                "native UI scaffolding currently supports --lang gpui; add the window toolkit manually for {lang}"
+            );
+        }
+        std::fs::create_dir_all(dir.join("src"))?;
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            templates::render(templates::NATIVE_GPUI_CARGO, &[("name", &name)]),
+        )?;
+        std::fs::write(
+            dir.join("src").join("main.rs"),
+            templates::render(templates::NATIVE_GPUI_MAIN, &[("name", &name)]),
+        )?;
+        std::fs::write(
+            dir.join("README.md"),
+            templates::render(templates::NATIVE_README, &[("name", &name)]),
+        )?;
+        if !no_register {
+            register_native_plugin_config(config_path, &name, &lang)?;
+        }
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({"created": name, "language": lang, "type": "native-ui", "runtime": "native"})
+            );
+        } else {
+            println!(
+                "created native UI plugin scaffold at {} (next: `owasidea build`)",
+                dir.display()
+            );
         }
         return Ok(());
     }
@@ -2062,6 +2130,26 @@ fn owasidea_macro_dependency(plugin_dir: &Path) -> String {
     "\"1.0.0\"".to_string()
 }
 
+fn register_native_plugin_config(
+    config_path: &Path,
+    name: &str,
+    language: &str,
+) -> anyhow::Result<()> {
+    let mut config = if config_path.exists() {
+        std::fs::read_to_string(config_path)?
+    } else {
+        "[app]\nname = \"my-app\"\nversion = \"0.1.0\"\nidentifier = \"dev.example.myapp\"\n\n[host]\naddr = \"127.0.0.1:8787\"\n".to_string()
+    };
+    if !config.ends_with('\n') {
+        config.push('\n');
+    }
+    config.push_str(&format!(
+        "\n[plugins.\"{name}\"]\npath = \"plugins/{name}\"\nlanguage = \"{language}\"\ntype = \"native-ui\"\nruntime = \"native\"\nnative_build = [\"cargo\", \"build\", \"--release\", \"--target-dir\", \"target\"]\nnative_entry = \"target/release/{name}\"\n"
+    ));
+    std::fs::write(config_path, config)?;
+    Ok(())
+}
+
 fn register_plugin_config(
     config_path: &Path,
     name: &str,
@@ -2086,7 +2174,13 @@ fn register_plugin_config(
         config.push_str(&format!("wit_source = \"{source}\"\n"));
     }
     if kind == "ui" {
-        config.push_str("ui_entry = \"index.html\"\n");
+        // Blazor publishes the browsable files under wwwroot/.
+        let entry = if language == "blazor" {
+            "wwwroot/index.html"
+        } else {
+            "index.html"
+        };
+        config.push_str(&format!("ui_entry = \"{entry}\"\n"));
         if !ui_build.is_empty() {
             config.push_str(&format!(
                 "ui_build = [{}]\n",
@@ -2440,6 +2534,9 @@ fn validate_dependency_contracts(
     manifest_dir: &Path,
 ) -> anyhow::Result<()> {
     for (name, plugin) in plugins {
+        if crate::native_ui::is_native(plugin) {
+            continue;
+        }
         let manifest_path = manifest_dir.join(format!("{name}.manifest.json"));
         let manifest: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&manifest_path)?)?;
@@ -2599,6 +2696,13 @@ fn cmd_build(
     let layout = layout::Layout::new(&root);
     prepare_workspace(&root, &layout, &plugins)?;
 
+    // Validate every native declaration before any build command runs.
+    for (name, plugin) in &plugins {
+        if crate::native_ui::is_native(plugin) {
+            crate::native_ui::validate_declaration(name, plugin)?;
+        }
+    }
+
     // Build ordinary plugins first so composed clients can resolve their
     // dependency components in the same invocation.
     let mut ordered: Vec<(&String, &PluginSection)> = plugins.iter().collect();
@@ -2608,8 +2712,16 @@ fn cmd_build(
     });
 
     let mut ui_index = Vec::new();
+    let mut native_entries = Vec::new();
     for (name, p) in ordered {
         println!("==> Building {} ({})", name, p.language);
+        if crate::native_ui::is_native(p) {
+            println!("{}", crate::native_ui::trust_warning(name));
+            let entry = crate::native_ui::build(&root, name, p, &manifest_dir)?;
+            println!("    binary: {} ({})", entry.binary, entry.sha256);
+            native_entries.push(entry);
+            continue;
+        }
         if p.runtime.as_deref() == Some("js-wasm") {
             let manifest = build_ui_plugin(
                 &root,
@@ -2978,6 +3090,7 @@ fn cmd_build(
         )?;
         println!("    manifest: {}", manifest.display());
     }
+    crate::native_ui::write_index(&manifest_dir, native_entries)?;
     validate_dependency_contracts(&root, &plugins, &manifest_dir)?;
     if ui_dir.join("public").is_dir() {
         // Digests must travel with the assets they describe. The dashboard
@@ -3395,6 +3508,7 @@ async fn cmd_dev(
     no_ui: bool,
     no_host: bool,
     no_watch: bool,
+    no_native_ui: bool,
     use_tui: bool,
 ) -> anyhow::Result<()> {
     let _ = read_app_config(config_path)?;
@@ -3625,6 +3739,7 @@ async fn cmd_dev(
                 .arg("--http-addr")
                 .arg(http_addr.clone())
                 .arg("run")
+                .arg("--no-native-ui")
                 .current_dir(&root)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::piped())
@@ -3637,6 +3752,21 @@ async fn cmd_dev(
             .ok()
             .and_then(|cfg| cfg.app.and_then(|app| app.name))
             .unwrap_or_else(|| "app".to_string());
+        let session_sink = tui::Sink::Tui(tx.clone());
+        let native = if no_host || no_native_ui {
+            None
+        } else if wait_for_http_ready(&host_url, std::time::Duration::from_secs(30))
+            .await
+            .is_ok()
+        {
+            native_supervisor(config_path, &manifest_dir, &host_url, &session_sink)
+        } else {
+            session_sink.error(
+                "native",
+                "host did not become ready; native UIs stay stopped",
+            );
+            None
+        };
         let session = tui::Session {
             app_name,
             host_url: host_url.clone(),
@@ -3647,6 +3777,7 @@ async fn cmd_dev(
             children,
             initial_output,
             initial_build_error,
+            native,
         };
         return tui::run(session, tx, rx).await;
     }
@@ -3683,6 +3814,7 @@ async fn cmd_dev(
                 .arg("--http-addr")
                 .arg(http_addr.clone())
                 .arg("run")
+                .arg("--no-native-ui")
                 .current_dir(&root)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::piped())
@@ -3814,24 +3946,59 @@ async fn cmd_dev(
         return Ok(());
     }
 
-    let host_task = if !desktop && !no_host {
+    let host_manifest_dir = manifest_dir.clone();
+    let mut host_task = if !desktop && !no_host {
         Some(tokio::spawn(async move {
-            owasidea_host::run(manifest_dir.clone(), http_addr.clone()).await
+            owasidea_host::run(host_manifest_dir, http_addr.clone()).await
         }))
     } else {
         None
     };
+    let mut native = if no_native_ui || no_host {
+        None
+    } else if let Some(task) = host_task.as_mut() {
+        match wait_for_host_ready(&host_url, std::time::Duration::from_secs(30), task).await {
+            Ok(()) => native_supervisor(config_path, &manifest_dir, &host_url, &tui::Sink::Stdout),
+            Err(error) => {
+                eprintln!("warning: {error:#}; native UIs stay stopped");
+                None
+            }
+        }
+    } else {
+        None
+    };
     let result = if let Some(mut host_task) = host_task {
-        tokio::select! {
-            joined = &mut host_task => match joined {
-                Ok(result) => result,
-                Err(error) => Err(anyhow::anyhow!("host task failed: {error}")),
-            },
-            _ = wait_for_shutdown() => {
-                println!("[dev] shutting down; stopping UI and host");
-                host_task.abort();
-                let _ = host_task.await;
-                Ok(())
+        loop {
+            tokio::select! {
+                joined = &mut host_task => {
+                    if let Some(native) = native.as_mut() {
+                        if let Ok(mut supervisor) = native.lock() {
+                            supervisor.shutdown();
+                        }
+                    }
+                    break match joined {
+                        Ok(result) => result,
+                        Err(error) => Err(anyhow::anyhow!("host task failed: {error}")),
+                    };
+                }
+                _ = wait_for_shutdown() => {
+                    println!("[dev] shutting down; stopping native UIs, UI and host");
+                    if let Some(native) = native.as_mut() {
+                        if let Ok(mut supervisor) = native.lock() {
+                            supervisor.shutdown();
+                        }
+                    }
+                    host_task.abort();
+                    let _ = host_task.await;
+                    break Ok(());
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
+                    if let Some(native) = native.as_mut() {
+                        if let Ok(mut supervisor) = native.lock() {
+                            supervisor.poll();
+                        }
+                    }
+                }
             }
         }
     } else {
@@ -4170,9 +4337,199 @@ fn rebuild_ui_plugin_from_dist(
     }
 }
 
-async fn cmd_run(manifest_dir: &Path, http_addr: &str) -> anyhow::Result<()> {
+/// Native UI specs from the generated index, relative to the app root.
+fn native_specs(
+    config_path: &Path,
+    manifest_dir: &Path,
+) -> anyhow::Result<Vec<crate::native_ui::NativeUiSpec>> {
+    let Some(index) = crate::native_ui::read_index(manifest_dir)? else {
+        return Ok(Vec::new());
+    };
+    let root = app_root(config_path);
+    Ok(index
+        .plugins
+        .into_iter()
+        .map(|entry| crate::native_ui::NativeUiSpec {
+            binary: crate::native_ui::resolve_binary(&root, &entry.binary),
+            name: entry.name,
+        })
+        .collect())
+}
+
+fn native_supervisor(
+    config_path: &Path,
+    manifest_dir: &Path,
+    host_url: &str,
+    sink: &tui::Sink,
+) -> Option<std::sync::Arc<std::sync::Mutex<crate::native_ui::Supervisor>>> {
+    let specs = match native_specs(config_path, manifest_dir) {
+        Ok(specs) => specs,
+        Err(error) => {
+            sink.error("native", format!("ignoring native UI index: {error:#}"));
+            return None;
+        }
+    };
+    if specs.is_empty() {
+        return None;
+    }
+    if !crate::native_ui::display_available() {
+        sink.error(
+            "native",
+            "no graphical display available (DISPLAY/WAYLAND_DISPLAY); native UIs stay stopped",
+        );
+        return None;
+    }
+    let sink = sink.clone();
+    let log: crate::native_ui::LogFn = std::sync::Arc::new(move |name, text| {
+        sink.info(name, text);
+    });
+    let mut supervisor =
+        crate::native_ui::Supervisor::new(specs, host_url, manifest_dir.to_path_buf(), log);
+    supervisor.start_all();
+    Some(std::sync::Arc::new(std::sync::Mutex::new(supervisor)))
+}
+
+async fn wait_for_http_ready(base: &str, deadline: std::time::Duration) -> anyhow::Result<()> {
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()?;
+    let started = std::time::Instant::now();
+    loop {
+        if let Ok(response) = client
+            .get(format!("{}/health", base.trim_end_matches('/')))
+            .send()
+            .await
+        {
+            if response.status().is_success() {
+                return Ok(());
+            }
+        }
+        if started.elapsed() >= deadline {
+            anyhow::bail!(
+                "host did not become reachable at {base} within {}s",
+                deadline.as_secs_f64()
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
+async fn cmd_run(
+    config_path: &Path,
+    manifest_dir: &Path,
+    http_addr: &str,
+    no_native_ui: bool,
+) -> anyhow::Result<()> {
     build_id::ensure_env_from_manifests(manifest_dir);
-    owasidea_host::run(manifest_dir.to_path_buf(), http_addr.to_string()).await
+    let no_native_ui = no_native_ui
+        || std::env::var("OWASIDEA_NO_NATIVE_UI")
+            .is_ok_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"));
+    let index = crate::native_ui::read_index(manifest_dir).unwrap_or_else(|error| {
+        eprintln!("warning: ignoring native UI index: {error:#}");
+        None
+    });
+    let specs = index
+        .map(|index| -> Vec<crate::native_ui::NativeUiSpec> {
+            let root = app_root(config_path);
+            index
+                .plugins
+                .into_iter()
+                .map(|entry| crate::native_ui::NativeUiSpec {
+                    binary: crate::native_ui::resolve_binary(&root, &entry.binary),
+                    name: entry.name,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if no_native_ui || specs.is_empty() {
+        return owasidea_host::run(manifest_dir.to_path_buf(), http_addr.to_string()).await;
+    }
+    if !crate::native_ui::display_available() {
+        eprintln!(
+            "warning: no graphical display available (DISPLAY/WAYLAND_DISPLAY); native UIs will not start and the host remains available"
+        );
+        return owasidea_host::run(manifest_dir.to_path_buf(), http_addr.to_string()).await;
+    }
+
+    // A concrete port is required: children receive the resolved base URL.
+    let addr = reserve_http_addr(http_addr)?;
+    let host_url = format!("http://{addr}");
+    let mut host_task = tokio::spawn(owasidea_host::run(manifest_dir.to_path_buf(), addr.clone()));
+    wait_for_host_ready(
+        &host_url,
+        std::time::Duration::from_secs(30),
+        &mut host_task,
+    )
+    .await?;
+
+    let log: crate::native_ui::LogFn = std::sync::Arc::new(|name: &str, text: &str| {
+        println!("[{name}] {text}");
+    });
+    let mut supervisor =
+        crate::native_ui::Supervisor::new(specs, host_url, manifest_dir.to_path_buf(), log);
+    supervisor.start_all();
+
+    loop {
+        tokio::select! {
+            _ = wait_for_shutdown() => {
+                supervisor.shutdown();
+                host_task.abort();
+                let _ = host_task.await;
+                return Ok(());
+            }
+            joined = &mut host_task => {
+                supervisor.shutdown();
+                return match joined {
+                    Ok(result) => result,
+                    Err(error) => Err(anyhow::anyhow!("host task failed: {error}")),
+                };
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
+                supervisor.poll();
+            }
+        }
+    }
+}
+
+/// Waits until `base/health` answers or `host` exits. The deadline is a hard
+/// cap so a wedged host cannot hang the command forever.
+async fn wait_for_host_ready<F>(
+    base: &str,
+    deadline: std::time::Duration,
+    host: &mut F,
+) -> anyhow::Result<()>
+where
+    F: std::future::Future + Unpin,
+{
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()?;
+    let started = std::time::Instant::now();
+    loop {
+        tokio::select! {
+            _ = &mut *host => {
+                return Err(anyhow::anyhow!("host exited before becoming reachable"));
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {}
+        }
+        if let Ok(response) = client
+            .get(format!("{}/health", base.trim_end_matches('/')))
+            .send()
+            .await
+        {
+            if response.status().is_success() {
+                return Ok(());
+            }
+        }
+        if started.elapsed() >= deadline {
+            anyhow::bail!(
+                "host did not become reachable at {base} within {}s; native UIs were not started",
+                deadline.as_secs_f64()
+            );
+        }
+    }
 }
 
 fn cmd_inspect(manifest_dir: &Path, plugin: &str, json: bool) -> anyhow::Result<()> {
@@ -4347,6 +4704,7 @@ fn cmd_bundle(
     isolate_host_libs: bool,
     mask_paths: &[PathBuf],
     profile: Option<&str>,
+    target_triple: Option<&str>,
     provenance: bool,
     no_sbom: bool,
 ) -> anyhow::Result<()> {
@@ -4357,6 +4715,20 @@ fn cmd_bundle(
     let root = app_root(config);
     let cfg = crate::profile::merged_config(config, profile)?;
     cfg.validate_for_bundle()?;
+    let has_native = cfg
+        .plugins
+        .as_ref()
+        .is_some_and(|plugins| plugins.values().any(crate::native_ui::is_native));
+    if has_native {
+        if let Some(requested) = target_triple {
+            let host = crate::native_ui::host_triple()?;
+            if requested != host {
+                anyhow::bail!(
+                    "native UI binaries are not cross-compiled: requested target {requested}, host is {host}"
+                );
+            }
+        }
+    }
     if let Some(profile) = profile {
         match crate::profile::active_overlay(config, profile) {
             Some(overlay) => println!("Bundle profile: {profile} (overlay: {})", overlay.display()),
@@ -4444,6 +4816,18 @@ fn cmd_bundle(
     }
     if crate::config_render::csp_connect_src_count(generated_csp) != 1 {
         anyhow::bail!("generated Tauri config CSP must contain exactly one connect-src directive");
+    }
+    if let Some(plugins) = cfg.plugins.as_ref() {
+        let sidecars = crate::native_ui::stage_tauri_sidecars(
+            &root,
+            plugins,
+            &desktop_dir,
+            &generated_config,
+            target_triple,
+        )?;
+        if sidecars > 0 {
+            println!("Native UI sidecars staged: {sidecars}");
+        }
     }
     // Profile bundles ship a profile-specific runtime descriptor; the base
     // `ui/.owasidea/runtime.json` used by `dev`/`run` is left untouched.
@@ -4862,6 +5246,7 @@ async fn run_api_smoke(
         .arg("--http-addr")
         .arg(&port)
         .arg("run")
+        .arg("--no-native-ui")
         .current_dir(&root)
         .env("OWASIDEA_DATA_DIR", &data_dir)
         // smoke/test are developer tooling: keep every plugin route visible.
@@ -6671,6 +7056,33 @@ mod dl08_tests {
             ui_plugin_name_for_path(&plugins.join("foo/target/debug/x"), &plugins),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod host_readiness_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn never_binding_host_hits_the_deadline() {
+        let mut host = std::future::pending::<anyhow::Result<()>>();
+        let result =
+            wait_for_host_ready("http://127.0.0.1:1", Duration::from_millis(300), &mut host).await;
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("did not become reachable"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn host_exit_fails_before_the_deadline() {
+        let mut host: std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>>>> =
+            Box::pin(async { anyhow::bail!("boom") });
+        let result =
+            wait_for_host_ready("http://127.0.0.1:1", Duration::from_secs(30), &mut host).await;
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("before becoming reachable"));
     }
 }
 

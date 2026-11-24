@@ -386,7 +386,7 @@ truth for host/port/CSP/dev URL):
 
 `--check` does not write; exits non-zero if files are missing or stale.
 
-### `dev [--no-build] [--desktop] [--no-tui]`
+### `dev [--no-build] [--desktop] [--no-tui] [--no-native-ui]`
 
 Build first, then start the host, the Vite dev server (if
 `<app-root>/ui/package.json` exists), and a recursive watcher. The UI port comes
@@ -442,8 +442,9 @@ Keys (press `?` in the dashboard to see them):
 | --- | --- |
 | `↑` / `↓`, `j` / `k` | select plugin |
 | `Tab`, `Shift+Tab`, `1`-`5` | switch view |
-| `r` | reload the selected plugin (`POST /plugin/{name}/reload`) |
-| `s` | start or stop the selected service |
+| `r` | reload the selected plugin (`POST /plugin/{name}/reload`); restart the selected native UI |
+| `s` | start or stop the selected service or native UI |
+| `S` / `X` | start all / stop all native UIs (`dev` only) |
 | `R` | rebuild the app (`owasidea build`), then reload the stateless plugins |
 | `o` | open the UI (or the host) in the browser |
 | `?` | toggle help |
@@ -452,6 +453,14 @@ Keys (press `?` in the dashboard to see them):
 In `dev`, `R` rebuilds through the same CLI and streams its output to the Output
 view. A running service still refuses reload with HTTP 409; stop it first.
 
+Native UIs (`type = "native-ui"`) appear in the plugin list with `runtime
+native` and a `running`/`stopped`/`failed` marker. `s` toggles the selected one,
+`r` restarts it, and `S`/`X` start or stop all of them. Their stdout/stderr is
+forwarded to Output with a `[<name>]` prefix. A process that exits on its own is
+shown as `failed` and is never restarted automatically; restart is an explicit
+action. When no display is available they stay stopped and the host keeps
+running. `dev --no-native-ui` starts the host without native UI processes.
+
 ### `run`
 
 Run the current manifests without building or watching. The host address comes
@@ -459,6 +468,17 @@ from `--http-addr`, then `[host].addr`, then `127.0.0.1:0`. The host refuses
 non-loopback bind
 addresses unless `OWASIDEA_ALLOW_NON_LOOPBACK=1` is set (the standalone host
 binary also accepts `--allow-non-loopback`).
+
+If `manifests/native-ui.json` lists native UIs, `run` starts the host first,
+waits up to 30 s for `GET /health`, then starts each process with
+`OWASIDEA_HOST`, `OWASIDEA_PLUGIN` and `OWASIDEA_MANIFESTS`. Logs are prefixed
+`[<name>]`. An exit is reported with its status and is not restarted; the host
+keeps serving. Ctrl+C/SIGTERM stops and reaps every child before exiting. If the
+host never becomes reachable, `run` exits non-zero and starts no child.
+
+`--no-native-ui` (or `OWASIDEA_NO_NATIVE_UI=1`) starts only the host. On Linux,
+without `DISPLAY` or `WAYLAND_DISPLAY`, the CLI prints a warning and keeps the
+host running instead of failing.
 
 ### `inspect <plugin> [--json]`
 
@@ -489,7 +509,7 @@ Generate a typed TypeScript client from the manifests in `--manifest-dir`.
 Only `ts` is supported. `--check` fails if the file is missing or differs
 without writing.
 
-### `bundle [--no-build] [--target desktop|cli] [--bundles <targets>] [--profile <dev|staging|prod>] [--isolate-host-libs]`
+### `bundle [--no-build] [--target desktop|cli] [--bundles <targets>] [--profile <dev|staging|prod>] [--target-triple <triple>] [--isolate-host-libs]`
 
 Build the app and package it. `--target desktop` (default) builds the UI and
 produces a Tauri installer. `--target cli` skips Tauri and stages a headless
@@ -501,12 +521,17 @@ dist/cli/
   wasm-app.toml
   manifests/
   plugins/<name>/<name>.component.wasm
+  native/<name>/<binary>
   run.sh / run.bat
 ```
 
 Run `dist/cli/run.sh` to start the host with the generated manifests and
 components. The HTTP API still listens on `[host].addr` (loopback by default).
-`--target cli` ignores `--bundles` and does not generate SBOM/provenance yet.
+Native UI binaries are copied under `native/<name>/`, the bundled
+`wasm-app.toml` points each `native_entry` at the copy, and the executable bit is
+restored on Unix. The launcher forwards arguments, so `./run.sh
+--no-native-ui` starts only the host. `bundle --target cli` ignores `--bundles`
+and does not generate SBOM/provenance yet.
 
 Resolution:
 
@@ -521,7 +546,11 @@ ui = "ui"
 ```
 
 It runs `npm run build` in the UI directory, then `cargo tauri build` in the
-desktop crate. `bundle` renders `bundle.resources` from `wasm-app.toml`
+desktop crate. Native UI binaries become Tauri sidecars:
+`<desktop>/binaries/<name>-<host-triple>`, with matching `bundle.externalBin`
+entries in `tauri.generated.conf.json`. They are never cross-compiled: passing
+`--target-triple` with a value other than the host triple fails before the
+build. `bundle` renders `bundle.resources` from `wasm-app.toml`
 (manifests, every headless component and `runtime.json`), so a new plugin does
 not need a manual entry; explicit entries in the base `tauri.conf.json` are
 preserved. The webview UI is

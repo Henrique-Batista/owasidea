@@ -31,6 +31,10 @@ impl PluginRow {
     pub fn is_service(&self) -> bool {
         matches!(self.kind.as_str(), "service" | "hybrid")
     }
+
+    pub fn is_native(&self) -> bool {
+        self.runtime == "native" || self.kind == "native-ui"
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

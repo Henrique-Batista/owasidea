@@ -955,6 +955,7 @@ mod tests {
             engine: Engine::default(),
             plugins: Arc::new(std::sync::RwLock::new(HashMap::new())),
             ui_plugins: Arc::new(Vec::new()),
+            native_uis: Arc::new(Vec::new()),
             tailcat_session: Arc::new(Mutex::new(None)),
             services: Arc::new(Mutex::new(HashMap::new())),
             service_health: Arc::new(Mutex::new(HashMap::new())),

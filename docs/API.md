@@ -19,6 +19,7 @@ list is not an authorization boundary, only the UI form source.
 | `type = "executable"` | `/app/{name}/{*path}` | raw `wasi:http` request |
 | `type = "service"` | `/plugin/{name}/service/{start,stop,status}` | lifecycle only |
 | `type = "ui"`, `runtime = "js-wasm"` | none | static assets in a sandboxed iframe |
+| `type = "native-ui"`, `runtime = "native"` | none | local process; discovery only |
 
 `args` is positional and matches the WIT signature in `exports[].signature`
 (for example `func(version: string, changes: list<string>) -> string`).
@@ -177,8 +178,15 @@ export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://127.0.0.1:4318/v1/traces
 - `GET /plugins` → list of plugin summaries:
   ```json
   [{"name":"notes","version":"0.1.0","language":"rust","type":"library",
-    "exports":["greet","complete"],"imports_wasi":10,"imports_host":["..."],"served_on":null}]
+    "exports":["greet","complete"],"imports_wasi":10,"imports_host":["..."],"served_on":null},
+   {"name":"board","version":"","language":"native","type":"native-ui",
+    "exports":[],"imports_wasi":0,"imports_host":[],"served_on":null}]
   ```
+  Native UI entries come from `manifests/native-ui.json`: `type` is
+  `native-ui`, `runtime` is `native`, and `exports` is always empty. The host
+  never loads them as components and does not route `/plugin/{name}/call` or
+  `/app/{name}` to them (both return 404). A missing index is normal; a malformed
+  one logs a warning and the rest of the host keeps serving.
 - `GET /ui-plugins` → webview-only `js-wasm` bundles, entry paths, and asset
   digests. These plugins are not instantiated by Wasmtime.
 

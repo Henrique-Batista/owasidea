@@ -154,6 +154,7 @@ fn test_state(engine: Engine, plugin: Arc<PluginRuntime>) -> AppState {
         engine,
         plugins: Arc::new(std::sync::RwLock::new(HashMap::from([(name, plugin)]))),
         ui_plugins: Arc::new(Vec::new()),
+        native_uis: Arc::new(Vec::new()),
         tailcat_session: Arc::new(Mutex::new(None)),
         services: Arc::new(Mutex::new(HashMap::new())),
         service_health: Arc::new(Mutex::new(HashMap::new())),

@@ -168,6 +168,33 @@ O `owasidea build` copia `dist/` para `ui/public/plugins/board/`, calcula SHA-25
 de cada arquivo e gera um manifesto `webview-v1`. O dashboard verifica os hashes
 antes de criar o iframe com `sandbox="allow-scripts allow-forms"`.
 
+### UI nativa (GPUI)
+
+Uma UI nativa é um processo local confiável, fora do iframe e do broker de
+capacidades:
+
+```sh
+owasidea plugin new board --lang gpui --type native-ui
+owasidea build
+owasidea run
+```
+
+```toml
+[plugins.board]
+path = "plugins/board"
+language = "gpui"
+type = "native-ui"
+runtime = "native"
+native_build = ["cargo", "build", "--release"]
+native_entry = "target/release/board"
+```
+
+O `build` gera `manifests/native-ui.json`; o `run` inicia o host, espera
+`/health` e lança a janela com `OWASIDEA_HOST`, `OWASIDEA_PLUGIN` e
+`OWASIDEA_MANIFESTS`. Sem display, use `owasidea run --no-native-ui`. Veja
+[`OPTIONAL_TOOLCHAINS.md`](OPTIONAL_TOOLCHAINS.md) para GPU/display e
+[`examples/gpui-counter`](../examples/gpui-counter) como referência.
+
 ## 7. Composição entre linguagens
 
 ```toml

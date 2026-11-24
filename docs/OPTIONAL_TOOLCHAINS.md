@@ -197,6 +197,24 @@ cargo install trunk --locked
 `plugins/<name>/dist/` with `ui_entry` pointing at the produced HTML. Trunk is
 not version-pinned here and `doctor` only checks that the binary exists.
 
+## Native UI (`gpui`)
+
+Native UIs are ordinary executables. The GPUI scaffold and
+`examples/gpui-counter` pin `gpui = "=0.2.2"`; GPUI is pre-1.0 and needs a
+recent stable Rust (2024 edition toolchain), a GPU/display stack and a window
+manager:
+
+- Linux: X11 or Wayland, `libxkbcommon`, fontconfig and the usual OpenGL/Vulkan
+  drivers (the same stack a browser or Zed needs);
+- macOS: Xcode command line tools and Metal;
+- Windows: a current MSVC build of Rust and a GPU driver.
+
+`owasidea build` compiles the native binary; `owasidea run` starts it only when
+a display is available (`DISPLAY`/`WAYLAND_DISPLAY` on Linux). Headless CI
+should build with `owasidea build` and run with `owasidea run --no-native-ui`
+(or `OWASIDEA_NO_NATIVE_UI=1`), which is what `scripts/test-examples.sh` does
+for `gpui-counter`. `doctor` does not install GPU drivers or window managers.
+
 ## Tauri packaging
 
 `owasidea bundle` needs the Tauri 2 CLI (`cargo install tauri-cli --version

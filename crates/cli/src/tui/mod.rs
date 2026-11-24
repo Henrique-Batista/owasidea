@@ -43,6 +43,7 @@ pub enum Event {
         refresh_manifest: bool,
     },
     CallResult(Result<Value, String>),
+    NativeStatus(std::collections::BTreeMap<String, crate::native_ui::ProcessState>),
 }
 
 pub type Sender = UnboundedSender<Event>;
@@ -150,6 +151,8 @@ pub struct Session {
     /// Output captured from the initial `dev` build before the TUI started.
     pub initial_output: Vec<OutputLine>,
     pub initial_build_error: Option<String>,
+    /// Native UI supervisor shared with `owasidea dev`.
+    pub native: Option<Arc<std::sync::Mutex<crate::native_ui::Supervisor>>>,
 }
 
 /// Runs the dashboard until the user quits. Takes ownership of the terminal.
@@ -184,6 +187,7 @@ pub async fn run(session: Session, tx: Sender, rx: Receiver) -> Result<()> {
         ui_url: session.ui_url.clone(),
         config_path: session.config_path.clone(),
         manifest_dir: session.manifest_dir.clone(),
+        native: session.native.clone(),
     };
 
     let result = event_loop(&mut terminal, &mut app, rx, &runner).await;
@@ -258,6 +262,7 @@ async fn event_loop(
                 refresh_manifest,
             } => app.apply_done(ok, text, refresh_manifest),
             Event::CallResult(result) => app.apply_call_result(result),
+            Event::NativeStatus(statuses) => app.apply_native_status(statuses),
         }
         if app.quit {
             break;
@@ -313,6 +318,7 @@ struct Runner {
     ui_url: Option<String>,
     config_path: PathBuf,
     manifest_dir: PathBuf,
+    native: Option<Arc<std::sync::Mutex<crate::native_ui::Supervisor>>>,
 }
 
 impl Runner {
@@ -326,6 +332,12 @@ impl Runner {
             let _ = tx.send(Event::Snapshot(result));
         });
         self.fetch_logs(app);
+        if let Some(native) = &self.native {
+            if let Ok(mut supervisor) = native.lock() {
+                supervisor.poll();
+                let _ = self.tx.send(Event::NativeStatus(supervisor.statuses()));
+            }
+        }
     }
 
     fn fetch_logs(&self, app: &App) {
@@ -369,6 +381,15 @@ impl Runner {
             }
             Action::ServiceStart(name) => self.service_action(app, name, true),
             Action::ServiceStop(name) => self.service_action(app, name, false),
+            Action::NativeStart(name) => self.native_action(app, name, NativeOp::Start),
+            Action::NativeStop(name) => self.native_action(app, name, NativeOp::Stop),
+            Action::NativeRestart(name) => self.native_action(app, name, NativeOp::Restart),
+            Action::NativeStartAll => {
+                self.native_all(app, true);
+            }
+            Action::NativeStopAll => {
+                self.native_all(app, false);
+            }
             Action::Rebuild { reload } => {
                 if app.dev {
                     self.rebuild(app, reload);
@@ -406,6 +427,53 @@ impl Runner {
                     }
                 }
             }
+        }
+    }
+
+    fn native_action(&self, app: &mut App, name: String, op: NativeOp) {
+        let Some(native) = &self.native else {
+            app.set_status(Level::Info, "no native UI supervisor in this session");
+            return;
+        };
+        let result = native
+            .lock()
+            .map_err(|_| "native supervisor lock poisoned".to_string());
+        match result {
+            Ok(mut supervisor) => {
+                let outcome = match op {
+                    NativeOp::Start => supervisor.start(&name),
+                    NativeOp::Stop => supervisor.stop(&name),
+                    NativeOp::Restart => supervisor.restart(&name),
+                };
+                match outcome {
+                    Ok(()) => app.set_status(Level::Info, format!("{} {name}", op.verb())),
+                    Err(error) => app.set_status(Level::Error, format!("{name}: {error:#}")),
+                }
+                let _ = self.tx.send(Event::NativeStatus(supervisor.statuses()));
+            }
+            Err(error) => app.set_status(Level::Error, error),
+        }
+    }
+
+    fn native_all(&self, app: &mut App, start: bool) {
+        let Some(native) = &self.native else {
+            app.set_status(Level::Info, "no native UI supervisor in this session");
+            return;
+        };
+        if let Ok(mut supervisor) = native.lock() {
+            if start {
+                supervisor.start_all();
+            } else {
+                supervisor.stop_all();
+            }
+            app.set_status(
+                Level::Info,
+                format!(
+                    "{} all native UIs",
+                    if start { "starting" } else { "stopping" }
+                ),
+            );
+            let _ = self.tx.send(Event::NativeStatus(supervisor.statuses()));
         }
     }
 
@@ -511,6 +579,23 @@ impl Runner {
                 refresh_manifest: true,
             });
         });
+    }
+}
+
+#[derive(Clone, Copy)]
+enum NativeOp {
+    Start,
+    Stop,
+    Restart,
+}
+
+impl NativeOp {
+    fn verb(self) -> &'static str {
+        match self {
+            NativeOp::Start => "started",
+            NativeOp::Stop => "stopped",
+            NativeOp::Restart => "restarted",
+        }
     }
 }
 

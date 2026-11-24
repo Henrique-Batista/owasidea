@@ -186,6 +186,31 @@ See [`UI_PLUGINS.md`](UI_PLUGINS.md) for Yew, Blazor, Uno, and other static
 browser/WASM bundles. UI plugins use `runtime = "js-wasm"`, `type = "ui"`; they
 are not headless components and receive no WASI imports.
 
+## Native UI plugins
+
+`type = "native-ui"` builds a local executable that renders its own window
+outside the Tauri webview. It is trusted code, not a sandboxed plugin.
+
+```toml
+[plugins.board]
+path = "plugins/board"
+language = "gpui"
+type = "native-ui"
+runtime = "native"
+native_build = ["cargo", "build", "--release"]
+native_entry = "target/release/board"
+```
+
+`native_build` is an argv array executed in the plugin directory (no shell).
+`native_entry` must be a relative path inside that directory; it is resolved
+after the build, hashed, and recorded in `manifests/native-ui.json`. Omit
+`native_build` when the binary already exists.
+
+Native UIs must not declare `ui_entry`, `ui_build`, `bridge`, `build`,
+`wit_source`, `compose_with`, `fs`, `kv`, `capabilities`, network permissions,
+`persistent`, or `expose`. They run with the user's full privileges: there is no
+WASI capability broker and no iframe sandbox, so only ship binaries you trust.
+
 ## Complete reference implementation
 
 [`examples/shipyard`](../examples/shipyard) contains working, freshly built
@@ -329,7 +354,9 @@ loads or reloads the manifest, not during the build; remove the unused grant.
 ## UI scaffolds (AX-02)
 
 `owasidea plugin new <name> --lang svelte|react|vue|yew|blazor|uno --type ui` generates a
-webview UI plugin with `base: './'`, `ui_entry = "index.html"`, and a matching `ui_build`.
+webview UI plugin with `base: './'`, a matching `ui_build`, and a `ui_entry` that
+points at the HTML file the build produces (`index.html`, or
+`wwwroot/index.html` for Blazor, which publishes under `wwwroot/`).
 
 - Svelte/React/Vue: Vite-based, `ui_build = ["npm", "run", "build"]`.
 - Yew: Trunk, `ui_build = ["trunk", "build", "--release"]` (requires Rust + trunk).

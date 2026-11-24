@@ -101,6 +101,22 @@ rewritten to `../plugins/<name>/<name>.component.wasm`, matching the staged
 `plugins/` payload. `owasidea verify dist/` therefore reads the same manifests
 the host will read.
 
+Native UIs are staged separately:
+
+```text
+dist/.../
+  manifests/native-ui.json       binary paths rewritten to native/<name>/...
+  native/<name>/<binary>         executable bit restored on Unix
+```
+
+Desktop bundles additionally copy each binary to
+`<desktop>/binaries/<name>-<host-triple>` and list `binaries/<name>` in
+`tauri.generated.conf.json` under `bundle.externalBin`; Tauri appends the target
+triple itself. Native UI binaries are not cross-compiled, so a bundle requested
+for another triple fails early. `owasidea verify dist/` checks every native
+binary against the staged index and fails on missing, modified or unlisted
+files.
+
 ## Migration from 1.2
 
 - Delete hand-copied provider packages from `plugins/<consumer>/wit/deps/`;

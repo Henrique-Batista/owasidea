@@ -79,12 +79,24 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(text).block(block), area);
 }
 
-fn plugin_item(plugin: &PluginRow, selected: bool) -> ListItem<'static> {
-    let (state, color) = match &plugin.service {
-        Some(service) if service.running => ("running", OK),
-        Some(service) if service.last_error.is_some() => ("error", BAD),
-        Some(_) => ("stopped", WARN),
-        None => ("loaded", OK),
+fn plugin_item(
+    plugin: &PluginRow,
+    selected: bool,
+    native_status: Option<&str>,
+) -> ListItem<'static> {
+    let (state, color) = if plugin.is_native() {
+        match native_status.unwrap_or("stopped") {
+            "running" => ("running", OK),
+            "failed" => ("failed", BAD),
+            _ => ("stopped", WARN),
+        }
+    } else {
+        match &plugin.service {
+            Some(service) if service.running => ("running", OK),
+            Some(service) if service.last_error.is_some() => ("error", BAD),
+            Some(_) => ("stopped", WARN),
+            None => ("loaded", OK),
+        }
     };
     let marker = if selected { "▶ " } else { "  " };
     let name_style = if selected {
@@ -129,7 +141,13 @@ fn draw_plugins(frame: &mut Frame, area: Rect, app: &App) {
         .plugins
         .iter()
         .enumerate()
-        .map(|(index, plugin)| plugin_item(plugin, index == app.selected))
+        .map(|(index, plugin)| {
+            plugin_item(
+                plugin,
+                index == app.selected,
+                app.native_status(&plugin.name),
+            )
+        })
         .collect();
     frame.render_widget(List::new(items).block(block), area);
 }
@@ -217,6 +235,16 @@ fn draw_overview(frame: &mut Frame, area: Rect, app: &App, block: Block) {
             lines.push(kv("type", &plugin.kind));
             lines.push(kv("language", &plugin.language));
             lines.push(kv("runtime", &plugin.runtime));
+            if plugin.is_native() {
+                lines.push(kv(
+                    "process",
+                    app.native_status(&plugin.name).unwrap_or("stopped"),
+                ));
+                lines.push(Line::from(Span::styled(
+                    "native UIs run with your user privileges; they are not sandboxed",
+                    Style::default().fg(WARN),
+                )));
+            }
             if let Some(served) = &plugin.served_on {
                 lines.push(kv("served on", served));
             }
@@ -414,8 +442,9 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         ("↑ / ↓  or  j / k", "select plugin"),
         ("Tab / Shift+Tab  or  1-5", "switch view"),
         ("PgUp / PgDn", "scroll manifest and overview"),
-        ("r", "reload selected plugin"),
-        ("s", "start / stop selected service"),
+        ("r", "reload selected plugin; restart selected native UI"),
+        ("s", "start / stop selected service or native UI"),
+        ("S / X", "start all / stop all native UIs"),
         ("R", "rebuild app, then reload stateless plugins"),
         ("o", "open UI (or host) in the browser"),
         ("Call view: ← / →", "choose export"),

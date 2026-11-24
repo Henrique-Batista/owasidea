@@ -7,12 +7,12 @@ use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use serde_json::Value;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 pub const OUTPUT_CAP: usize = 2000;
 pub const LOG_CAP: usize = 500;
 pub const KEY_HINTS: &str =
-    "↑↓ plugin · r reload · s service · R rebuild · o open UI · ? help · q quit";
+    "↑↓ plugin · r reload/restart · s service/native · S/X all · R rebuild · o open UI · ? help · q quit";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
@@ -71,6 +71,11 @@ pub enum Action {
     Reload(String),
     ServiceStart(String),
     ServiceStop(String),
+    NativeStart(String),
+    NativeStop(String),
+    NativeRestart(String),
+    NativeStartAll,
+    NativeStopAll,
     Rebuild {
         reload: Vec<String>,
     },
@@ -101,6 +106,7 @@ pub struct App {
     pub hot_reload: bool,
     pub last_reload: Vec<ReloadRecord>,
     pub plugins: Vec<PluginRow>,
+    pub native_uis: BTreeMap<String, String>,
     pub selected: usize,
     pub tab: Tab,
     pub scroll: u16,
@@ -133,6 +139,7 @@ impl App {
             hot_reload: false,
             last_reload: Vec::new(),
             plugins: Vec::new(),
+            native_uis: BTreeMap::new(),
             selected: 0,
             tab: Tab::Overview,
             scroll: 0,
@@ -194,6 +201,20 @@ impl App {
         if self.plugins.is_empty() {
             self.selected = 0;
         }
+    }
+
+    pub fn apply_native_status(
+        &mut self,
+        statuses: BTreeMap<String, crate::native_ui::ProcessState>,
+    ) {
+        self.native_uis = statuses
+            .into_iter()
+            .map(|(name, state)| (name, state.as_str().to_string()))
+            .collect();
+    }
+
+    pub fn native_status(&self, name: &str) -> Option<&str> {
+        self.native_uis.get(name).map(String::as_str)
     }
 
     pub fn apply_offline(&mut self) {
@@ -377,7 +398,7 @@ impl App {
                 let reload = self
                     .plugins
                     .iter()
-                    .filter(|p| !p.is_service())
+                    .filter(|p| !p.is_service() && !p.is_native())
                     .map(|p| p.name.clone())
                     .collect();
                 return Some(Action::Rebuild { reload });
@@ -433,15 +454,22 @@ impl App {
                 }
             }
             KeyCode::Char('r') => {
+                if self.selected_plugin().is_some_and(PluginRow::is_native) {
+                    return self
+                        .selected_plugin()
+                        .map(|p| Action::NativeRestart(p.name.clone()));
+                }
                 return self
                     .selected_plugin()
                     .map(|p| Action::Reload(p.name.clone()));
             }
+            KeyCode::Char('S') => return Some(Action::NativeStartAll),
+            KeyCode::Char('X') => return Some(Action::NativeStopAll),
             KeyCode::Char('R') => {
                 let reload = self
                     .plugins
                     .iter()
-                    .filter(|p| !p.is_service())
+                    .filter(|p| !p.is_service() && !p.is_native())
                     .map(|p| p.name.clone())
                     .collect();
                 return Some(Action::Rebuild { reload });
@@ -460,6 +488,16 @@ impl App {
 
     fn service_toggle(&mut self) -> Option<Action> {
         let plugin = self.selected_plugin()?.clone();
+        if plugin.is_native() {
+            let running = self
+                .native_status(&plugin.name)
+                .is_some_and(|status| status == "running");
+            return Some(if running {
+                Action::NativeStop(plugin.name)
+            } else {
+                Action::NativeStart(plugin.name)
+            });
+        }
         if !plugin.is_service() {
             self.set_status(
                 Level::Error,
@@ -859,5 +897,47 @@ mod tests {
         });
         assert_eq!(default_args(&manifest, "score"), "[[],0,\"\",false]");
         assert_eq!(default_args(&manifest, "missing"), "[]");
+    }
+
+    #[test]
+    fn native_ui_actions_follow_process_state() {
+        let mut app = app_with(vec![PluginRow {
+            name: "board".into(),
+            kind: "native-ui".into(),
+            runtime: "native".into(),
+            language: "native".into(),
+            exports: Vec::new(),
+            served_on: None,
+            service: None,
+        }]);
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('s'))),
+            Some(Action::NativeStart("board".into()))
+        );
+        app.apply_native_status(BTreeMap::from([(
+            "board".to_string(),
+            crate::native_ui::ProcessState::Running,
+        )]));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('s'))),
+            Some(Action::NativeStop("board".into()))
+        );
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('r'))),
+            Some(Action::NativeRestart("board".into()))
+        );
+        app.apply_native_status(BTreeMap::from([(
+            "board".to_string(),
+            crate::native_ui::ProcessState::Failed,
+        )]));
+        assert_eq!(app.native_status("board"), Some("failed"));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('S'))),
+            Some(Action::NativeStartAll)
+        );
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('X'))),
+            Some(Action::NativeStopAll)
+        );
     }
 }

@@ -1,0 +1,12 @@
+[package]
+name = "window"
+version = "0.1.0"
+edition = "2021"
+
+# Standalone workspace: building the example never touches the framework root.
+[workspace]
+
+[dependencies]
+gpui = "=0.2.2"
+# gpui 0.2.2 pulls xattr 0.2.3, which no longer compiles against libc >= 0.2.190.
+libc = "=0.2.189"

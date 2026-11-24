@@ -9,6 +9,7 @@
 # --- Owasidea build output ---------------------------------------------------
 # Manifests, permission snapshots and UI indexes are regenerated from WIT.
 **/manifests/*.manifest.json
+**/manifests/native-ui.json
 **/manifests/permissions.*.json
 **/src/bindings.rs
 **/Owasidea.GlobalUsings.g.cs
@@ -18,6 +19,8 @@
 # Tauri config rendered by `owasidea config render`.
 **/tauri.generated.conf.json
 **/tauri.dev.conf.json
+# Tauri sidecars staged by `owasidea bundle`.
+**/binaries/*-*
 # Lifecycle installers (Linux, macOS, Windows).
 *.AppImage
 *.deb

@@ -16,7 +16,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-EXAMPLES=(hello notes ticker interop)
+EXAMPLES=(hello notes ticker interop gpui-counter)
 
 if [ -n "${OWASIDEA_BIN:-}" ]; then
   BIN="$OWASIDEA_BIN"
@@ -50,10 +50,12 @@ for name in "${EXAMPLES[@]}"; do
   echo "==> $name: build"
   "$BIN" --config "$dir/wasm-app.toml" build
   echo "==> $name: smoke"
-  "$BIN" --config "$dir/wasm-app.toml" smoke --no-build
-  if [ "${OWASIDEA_EXAMPLES_SKIP_UI:-0}" != "1" ]; then
+  # Native UIs need a display and a window manager; the example suite runs the
+  # host headlessly and only checks the build, manifests and plugin calls.
+  OWASIDEA_NO_NATIVE_UI=1 "$BIN" --config "$dir/wasm-app.toml" smoke --no-build
+  if [ "${OWASIDEA_EXAMPLES_SKIP_UI:-0}" != "1" ] && [ "$name" != "gpui-counter" ]; then
     echo "==> $name: UI tests"
-    "$BIN" --config "$dir/wasm-app.toml" test --no-build --no-smoke
+    OWASIDEA_NO_NATIVE_UI=1 "$BIN" --config "$dir/wasm-app.toml" test --no-build --no-smoke
   fi
   echo "==> $name: ok"
 done

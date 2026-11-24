@@ -166,3 +166,51 @@ fn go_typescript_and_csharp_scaffolds_have_no_wit_file() {
         );
     }
 }
+
+#[test]
+fn blazor_scaffold_registers_published_wwwroot_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("wasm-app.toml");
+    let init = Command::cargo_bin("owasidea")
+        .unwrap()
+        .args(["init"])
+        .arg(dir.path())
+        .args(["--preset", "minimal"])
+        .output()
+        .unwrap();
+    assert!(init.status.success(), "init failed");
+
+    let output = Command::cargo_bin("owasidea")
+        .unwrap()
+        .args(["--config"])
+        .arg(&config)
+        .args([
+            "plugin", "new", "demo-ui", "--lang", "blazor", "--type", "ui",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "plugin new failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // `dotnet publish -o dist` nests the browsable files under wwwroot/.
+    let config_raw = fs::read_to_string(&config).unwrap();
+    assert!(
+        config_raw.contains("ui_entry = \"wwwroot/index.html\""),
+        "blazor config must point at the published entry: {config_raw}"
+    );
+
+    let plugin = dir.path().join("plugins/demo-ui");
+    let csproj = fs::read_to_string(plugin.join("demo-ui.csproj")).unwrap();
+    assert!(
+        csproj.contains("Microsoft.AspNetCore.Components.WebAssembly"),
+        "blazor project needs the WebAssembly package: {csproj}"
+    );
+    let program = fs::read_to_string(plugin.join("Program.cs")).unwrap();
+    assert!(
+        program.contains("using BlazorApp;"),
+        "Program.cs must import the razor namespace: {program}"
+    );
+}

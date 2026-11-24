@@ -15,10 +15,12 @@ pub fn cmd_verify(dist: &Path, json: bool) -> anyhow::Result<()> {
         ok: bool,
         errors: Vec<ErrObj>,
         checked: usize,
+        native_uis: usize,
     }
 
     let mut errors: Vec<ErrObj> = Vec::new();
     let mut checked = 0usize;
+    let mut native_uis = 0usize;
     let mut push_err = |file: String, code: &str, message: String| {
         errors.push(ErrObj {
             file,
@@ -37,6 +39,7 @@ pub fn cmd_verify(dist: &Path, json: bool) -> anyhow::Result<()> {
             ok: false,
             errors,
             checked,
+            native_uis,
         };
         if json {
             println!("{}", serde_json::to_string_pretty(&report).unwrap());
@@ -60,7 +63,7 @@ pub fn cmd_verify(dist: &Path, json: bool) -> anyhow::Result<()> {
         }
     }
     manifest_files.sort();
-    if manifest_files.is_empty() {
+    if manifest_files.is_empty() && !manifest_dir.join("native-ui.json").is_file() {
         push_err(
             manifest_dir.display().to_string(),
             "NO_MANIFESTS",
@@ -375,17 +378,110 @@ pub fn cmd_verify(dist: &Path, json: bool) -> anyhow::Result<()> {
         }
     }
 
+    // native-ui.json index (built next to manifests; bundles stage it too).
+    let native_index_path = manifest_dir.join("native-ui.json");
+    if native_index_path.is_file() {
+        let raw = std::fs::read_to_string(&native_index_path).unwrap_or_default();
+        match serde_json::from_str::<crate::native_ui::Index>(&raw) {
+            Ok(index) => {
+                let mut listed = std::collections::BTreeSet::new();
+                for entry in &index.plugins {
+                    native_uis += 1;
+                    let expected_path = dist.join(&entry.binary);
+                    let path = if expected_path.is_file() {
+                        expected_path
+                    } else {
+                        manifest_dir.parent().unwrap_or(dist).join(&entry.binary)
+                    };
+                    listed.insert(entry.binary.replace('\\', "/"));
+                    if !path.is_file() {
+                        push_err(
+                            native_index_path
+                                .strip_prefix(dist)
+                                .unwrap_or(&native_index_path)
+                                .display()
+                                .to_string(),
+                            "NATIVE_UI_MISSING",
+                            format!("plugin {}: missing {}", entry.name, path.display()),
+                        );
+                        continue;
+                    }
+                    let bytes = std::fs::read(&path).unwrap_or_default();
+                    let actual = format!("{:x}", Sha256::digest(&bytes));
+                    if actual != entry.sha256 {
+                        push_err(
+                            path.strip_prefix(dist)
+                                .unwrap_or(&path)
+                                .display()
+                                .to_string(),
+                            "NATIVE_UI_CHECKSUM",
+                            format!(
+                                "plugin {}: expected {} got {}",
+                                entry.name, entry.sha256, actual
+                            ),
+                        );
+                    }
+                }
+                let native_dir = dist.join("native");
+                if let Ok(entries) = std::fs::read_dir(&native_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.is_dir() {
+                            if let Ok(files) = std::fs::read_dir(&path) {
+                                for file in files.flatten() {
+                                    let relative = file
+                                        .path()
+                                        .strip_prefix(dist)
+                                        .unwrap_or(&file.path())
+                                        .display()
+                                        .to_string()
+                                        .replace('\\', "/");
+                                    if !listed.contains(&relative) {
+                                        push_err(
+                                            relative.clone(),
+                                            "NATIVE_UI_UNLISTED",
+                                            format!("native UI binary is not listed in native-ui.json: {relative}"),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Err(error) => push_err(
+                native_index_path
+                    .strip_prefix(dist)
+                    .unwrap_or(&native_index_path)
+                    .display()
+                    .to_string(),
+                "NATIVE_UI_INDEX_INVALID",
+                format!("invalid native UI index: {error}"),
+            ),
+        }
+    } else if dist.join("native").is_dir() {
+        push_err(
+            "native".to_string(),
+            "NATIVE_UI_INDEX_MISSING",
+            "native UI binaries exist without native-ui.json".to_string(),
+        );
+    }
+
     let ok = errors.is_empty();
     let report = Report {
         ok,
         errors: errors.clone(),
         checked,
+        native_uis,
     };
     if json {
         println!("{}", serde_json::to_string_pretty(&report).unwrap());
     } else {
         if ok {
-            println!("Verification OK ({} checked).", checked);
+            println!(
+                "Verification OK ({} checked, {} native UI(s)).",
+                checked, native_uis
+            );
         } else {
             for e in &errors {
                 println!("{}: [{}] {}", e.file, e.code, e.message);

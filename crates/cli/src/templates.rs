@@ -41,6 +41,10 @@ pub const CPP_IMPL: &str = include_str!("../templates/plugin/cpp/impl.cpp");
 
 pub const PLUGIN_README: &str = include_str!("../templates/plugin/README.md");
 
+pub const NATIVE_GPUI_CARGO: &str = include_str!("../templates/plugin/native/gpui/Cargo.toml");
+pub const NATIVE_GPUI_MAIN: &str = include_str!("../templates/plugin/native/gpui/src/main.rs");
+pub const NATIVE_README: &str = include_str!("../templates/plugin/native/README.md");
+
 pub const SVELTE_PACKAGE_JSON: &str = include_str!("../templates/plugin/ui/svelte/package.json");
 pub const SVELTE_VITE_CONFIG: &str = include_str!("../templates/plugin/ui/svelte/vite.config.ts");
 pub const SVELTE_TSCONFIG: &str = include_str!("../templates/plugin/ui/svelte/tsconfig.json");

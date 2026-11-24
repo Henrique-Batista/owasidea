@@ -240,6 +240,10 @@ fn check_plugin(
     app_glue: Option<&str>,
     report: &mut PluginReport,
 ) {
+    if crate::native_ui::is_native(plugin) {
+        check_native_ui(root, manifest_dir, name, plugin, report);
+        return;
+    }
     let manifest_path = manifest_dir.join(format!("{name}.manifest.json"));
     if !manifest_path.exists() {
         report.entries.push(Entry {
@@ -316,6 +320,46 @@ fn check_ui_manifest(manifest: &Value, report: &mut PluginReport) {
         report.error("UI manifest runtime/type mismatch");
     } else {
         report.note("UI manifest ok");
+    }
+}
+
+fn check_native_ui(
+    root: &Path,
+    manifest_dir: &Path,
+    name: &str,
+    plugin: &PluginSection,
+    report: &mut PluginReport,
+) {
+    if let Err(error) = crate::native_ui::validate_declaration(name, plugin) {
+        report.error(error.to_string());
+        return;
+    }
+    let binary = match crate::native_ui::resolve_entry(root, name, plugin, true) {
+        Ok(binary) => binary,
+        Err(error) => {
+            report.error(error.to_string());
+            return;
+        }
+    };
+    let index = match crate::native_ui::read_index(manifest_dir) {
+        Ok(Some(index)) => index,
+        Ok(None) => {
+            report.error("native-ui.json index is missing; run `owasidea build`");
+            return;
+        }
+        Err(error) => {
+            report.error(error.to_string());
+            return;
+        }
+    };
+    let Some(entry) = index.plugins.iter().find(|entry| entry.name == name) else {
+        report.error(format!("plugin {name} is missing from native-ui.json"));
+        return;
+    };
+    match crate::native_ui::digest(&binary) {
+        Ok(actual) if actual == entry.sha256 => report.note("native UI ok"),
+        Ok(_) => report.error("NATIVE UI CHECKSUM MISMATCH"),
+        Err(error) => report.error(format!("cannot read native UI binary: {error}")),
     }
 }
 
@@ -554,5 +598,141 @@ mod tests {
         assert!(!min_host_is_too_new(owasidea_host::HOST_VERSION));
         assert!(min_host_is_too_new("9999.0.0"));
         assert!(min_host_is_too_new("not-a-version"));
+    }
+
+    fn native_fixture(name: &str) -> (PathBuf, PluginSection) {
+        let root = std::env::temp_dir().join(format!(
+            "owasidea-validate-native-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("plugins/board")).unwrap();
+        let plugin = PluginSection {
+            path: "plugins/board".to_string(),
+            language: "gpui".to_string(),
+            kind: "native-ui".to_string(),
+            runtime: Some("native".to_string()),
+            native_entry: Some("board".to_string()),
+            ..PluginSection::default()
+        };
+        (root, plugin)
+    }
+
+    #[cfg(unix)]
+    fn write_binary(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, b"#!/bin/sh\nexit 0\n").unwrap();
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
+
+    #[test]
+    fn native_ui_rejects_runtime_mismatch() {
+        let (root, mut plugin) = native_fixture("runtime");
+        plugin.runtime = Some("wasi-component".to_string());
+        let mut report = PluginReport::new("board");
+        check_native_ui(
+            &root,
+            &root.join("manifests"),
+            "board",
+            &plugin,
+            &mut report,
+        );
+        assert!(!report.is_ok());
+        assert!(report
+            .errors()
+            .next()
+            .unwrap()
+            .contains("required together"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_ui_rejects_webview_fields() {
+        let (root, mut plugin) = native_fixture("webview");
+        plugin.ui_entry = Some("index.html".to_string());
+        let mut report = PluginReport::new("board");
+        check_native_ui(
+            &root,
+            &root.join("manifests"),
+            "board",
+            &plugin,
+            &mut report,
+        );
+        assert!(!report.is_ok());
+        assert!(report.errors().next().unwrap().contains("webview"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_ui_rejects_empty_build_argv() {
+        let (root, mut plugin) = native_fixture("empty-argv");
+        plugin.native_build = vec![String::new()];
+        let mut report = PluginReport::new("board");
+        check_native_ui(
+            &root,
+            &root.join("manifests"),
+            "board",
+            &plugin,
+            &mut report,
+        );
+        assert!(!report.is_ok());
+        assert!(report.errors().next().unwrap().contains("program name"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_ui_rejects_escaping_entry() {
+        let (root, mut plugin) = native_fixture("escape");
+        plugin.native_entry = Some("../outside".to_string());
+        let mut report = PluginReport::new("board");
+        check_native_ui(
+            &root,
+            &root.join("manifests"),
+            "board",
+            &plugin,
+            &mut report,
+        );
+        assert!(!report.is_ok());
+        assert!(report
+            .errors()
+            .next()
+            .unwrap()
+            .contains("safe relative path"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_ui_requires_the_built_entry() {
+        let (root, plugin) = native_fixture("missing-entry");
+        let mut report = PluginReport::new("board");
+        check_native_ui(
+            &root,
+            &root.join("manifests"),
+            "board",
+            &plugin,
+            &mut report,
+        );
+        assert!(!report.is_ok());
+        assert!(report.errors().next().unwrap().contains("not found"));
+
+        write_binary(&root.join("plugins/board/board"));
+        let mut report = PluginReport::new("board");
+        check_native_ui(
+            &root,
+            &root.join("manifests"),
+            "board",
+            &plugin,
+            &mut report,
+        );
+        assert!(report
+            .errors()
+            .any(|error| error.contains("native-ui.json")));
+        let _ = std::fs::remove_dir_all(root);
     }
 }

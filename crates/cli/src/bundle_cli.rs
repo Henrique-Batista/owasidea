@@ -19,6 +19,7 @@ pub fn cmd_bundle_cli(root: &Path, config: &Path, output: &Path) -> anyhow::Resu
     std::fs::copy(config, output.join("wasm-app.toml"))?;
 
     let staged = crate::dist_stage::stage_dist(root, output)?;
+    rewrite_native_entries(output)?;
 
     let launcher = output.join(if cfg!(windows) { "run.bat" } else { "run.sh" });
     if cfg!(windows) {
@@ -48,16 +49,48 @@ pub fn cmd_bundle_cli(root: &Path, config: &Path, output: &Path) -> anyhow::Resu
          generated manifests and components in this directory.\n\
          \n\
          The HTTP API listens on [host].addr from wasm-app.toml (loopback by\n\
-         default). Use `owasidea call` or any HTTP client to invoke exports.\n",
+         default). Use `owasidea call` or any HTTP client to invoke exports.\n\
+         \n\
+         Native UI binaries live under native/ and start with the app; pass\n\
+         --no-native-ui to run only the host.\n",
     )?;
 
     println!("CLI bundle: {}", output.display());
     println!(
-        "  {} manifest(s), {} component(s), UI {}",
+        "  {} manifest(s), {} component(s), {} native UI(s), UI {}",
         staged.manifests,
         staged.components,
+        staged.native_uis,
         if staged.ui { "staged" } else { "absent" }
     );
     println!("  launcher: {}", launcher.display());
+    Ok(())
+}
+
+/// Point the bundled config at the staged native UI copies. The launcher then
+/// starts them through the normal `owasidea run` path.
+fn rewrite_native_entries(output: &Path) -> anyhow::Result<()> {
+    let index_path = output.join("manifests").join("native-ui.json");
+    if !index_path.is_file() {
+        return Ok(());
+    }
+    let raw = std::fs::read_to_string(&index_path)?;
+    let index: crate::native_ui::Index = serde_json::from_str(&raw)?;
+    let config_path = output.join("wasm-app.toml");
+    let mut config: toml::Value = toml::from_str(&std::fs::read_to_string(&config_path)?)?;
+    for entry in &index.plugins {
+        if let Some(plugin) = config
+            .get_mut("plugins")
+            .and_then(toml::Value::as_table_mut)
+            .and_then(|plugins| plugins.get_mut(&entry.name))
+            .and_then(toml::Value::as_table_mut)
+        {
+            plugin.insert(
+                "native_entry".to_string(),
+                toml::Value::String(entry.binary.clone()),
+            );
+        }
+    }
+    std::fs::write(&config_path, toml::to_string_pretty(&config)?)?;
     Ok(())
 }

@@ -1,4 +1,9 @@
-# Webview UI plugins
+# UI plugins
+
+Owasidea supports two UI models: sandboxed webview plugins (`type = "ui"`) and
+trusted native processes (`type = "native-ui"`).
+
+## Webview UI plugins
 
 UI plugins are static browser applications. They run only in the Tauri webview;
 the Rust host never loads their WASM module or starts a JavaScript runtime.
@@ -30,6 +35,57 @@ ui_build = ["trunk", "build", "--release", "--dist", "dist"]
 when build output already exists. `owasidea build` copies the static output to
 `ui/public/plugins/<name>/` and generates a `js-wasm` manifest with per-file and
 bundle SHA-256 digests.
+
+## Native UI plugins (trusted local processes)
+
+`type = "native-ui"` is a different model: a local executable that opens its own
+window and talks to the host over loopback HTTP. Use it when a webview is not
+enough (for example GPUI). It is not sandboxed and does not go through the WASI
+capability broker.
+
+| | Webview UI (`type = "ui"`) | Native UI (`type = "native-ui"`) |
+| --- | --- | --- |
+| Runtime | `js-wasm`, sandboxed iframe | `native`, normal process |
+| Build | `ui_build` → static assets | `native_build` → executable |
+| Trust | sandboxed, capability-limited | unrestricted, user privileges |
+| Host route | static assets + bridge | none; discovery only |
+| Packaging | copied into the webview bundle | sidecar (desktop) or `native/` (CLI) |
+
+```toml
+[plugins.board]
+path = "plugins/board"
+language = "gpui"
+type = "native-ui"
+runtime = "native"
+native_build = ["cargo", "build", "--release"]
+native_entry = "target/release/board"
+```
+
+`native_entry` is relative to the plugin directory and must stay inside it.
+After the build, `owasidea build` hashes the binary and writes
+`manifests/native-ui.json`:
+
+```json
+{
+  "schema": "native-v1",
+  "trust": "unrestricted-local-process",
+  "plugins": [
+    {"name": "board", "type": "native-ui", "runtime": "native",
+     "binary": "plugins/board/target/release/board",
+     "sha256": "…", "trust": "unrestricted"}
+  ]
+}
+```
+
+The host reads this index and merges entries into `GET /plugins` with empty
+`exports`; it does not serve `/app/{name}` and does not accept
+`/plugin/{name}/call` for them. `owasidea run` starts the host, waits for
+`/health`, then launches each native UI with `OWASIDEA_HOST`, `OWASIDEA_PLUGIN`
+and `OWASIDEA_MANIFESTS`. Logs are prefixed `[<name>]`. A crash is reported and
+the process is not restarted; use `owasidea dev` for explicit restart actions.
+
+Without a display (`DISPLAY`/`WAYLAND_DISPLAY` unset on Linux) the CLI warns and
+keeps the host running. `--no-native-ui` starts only the host.
 
 ## Supported WASM web frameworks
 
